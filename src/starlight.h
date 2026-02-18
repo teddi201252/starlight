@@ -5,6 +5,7 @@
 typedef struct {
     peos_fb_info_t fb;
     uint8_t *frame;
+    size_t row_stride;
     size_t frame_bytes;
     size_t map_bytes;
     uint8_t bytespp;
@@ -24,5 +25,4 @@ typedef struct {
     uint32_t fps_frames;
     uint32_t fps_value;
 } sl_ctx_t;
-
 

@@ -6,7 +6,7 @@ void sl_put_pixel(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint8_t r, uint8_t g, u
     if (!ctx || !ctx->frame) return;
     if (x >= ctx->fb.width || y >= ctx->fb.height) return;
 
-    size_t off = ((size_t)y * (size_t)ctx->fb.width + (size_t)x) * (size_t)ctx->bytespp;
+    size_t off = ((size_t)y * ctx->row_stride) + ((size_t)x * (size_t)ctx->bytespp);
     ctx->frame[off + 0] = b;
     ctx->frame[off + 1] = g;
     ctx->frame[off + 2] = r;
@@ -27,7 +27,7 @@ void sl_fill_rect(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
 void sl_draw_char(sl_ctx_t *ctx, uint32_t x, uint32_t y, char c, uint8_t r, uint8_t g, uint8_t b) {
     if (!ctx || !ctx->frame) return;
 
-    uint8_t *glyph = peos_font8x8_glyph(c);
+    const uint8_t *glyph = peos_font8x8_glyph(c);
     for (uint32_t j = 0; j < 8; j++) {
         for (uint32_t i = 0; i < 8; i++) {
             if (glyph[j] & (1 << i)) {
