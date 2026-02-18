@@ -4,7 +4,7 @@
 #define SL_CURSOR_W 3u
 #define SL_CURSOR_H 3u
 #ifndef SL_ENABLE_BG_REDRAW
-#define SL_ENABLE_BG_REDRAW 0
+#define SL_ENABLE_BG_REDRAW 1
 #endif
 #ifndef SL_TARGET_FPS
 #define SL_TARGET_FPS 144u
