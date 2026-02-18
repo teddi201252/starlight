@@ -18,4 +18,11 @@ typedef struct {
     uint32_t cursor_saved_y;
     uint32_t cursor_saved_w;
     uint32_t cursor_saved_h;
+
+    // FPS Counter
+    uint64_t fps_last_ns;
+    uint32_t fps_frames;
+    uint32_t fps_value;
 } sl_ctx_t;
+
+
