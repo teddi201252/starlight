@@ -4,8 +4,8 @@ CC := x86_64-elf-gcc
 CFLAGS ?= -std=gnu11 -O2 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pie -mno-red-zone -mcmodel=kernel
 LDFLAGS ?= -nostdlib -ffreestanding -fno-pie -Wl,-T,$(ROOT_DIR)/userland/linker.ld -Wl,-z,max-page-size=0x1000
 
-SRC := src/starlight.c
-OBJ := build/starlight.o
+SRC := src/starlight.c src/pixels.c
+OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
 DEP := $(OBJ:.o=.d)
 BIN ?= $(ROOT_DIR)/userland/bin/starlight
 
@@ -13,7 +13,7 @@ INCLUDES := -I$(ROOT_DIR)/userland/include
 
 all: $(BIN)
 
-$(OBJ): $(SRC)
+build/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
