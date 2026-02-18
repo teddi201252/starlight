@@ -3,6 +3,46 @@
 
 #define SL_CURSOR_W 3u
 #define SL_CURSOR_H 3u
+#ifndef SL_TARGET_FPS
+#define SL_TARGET_FPS 144u
+#endif
+
+#if SL_TARGET_FPS == 0
+#error "SL_TARGET_FPS must be > 0"
+#endif
+
+#define SL_FRAME_NS (1000000000ull / (uint64_t)(SL_TARGET_FPS))
+#define SL_TICK_NS 1000000ull
+#define SL_PACER_SPIN_NS 300000ull
+
+// Converts a uint32_t to decimal text.
+// Returns `out` on success, NULL on error.
+static char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap) {
+    if (!out || out_cap == 0) return NULL;
+
+    if (value == 0) {
+        if (out_cap < 2) return NULL;
+        out[0] = '0';
+        out[1] = '\0';
+        return out;
+    }
+
+    char tmp[10]; // max decimal digits for uint32_t
+    size_t n = 0;
+    while (value != 0 && n < sizeof(tmp)) {
+        tmp[n++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    }
+
+    if (n + 1 > out_cap) return NULL;
+
+    for (size_t i = 0; i < n; i++) {
+        out[i] = tmp[n - 1 - i];
+    }
+    out[n] = '\0';
+    return out;
+}
+
 
 // Initialize renderer state, map framebuffer memory, and enable raw input mode.
 static int sl_init(sl_ctx_t *ctx) {
@@ -37,6 +77,10 @@ static int sl_init(sl_ctx_t *ctx) {
 
     ctx->cursor_x = ctx->fb.width / 2u;
     ctx->cursor_y = ctx->fb.height / 2u;
+
+    ctx->fps_last_ns = peos_time_ns();
+    ctx->fps_frames = 0;
+    ctx->fps_value = 0;
 
     return 1;
 }
@@ -186,6 +230,34 @@ static int sl_present(sl_ctx_t *ctx) {
     return (int64_t)wr >= 0 && wr == (uint64_t)ctx->frame_bytes;
 }
 
+// Pace the main loop to ~60 FPS using coarse sleep plus a short spin wait.
+static void sl_frame_pace(uint64_t *next_deadline_ns) {
+    if (!next_deadline_ns) return;
+
+    uint64_t now = peos_time_ns();
+    if (*next_deadline_ns == 0) {
+        *next_deadline_ns = now + SL_FRAME_NS;
+        return;
+    }
+
+    if (now < *next_deadline_ns) {
+        uint64_t remaining = *next_deadline_ns - now;
+        if (remaining > (SL_PACER_SPIN_NS + SL_TICK_NS)) {
+            uint64_t sleep_ns = remaining - SL_PACER_SPIN_NS;
+            uint64_t sleep_ticks = sleep_ns / SL_TICK_NS;
+            if (sleep_ticks) peos_sleep(sleep_ticks);
+        }
+        while ((now = peos_time_ns()) < *next_deadline_ns) {
+            __asm__ volatile("pause");
+        }
+    } else if ((now - *next_deadline_ns) > (SL_FRAME_NS * 4ull)) {
+        // If the app lags badly, resync pacing to avoid long-term drift.
+        *next_deadline_ns = now;
+    }
+
+    *next_deadline_ns += SL_FRAME_NS;
+}
+
 // Entry point of the Starlight desktop loop.
 int main(void) {
     sl_ctx_t ctx;
@@ -209,6 +281,8 @@ int main(void) {
         peos_exit(1);
     }
 
+    uint64_t next_frame_ns = peos_time_ns() + SL_FRAME_NS;
+
     for (;;) {
         uint32_t old_x = ctx.cursor_x;
         uint32_t old_y = ctx.cursor_y;
@@ -217,9 +291,30 @@ int main(void) {
             sl_restore_under_cursor(&ctx);
             sl_capture_under_cursor(&ctx, ctx.cursor_x, ctx.cursor_y);
             sl_render_cursor(&ctx);
-            if (!sl_present(&ctx)) break;
         }
-        peos_sleep(16);
+
+        // FPS Counter
+        ctx.fps_frames++;
+        uint64_t now = peos_time_ns();
+        uint64_t dt = now - ctx.fps_last_ns;
+        if (dt >= 1000000000ull) {
+            ctx.fps_value = (uint32_t)((ctx.fps_frames * 1000000000ull) / dt);
+            ctx.fps_frames = 0;
+            ctx.fps_last_ns = now;
+        }
+
+        char fps_str[16];
+        if (!sl_u32_to_str(ctx.fps_value, fps_str, sizeof(fps_str))) {
+            fps_str[0] = '?';
+            fps_str[1] = '\0';
+        }
+        sl_fill_rect(&ctx, 0, 0, 128, 16, 0x00, 0x00, 0x00);
+        sl_draw_text(&ctx, 0, 0, "fps: ", 0xFF, 0xFF, 0xFF);
+        sl_draw_text(&ctx, 32, 0, fps_str, 0xFF, 0xFF, 0xFF);
+        if (!sl_present(&ctx)) break;
+
+        sl_frame_pace(&next_frame_ns);
+
     }
 
     sl_shutdown(&ctx);
