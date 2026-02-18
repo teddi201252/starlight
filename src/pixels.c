@@ -1,5 +1,6 @@
 #include "pixels.h"
 
+// Write a single pixel in RGB order with bounds checking.
 void sl_put_pixel(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint8_t r, uint8_t g, uint8_t b) {
     if (!ctx || !ctx->frame) return;
     if (x >= ctx->fb.width || y >= ctx->fb.height) return;
@@ -11,6 +12,7 @@ void sl_put_pixel(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint8_t r, uint8_t g, u
     if (ctx->bytespp == 4) ctx->frame[off + 3] = 0xFF;
 }
 
+// Fill a rectangular area by repeatedly writing individual pixels.
 void sl_fill_rect(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                   uint8_t r, uint8_t g, uint8_t b) {
     if (!ctx || !ctx->frame) return;

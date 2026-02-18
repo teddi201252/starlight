@@ -8,7 +8,14 @@ typedef struct {
     size_t frame_bytes;
     size_t map_bytes;
     uint8_t bytespp;
+    uint8_t fb_direct;
+    uint8_t cursor_saved_valid;
+    uint8_t cursor_saved[36]; // 3x3 cursor * max 4 bytes/pixel
     int input_raw;
     uint32_t cursor_x;
     uint32_t cursor_y;
+    uint32_t cursor_saved_x;
+    uint32_t cursor_saved_y;
+    uint32_t cursor_saved_w;
+    uint32_t cursor_saved_h;
 } sl_ctx_t;
