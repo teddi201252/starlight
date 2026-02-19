@@ -1,8 +1,13 @@
 #include "starlight.h"
-#include "pixels.h"
+#include "resources.h"
+#include "render/pixels.h"
+#include "render/image_decode.h"
+#include <stdbool.h>
 
 #define SL_CURSOR_W 3u
 #define SL_CURSOR_H 3u
+#define SL_HW_CURSOR_W 20u
+#define SL_HW_CURSOR_H 20u
 #ifndef SL_ENABLE_BG_REDRAW
 #define SL_ENABLE_BG_REDRAW 1
 #endif
@@ -46,6 +51,78 @@ static char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap) {
     return out;
 }
 
+static void sl_build_default_cursor_rgba(uint8_t *dst, uint32_t w, uint32_t h) {
+    if (!dst || w == 0 || h == 0) return;
+    peos_memset(dst, 0, (size_t)w * (size_t)h * 4u);
+
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            bool body = (x <= (y / 2u)) && (x < (w / 2u)) && (y < (h - 6u));
+            bool stem = (x < 4u) && (y < h);
+            if (!(body || stem)) continue;
+
+            bool edge = (x == 0u) ||
+                        (y == 0u) ||
+                        (body && x == (y / 2u)) ||
+                        (stem && x == 3u);
+
+            size_t off = (((size_t)y * (size_t)w) + (size_t)x) * 4u;
+            if (edge) {
+                dst[off + 0] = 0x00; // R
+                dst[off + 1] = 0x00; // G
+                dst[off + 2] = 0x00; // B
+                dst[off + 3] = 0xFF; // A
+            } else {
+                dst[off + 0] = 0xFF; // R
+                dst[off + 1] = 0xFF; // G
+                dst[off + 2] = 0xFF; // B
+                dst[off + 3] = 0xFF; // A
+            }
+        }
+    }
+}
+
+static int sl_hw_cursor_apply(sl_ctx_t *ctx, const uint8_t *rgba,
+                              uint32_t w, uint32_t h, uint32_t hot_x, uint32_t hot_y) {
+    if (!ctx || !rgba || w == 0 || h == 0) return 0;
+    if (hot_x >= w || hot_y >= h) return 0;
+    if ((int64_t)peos_cursor_set_image_rgba(rgba, w, h, hot_x, hot_y) < 0) return 0;
+    (void)peos_cursor_move_abs(ctx->cursor_x, ctx->cursor_y);
+    if ((int64_t)peos_cursor_set_visible(1) < 0) return 0;
+    ctx->hw_cursor = 1u;
+    return 1;
+}
+
+static int sl_hw_cursor_set_default(sl_ctx_t *ctx) {
+    uint8_t cursor_rgba[SL_HW_CURSOR_W * SL_HW_CURSOR_H * 4u];
+    sl_build_default_cursor_rgba(cursor_rgba, SL_HW_CURSOR_W, SL_HW_CURSOR_H);
+    return sl_hw_cursor_apply(ctx, cursor_rgba, SL_HW_CURSOR_W, SL_HW_CURSOR_H, 0u, 0u);
+}
+
+static int sl_hw_cursor_load_resource(sl_ctx_t *ctx, const char *path) {
+    if (!ctx || !path || !path[0]) return 0;
+
+    sl_image_t img;
+    if (!sl_decode_image_file(path, &img)) return 0;
+
+    int ok = 0;
+    if (img.data &&
+        img.channels == 4u &&
+        img.width > 0u && img.height > 0u &&
+        img.width <= 64u && img.height <= 64u &&
+        img.stride >= (img.width * 4u)) {
+        ok = sl_hw_cursor_apply(ctx, img.data, img.width, img.height, 0u, 0u);
+    }
+
+    sl_image_free(&img);
+    return ok;
+}
+
+static void sl_hw_cursor_sync_pos(sl_ctx_t *ctx) {
+    if (!ctx || !ctx->hw_cursor) return;
+    (void)peos_cursor_move_abs(ctx->cursor_x, ctx->cursor_y);
+}
+
 
 // Initialize renderer state, map framebuffer memory, and enable raw input mode.
 static int sl_init(sl_ctx_t *ctx) {
@@ -84,6 +161,12 @@ static int sl_init(sl_ctx_t *ctx) {
 
     ctx->cursor_x = ctx->fb.width / 2u;
     ctx->cursor_y = ctx->fb.height / 2u;
+    ctx->hw_cursor = 0u;
+
+    // Try hardware cursor first, fallback to software cursor if unavailable.
+    if (sl_hw_cursor_set_default(ctx)) {
+        (void)sl_hw_cursor_load_resource(ctx, SL_RESOURCE_CURSOR);
+    }
 
     ctx->fps_last_ns = peos_time_ns();
     ctx->fps_frames = 0;
@@ -95,6 +178,7 @@ static int sl_init(sl_ctx_t *ctx) {
 // Restore input mode and release user-mapped memory when needed.
 static void sl_shutdown(sl_ctx_t *ctx) {
     if (!ctx) return;
+    if (ctx->hw_cursor) (void)peos_cursor_set_visible(0);
     if (ctx->input_raw) (void)peos_input_mode(PEOS_INPUT_MODE_COOKED);
     if (ctx->frame && !ctx->fb_direct) (void)peos_munmap((uint64_t)(uintptr_t)ctx->frame, ctx->map_bytes);
 }
@@ -109,6 +193,12 @@ static int sl_handle_input(sl_ctx_t *ctx) {
 
     for (uint64_t i = 0; i < n; i++) {
         if (evs[i].pressed && evs[i].code == PEOS_KEY_ESC) return 1;
+        if (evs[i].pressed && evs[i].code == PEOS_KEY_C) {
+            (void)sl_hw_cursor_load_resource(ctx, SL_RESOURCE_CURSOR);
+        }
+        if (evs[i].pressed && evs[i].code == PEOS_KEY_V) {
+            (void)sl_hw_cursor_set_default(ctx);
+        }
     }
 
     if (mr >= 0) {
@@ -250,9 +340,12 @@ int main(void) {
     } else {
         peos_puts("starlight: renderer mode = fallback copy\n");
     }
+    if (ctx.hw_cursor) peos_puts("starlight: cursor mode = hardware\n");
+    else peos_puts("starlight: cursor mode = software\n");
 
     sl_render_full(&ctx);
-    sl_render_cursor(&ctx);
+    if (!ctx.hw_cursor) sl_render_cursor(&ctx);
+    else sl_hw_cursor_sync_pos(&ctx);
     if (!sl_present(&ctx)) {
         sl_shutdown(&ctx);
         peos_exit(1);
@@ -265,9 +358,13 @@ int main(void) {
         uint32_t old_y = ctx.cursor_y;
         if (sl_handle_input(&ctx)) break;
         if (ctx.cursor_x != old_x || ctx.cursor_y != old_y) {
+            if (ctx.hw_cursor) {
+                sl_hw_cursor_sync_pos(&ctx);
+            } else {
 #if SL_ENABLE_BG_REDRAW
-            sl_render_bg_rect(&ctx, old_x, old_y, SL_CURSOR_W, SL_CURSOR_H);
+                sl_render_bg_rect(&ctx, old_x, old_y, SL_CURSOR_W, SL_CURSOR_H);
 #endif
+            }
         }
 
         // FPS Counter
@@ -288,7 +385,7 @@ int main(void) {
         sl_fill_rect(&ctx, 0, 0, 128, 16, 0x00, 0x00, 0x00);
         sl_draw_text(&ctx, 0, 0, "fps: ", 0xFF, 0xFF, 0xFF);
         sl_draw_text(&ctx, 32, 0, fps_str, 0xFF, 0xFF, 0xFF);
-        sl_render_cursor(&ctx);
+        if (!ctx.hw_cursor) sl_render_cursor(&ctx);
         if (!sl_present(&ctx)) break;
 
         sl_frame_pace(&next_frame_ns);
