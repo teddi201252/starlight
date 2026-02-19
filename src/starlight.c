@@ -123,12 +123,8 @@ static void sl_hw_cursor_sync_pos(sl_ctx_t *ctx) {
     (void)peos_cursor_move_abs(ctx->cursor_x, ctx->cursor_y);
 }
 
-
-// Initialize renderer state, map framebuffer memory, and enable raw input mode.
-static int sl_init(sl_ctx_t *ctx) {
+static int sl_update_fb_info(sl_ctx_t *ctx) {
     if (!ctx) return 0;
-    peos_memset(ctx, 0, sizeof(*ctx));
-
     if ((int64_t)peos_fbinfo(&ctx->fb) < 0) return 0;
     if (ctx->fb.bpp != 24 && ctx->fb.bpp != 32) return 0;
 
@@ -154,6 +150,15 @@ static int sl_init(sl_ctx_t *ctx) {
         if ((int64_t)map < 0) return 0;
         ctx->frame = (uint8_t *)(uintptr_t)map;
     }
+    return 1;
+}
+
+// Initialize renderer state, map framebuffer memory, and enable raw input mode.
+static int sl_init(sl_ctx_t *ctx) {
+    if (!ctx) return 0;
+    peos_memset(ctx, 0, sizeof(*ctx));
+    
+    if (!sl_update_fb_info(ctx)) return 0;
 
     if ((int64_t)peos_input_mode(PEOS_INPUT_MODE_RAW) == 0) {
         ctx->input_raw = 1;
@@ -193,12 +198,6 @@ static int sl_handle_input(sl_ctx_t *ctx) {
 
     for (uint64_t i = 0; i < n; i++) {
         if (evs[i].pressed && evs[i].code == PEOS_KEY_ESC) return 1;
-        if (evs[i].pressed && evs[i].code == PEOS_KEY_C) {
-            (void)sl_hw_cursor_load_resource(ctx, SL_RESOURCE_CURSOR);
-        }
-        if (evs[i].pressed && evs[i].code == PEOS_KEY_V) {
-            (void)sl_hw_cursor_set_default(ctx);
-        }
     }
 
     if (mr >= 0) {
