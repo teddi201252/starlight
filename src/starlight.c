@@ -232,29 +232,15 @@ static void sl_render_cursor(sl_ctx_t *ctx) {
 static void sl_render_full(sl_ctx_t *ctx) {
     if (!ctx || !ctx->frame) return;
 
-    // Render a simple 2D gradient background.
-    uint32_t w = ctx->fb.width;
-    uint32_t h = ctx->fb.height;
-    uint32_t wden = (w > 1u) ? (w - 1u) : 1u;
-    uint32_t hden = (h > 1u) ? (h - 1u) : 1u;
-
-    for (uint32_t y = 0; y < ctx->fb.height; y++) {
-        uint32_t ty = (y * 255u) / hden;
-        for (uint32_t x = 0; x < ctx->fb.width; x++) {
-            uint32_t tx = (x * 255u) / wden;
-            uint8_t r = (uint8_t)(12u + ((tx * 36u + ty * 26u) >> 8));
-            uint8_t g = (uint8_t)(16u + ((tx * 52u + ty * 54u) >> 8));
-            uint8_t b = (uint8_t)(32u + ((tx * 48u + ty * 88u) >> 8));
-            size_t off = ((size_t)y * ctx->row_stride) + ((size_t)x * (size_t)ctx->bytespp);
-            ctx->frame[off + 0] = b;
-            ctx->frame[off + 1] = g;
-            ctx->frame[off + 2] = r;
-            if (ctx->bytespp == 4) ctx->frame[off + 3] = 0xFF;
-        }
+    sl_image_t bg_image;
+    sl_decode_image_file(SL_RESOURCE_BACKGROUND, &bg_image);
+    if (bg_image.data && bg_image.channels >= 3u) {
+        sl_blit_rgba(ctx, 0, 0, bg_image.data, bg_image.width, bg_image.height, bg_image.stride);
     }
+    sl_image_free(&bg_image);
 }
 
-// Re-render a rectangular portion of the gradient background.
+// Re-render a rectangular portion of the background.
 static void sl_render_bg_rect(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
 #if !SL_ENABLE_BG_REDRAW
     (void)ctx; (void)x; (void)y; (void)w; (void)h;
@@ -266,27 +252,12 @@ static void sl_render_bg_rect(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w,
     if (y + h > ctx->fb.height) h = ctx->fb.height - y;
     if (w == 0 || h == 0) return;
 
-    uint32_t fw = ctx->fb.width;
-    uint32_t fh = ctx->fb.height;
-    uint32_t wden = (fw > 1u) ? (fw - 1u) : 1u;
-    uint32_t hden = (fh > 1u) ? (fh - 1u) : 1u;
-
-    for (uint32_t j = 0; j < h; j++) {
-        uint32_t py = y + j;
-        uint32_t ty = (py * 255u) / hden;
-        for (uint32_t i = 0; i < w; i++) {
-            uint32_t px = x + i;
-            uint32_t tx = (px * 255u) / wden;
-            uint8_t r = (uint8_t)(12u + ((tx * 36u + ty * 26u) >> 8));
-            uint8_t g = (uint8_t)(16u + ((tx * 52u + ty * 54u) >> 8));
-            uint8_t b = (uint8_t)(32u + ((tx * 48u + ty * 88u) >> 8));
-            size_t off = ((size_t)py * ctx->row_stride) + ((size_t)px * (size_t)ctx->bytespp);
-            ctx->frame[off + 0] = b;
-            ctx->frame[off + 1] = g;
-            ctx->frame[off + 2] = r;
-            if (ctx->bytespp == 4) ctx->frame[off + 3] = 0xFF;
-        }
+    sl_image_t bg_image;
+    sl_decode_image_file(SL_RESOURCE_BACKGROUND, &bg_image);
+    if (bg_image.data && bg_image.channels >= 3u) {
+        sl_blit_rgba(ctx, x, y, bg_image.data, bg_image.width, bg_image.height, bg_image.stride);
     }
+    sl_image_free(&bg_image);
 #endif
 }
 
