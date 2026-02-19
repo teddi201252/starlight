@@ -8,9 +8,6 @@
 #define SL_CURSOR_H 3u
 #define SL_HW_CURSOR_W 20u
 #define SL_HW_CURSOR_H 20u
-#ifndef SL_ENABLE_BG_REDRAW
-#define SL_ENABLE_BG_REDRAW 1
-#endif
 #ifndef SL_TARGET_FPS
 #define SL_TARGET_FPS 144u
 #endif
@@ -227,6 +224,68 @@ static void sl_render_cursor(sl_ctx_t *ctx) {
     sl_render_cursor_at(ctx, ctx->cursor_x, ctx->cursor_y);
 }
 
+// Save framebuffer pixels under the software cursor so we can restore them on next frame.
+static void sl_sw_cursor_capture(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || !ctx->frame) return;
+    if (x >= ctx->fb.width || y >= ctx->fb.height) {
+        ctx->cursor_saved_valid = 0u;
+        return;
+    }
+
+    uint32_t w = SL_CURSOR_W;
+    uint32_t h = SL_CURSOR_H;
+    if (x + w > ctx->fb.width) w = ctx->fb.width - x;
+    if (y + h > ctx->fb.height) h = ctx->fb.height - y;
+    if (w == 0 || h == 0) {
+        ctx->cursor_saved_valid = 0u;
+        return;
+    }
+
+    const size_t save_stride = (size_t)SL_CURSOR_W * 4u; // max bytes per saved row
+    const size_t row_bytes = (size_t)w * (size_t)ctx->bytespp;
+    for (uint32_t j = 0; j < h; j++) {
+        const uint8_t *src = ctx->frame + ((size_t)(y + j) * ctx->row_stride) +
+                             ((size_t)x * (size_t)ctx->bytespp);
+        peos_memcpy(&ctx->cursor_saved[(size_t)j * save_stride], src, row_bytes);
+    }
+
+    ctx->cursor_saved_x = x;
+    ctx->cursor_saved_y = y;
+    ctx->cursor_saved_w = w;
+    ctx->cursor_saved_h = h;
+    ctx->cursor_saved_valid = 1u;
+}
+
+// Restore previously saved 3x3 area that was covered by the software cursor.
+static void sl_sw_cursor_restore(sl_ctx_t *ctx) {
+    if (!ctx || !ctx->frame || !ctx->cursor_saved_valid) return;
+
+    uint32_t x = ctx->cursor_saved_x;
+    uint32_t y = ctx->cursor_saved_y;
+    uint32_t w = ctx->cursor_saved_w;
+    uint32_t h = ctx->cursor_saved_h;
+    if (x >= ctx->fb.width || y >= ctx->fb.height) {
+        ctx->cursor_saved_valid = 0u;
+        return;
+    }
+    if (x + w > ctx->fb.width) w = ctx->fb.width - x;
+    if (y + h > ctx->fb.height) h = ctx->fb.height - y;
+    if (w == 0 || h == 0) {
+        ctx->cursor_saved_valid = 0u;
+        return;
+    }
+
+    const size_t save_stride = (size_t)SL_CURSOR_W * 4u;
+    const size_t row_bytes = (size_t)w * (size_t)ctx->bytespp;
+    for (uint32_t j = 0; j < h; j++) {
+        uint8_t *dst = ctx->frame + ((size_t)(y + j) * ctx->row_stride) +
+                       ((size_t)x * (size_t)ctx->bytespp);
+        peos_memcpy(dst, &ctx->cursor_saved[(size_t)j * save_stride], row_bytes);
+    }
+
+    ctx->cursor_saved_valid = 0u;
+}
+
 // Render the full desktop background into the active framebuffer.
 static void sl_render_full(sl_ctx_t *ctx) {
     if (!ctx || !ctx->frame) return;
@@ -237,27 +296,6 @@ static void sl_render_full(sl_ctx_t *ctx) {
         sl_blit_rgba(ctx, 0, 0, bg_image.data, bg_image.width, bg_image.height, bg_image.stride);
     }
     sl_image_free(&bg_image);
-}
-
-// Re-render a rectangular portion of the background.
-static void sl_render_bg_rect(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
-#if !SL_ENABLE_BG_REDRAW
-    (void)ctx; (void)x; (void)y; (void)w; (void)h;
-    return;
-#else
-    if (!ctx || !ctx->frame) return;
-    if (x >= ctx->fb.width || y >= ctx->fb.height) return;
-    if (x + w > ctx->fb.width) w = ctx->fb.width - x;
-    if (y + h > ctx->fb.height) h = ctx->fb.height - y;
-    if (w == 0 || h == 0) return;
-
-    sl_image_t bg_image;
-    sl_decode_image_file(SL_RESOURCE_BACKGROUND, &bg_image);
-    if (bg_image.data && bg_image.channels >= 3u) {
-        sl_blit_rgba(ctx, x, y, bg_image.data, bg_image.width, bg_image.height, bg_image.stride);
-    }
-    sl_image_free(&bg_image);
-#endif
 }
 
 // Present the frame when using copy mode; no-op in direct fbmap mode.
@@ -314,7 +352,10 @@ int main(void) {
     else peos_puts("starlight: cursor mode = software\n");
 
     sl_render_full(&ctx);
-    if (!ctx.hw_cursor) sl_render_cursor(&ctx);
+    if (!ctx.hw_cursor) {
+        sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);
+        sl_render_cursor(&ctx);
+    }
     else sl_hw_cursor_sync_pos(&ctx);
     if (!sl_present(&ctx)) {
         sl_shutdown(&ctx);
@@ -324,16 +365,14 @@ int main(void) {
     uint64_t next_frame_ns = peos_time_ns() + SL_FRAME_NS;
 
     for (;;) {
+        if (!ctx.hw_cursor) sl_sw_cursor_restore(&ctx);
+
         uint32_t old_x = ctx.cursor_x;
         uint32_t old_y = ctx.cursor_y;
         if (sl_handle_input(&ctx)) break;
         if (ctx.cursor_x != old_x || ctx.cursor_y != old_y) {
             if (ctx.hw_cursor) {
                 sl_hw_cursor_sync_pos(&ctx);
-            } else {
-#if SL_ENABLE_BG_REDRAW
-                sl_render_bg_rect(&ctx, old_x, old_y, SL_CURSOR_W, SL_CURSOR_H);
-#endif
             }
         }
 
@@ -355,7 +394,10 @@ int main(void) {
         sl_fill_rect(&ctx, 0, 0, 128, 16, 0x00, 0x00, 0x00);
         sl_draw_text(&ctx, 0, 0, "fps: ", 0xFF, 0xFF, 0xFF);
         sl_draw_text(&ctx, 32, 0, fps_str, 0xFF, 0xFF, 0xFF);
-        if (!ctx.hw_cursor) sl_render_cursor(&ctx);
+        if (!ctx.hw_cursor) {
+            sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);
+            sl_render_cursor(&ctx);
+        }
         if (!sl_present(&ctx)) break;
 
         sl_frame_pace(&next_frame_ns);
