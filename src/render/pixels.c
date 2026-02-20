@@ -73,6 +73,56 @@ void sl_blit_rgba(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y,
     }
 }
 
+void sl_blit_rgba_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_t dst_w, uint32_t dst_h,
+                          const uint8_t *src_rgba, uint32_t src_w, uint32_t src_h, uint32_t src_stride) {
+    if (!ctx || !ctx->frame || !src_rgba) return;
+    if (src_w == 0 || src_h == 0) return;
+    if (dst_w == 0 || dst_h == 0) return;
+    if (ctx->bytespp != 3 && ctx->bytespp != 4) return;
+    if (src_stride < src_w * 4u) return;
+    if (dst_x >= ctx->fb.width || dst_y >= ctx->fb.height) return;
+
+    uint32_t copy_w = dst_w;
+    uint32_t copy_h = dst_h;
+    uint32_t rem_w = ctx->fb.width - dst_x;
+    uint32_t rem_h = ctx->fb.height - dst_y;
+    if (copy_w > rem_w) copy_w = rem_w;
+    if (copy_h > rem_h) copy_h = rem_h;
+    if (copy_w == 0 || copy_h == 0) return;
+
+    float src_x_step = (float)src_w / (float)dst_w;
+    float src_y_step = (float)src_h / (float)dst_h;
+
+    for (uint32_t y = 0; y < copy_h; y++) {
+        int src_y = (int)(y * src_y_step);
+        const uint8_t *srow = src_rgba + ((size_t)src_y * (size_t)src_stride);
+        uint8_t *drow = ctx->frame + ((size_t)(dst_y + y) * ctx->row_stride) +
+                        ((size_t)dst_x * (size_t)ctx->bytespp);
+
+        for (uint32_t x = 0; x < copy_w; x++) {
+            int src_x = (int)(x * src_x_step);
+            const uint8_t *s = srow + ((size_t)src_x * 4u);
+            uint8_t sr = s[0];
+            uint8_t sg = s[1];
+            uint8_t sb = s[2];
+            uint8_t sa = s[3];
+
+            if (sa == 255u) {
+                drow[0] = sb;
+                drow[1] = sg;
+                drow[2] = sr;
+            } else if (sa != 0u) {
+                drow[0] = sl_blend_chan(sb, drow[0], sa);
+                drow[1] = sl_blend_chan(sg, drow[1], sa);
+                drow[2] = sl_blend_chan(sr, drow[2], sa);
+            }
+
+            if (ctx->bytespp == 4) drow[3] = 0xFF;
+            drow += ctx->bytespp;
+        }
+    }
+}
+
 void sl_draw_char(sl_ctx_t *ctx, uint32_t x, uint32_t y, char c, uint8_t r, uint8_t g, uint8_t b) {
     if (!ctx || !ctx->frame) return;
 
