@@ -16,7 +16,7 @@
 #define SL_TICK_NS 1000000ull
 #define SL_PACER_SPIN_NS 300000ull
 #define SL_HW_CURSOR_MAX_SIDE 64u
-#define SL_HW_CURSOR_SCALE_DEFAULT 200u
+#define SL_HW_CURSOR_SCALE_DEFAULT 100u
 
 // Converts a uint32_t to decimal text.
 // Returns `out` on success, NULL on error.
@@ -225,7 +225,7 @@ static int sl_update_fb_info(sl_ctx_t *ctx) {
 }
 
 static void sl_load_background(sl_ctx_t *ctx) {
-    int ok = sl_decode_image_file(SL_RESOURCE_BACKGROUND, &ctx->bg_image);
+    int ok = sl_decode_image_file(SL_RESOURCE_ROOT "/background_3.png", &ctx->bg_image);
     ctx->bg_loaded = ok;
 }
 
