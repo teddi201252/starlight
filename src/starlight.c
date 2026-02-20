@@ -1,6 +1,10 @@
 #include "starlight.h"
 #include "render/pixels.h"
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
 
 #define SL_CURSOR_W 3u
 #define SL_CURSOR_H 3u
@@ -17,6 +21,193 @@
 #define SL_PACER_SPIN_NS 300000ull
 #define SL_HW_CURSOR_MAX_SIDE 64u
 #define SL_HW_CURSOR_SCALE_DEFAULT 100u
+#define SL_CFG_FILE_MAX 4096u
+#define SL_CFG_LINE_MAX 256u
+
+static void sl_copy_text(char *dst, size_t cap, const char *src) {
+    if (!dst || cap == 0) return;
+    if (!src) src = "";
+    size_t n = 0;
+    while (n + 1 < cap && src[n]) {
+        dst[n] = src[n];
+        n++;
+    }
+    dst[n] = '\0';
+}
+
+static int sl_is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+static char *sl_trim(char *s) {
+    if (!s) return s;
+    while (*s && sl_is_space(*s)) s++;
+    size_t n = strlen(s);
+    while (n > 0 && sl_is_space(s[n - 1])) {
+        s[n - 1] = '\0';
+        n--;
+    }
+    return s;
+}
+
+static int sl_parse_u32(const char *s, uint32_t *out) {
+    if (!s || !out) return 0;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || v < 0 || (uint64_t)v > 0xFFFFFFFFull) return 0;
+    *out = (uint32_t)v;
+    return 1;
+}
+
+static void sl_ensure_config_dirs(void) {
+    (void)mkdir("/system", 0755);
+    (void)mkdir(SL_OS_CONFIG_DIR, 0755);
+    (void)mkdir(SL_RESOURCE_ROOT, 0755);
+    (void)mkdir(SL_RESOURCE_CONFIG_DIR, 0755);
+}
+
+static char *sl_load_text_file(const char *path, size_t max_bytes) {
+    if (!path || max_bytes == 0) return NULL;
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    long sz = ftell(f);
+    if (sz < 0 || (size_t)sz > max_bytes) {
+        fclose(f);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+
+    char *buf = (char *)malloc((size_t)sz + 1u);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t got = fread(buf, 1u, (size_t)sz, f);
+    fclose(f);
+    if (got != (size_t)sz) {
+        free(buf);
+        return NULL;
+    }
+    buf[got] = '\0';
+    return buf;
+}
+
+static void sl_write_default_display_config(void) {
+    FILE *f = fopen(SL_OS_DISPLAY_CONFIG_FILE, "w");
+    if (!f) return;
+    (void)fprintf(f, "# PeOS global display config\n");
+    (void)fprintf(f, "# 0 0 means host/default mode\n");
+    (void)fprintf(f, "width=0\n");
+    (void)fprintf(f, "height=0\n");
+    (void)fclose(f);
+}
+
+static void sl_write_default_starlight_config(void) {
+    FILE *f = fopen(SL_RESOURCE_CONFIG_FILE, "w");
+    if (!f) return;
+    (void)fprintf(f, "# Starlight desktop config\n");
+    (void)fprintf(f, "background=%s\n", SL_RESOURCE_BACKGROUND_ALT);
+    (void)fprintf(f, "cursor=%s\n", SL_RESOURCE_CURSOR);
+    (void)fprintf(f, "cursor_scale=100\n");
+    (void)fclose(f);
+}
+
+static void sl_load_display_config(sl_ctx_t *ctx) {
+    if (!ctx) return;
+    ctx->display_width = 0u;
+    ctx->display_height = 0u;
+
+    char *cfg = sl_load_text_file(SL_OS_DISPLAY_CONFIG_FILE, SL_CFG_FILE_MAX);
+    if (!cfg) {
+        sl_write_default_display_config();
+        return;
+    }
+
+    char line[SL_CFG_LINE_MAX];
+    size_t li = 0;
+    for (size_t i = 0;; i++) {
+        char c = cfg[i];
+        if (c != '\0' && c != '\n') {
+            if (li + 1u < sizeof(line)) line[li++] = c;
+            continue;
+        }
+        line[li] = '\0';
+        li = 0;
+
+        char *p = sl_trim(line);
+        if (p[0] != '\0' && p[0] != '#' && p[0] != ';') {
+            char *eq = strchr(p, '=');
+            if (eq) {
+                *eq = '\0';
+                char *key = sl_trim(p);
+                char *val = sl_trim(eq + 1);
+                uint32_t n = 0;
+                if (strcmp(key, "width") == 0 && sl_parse_u32(val, &n)) {
+                    ctx->display_width = n;
+                } else if (strcmp(key, "height") == 0 && sl_parse_u32(val, &n)) {
+                    ctx->display_height = n;
+                }
+            }
+        }
+        if (c == '\0') break;
+    }
+    free(cfg);
+}
+
+static void sl_load_starlight_config(sl_ctx_t *ctx) {
+    if (!ctx) return;
+    sl_copy_text(ctx->background_path, sizeof(ctx->background_path), SL_RESOURCE_BACKGROUND_ALT);
+    sl_copy_text(ctx->cursor_path, sizeof(ctx->cursor_path), SL_RESOURCE_CURSOR);
+    ctx->hw_cursor_scale_pct = SL_HW_CURSOR_SCALE_DEFAULT;
+
+    char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
+    if (!cfg) {
+        sl_write_default_starlight_config();
+        return;
+    }
+
+    char line[SL_CFG_LINE_MAX];
+    size_t li = 0;
+    for (size_t i = 0;; i++) {
+        char c = cfg[i];
+        if (c != '\0' && c != '\n') {
+            if (li + 1u < sizeof(line)) line[li++] = c;
+            continue;
+        }
+        line[li] = '\0';
+        li = 0;
+
+        char *p = sl_trim(line);
+        if (p[0] != '\0' && p[0] != '#' && p[0] != ';') {
+            char *eq = strchr(p, '=');
+            if (eq) {
+                *eq = '\0';
+                char *key = sl_trim(p);
+                char *val = sl_trim(eq + 1);
+                if (strcmp(key, "background") == 0 && val[0]) {
+                    sl_copy_text(ctx->background_path, sizeof(ctx->background_path), val);
+                } else if (strcmp(key, "cursor") == 0 && val[0]) {
+                    sl_copy_text(ctx->cursor_path, sizeof(ctx->cursor_path), val);
+                } else if (strcmp(key, "cursor_scale") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n) && n >= 25u && n <= 400u) {
+                        ctx->hw_cursor_scale_pct = n;
+                    }
+                }
+            }
+        }
+        if (c == '\0') break;
+    }
+    free(cfg);
+}
 
 // Converts a uint32_t to decimal text.
 // Returns `out` on success, NULL on error.
@@ -224,8 +415,17 @@ static int sl_update_fb_info(sl_ctx_t *ctx) {
     return 1;
 }
 
-static void sl_load_background(sl_ctx_t *ctx) {
-    int ok = sl_decode_image_file(SL_RESOURCE_ROOT "/background_3.png", &ctx->bg_image);
+static void sl_load_background(sl_ctx_t *ctx, const char *path) {
+    int ok = 0;
+    if (path && path[0]) {
+        ok = sl_decode_image_file(path, &ctx->bg_image);
+    }
+    if (!ok) {
+        ok = sl_decode_image_file(SL_RESOURCE_BACKGROUND_ALT, &ctx->bg_image);
+    }
+    if (!ok) {
+        ok = sl_decode_image_file(SL_RESOURCE_BACKGROUND, &ctx->bg_image);
+    }
     ctx->bg_loaded = ok;
 }
 
@@ -233,7 +433,16 @@ static void sl_load_background(sl_ctx_t *ctx) {
 static int sl_init(sl_ctx_t *ctx) {
     if (!ctx) return 0;
     peos_memset(ctx, 0, sizeof(*ctx));
-    
+
+    sl_ensure_config_dirs();
+    sl_load_display_config(ctx);
+    sl_load_starlight_config(ctx);
+
+    if ((ctx->display_width == 0u && ctx->display_height == 0u) ||
+        (ctx->display_width > 0u && ctx->display_height > 0u)) {
+        (void)peos_fb_set_mode(ctx->display_width, ctx->display_height);
+    }
+
     if (!sl_update_fb_info(ctx)) return 0;
 
     if ((int64_t)peos_input_mode(PEOS_INPUT_MODE_RAW) == 0) {
@@ -242,11 +451,10 @@ static int sl_init(sl_ctx_t *ctx) {
 
     ctx->cursor_x = ctx->fb.width / 2u;
     ctx->cursor_y = ctx->fb.height / 2u;
-    ctx->hw_cursor_scale_pct = SL_HW_CURSOR_SCALE_DEFAULT;
     ctx->hw_cursor = 0u;
 
     // Prefer resource cursor (size from image), fallback to default shape.
-    if (!sl_hw_cursor_load_resource(ctx, SL_RESOURCE_CURSOR)) {
+    if (!sl_hw_cursor_load_resource(ctx, ctx->cursor_path)) {
         (void)sl_hw_cursor_set_default(ctx);
     }
 
@@ -254,7 +462,7 @@ static int sl_init(sl_ctx_t *ctx) {
     ctx->fps_frames = 0;
     ctx->fps_value = 0;
 
-    sl_load_background(ctx);
+    sl_load_background(ctx, ctx->background_path);
 
     return 1;
 }
