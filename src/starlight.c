@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define SL_CURSOR_W 3u
 #define SL_CURSOR_H 3u
