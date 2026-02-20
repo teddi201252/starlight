@@ -4,8 +4,6 @@
 
 #define SL_CURSOR_W 3u
 #define SL_CURSOR_H 3u
-#define SL_HW_CURSOR_W 20u
-#define SL_HW_CURSOR_H 20u
 #ifndef SL_TARGET_FPS
 #define SL_TARGET_FPS 144u
 #endif
@@ -17,6 +15,8 @@
 #define SL_FRAME_NS (1000000000ull / (uint64_t)(SL_TARGET_FPS))
 #define SL_TICK_NS 1000000ull
 #define SL_PACER_SPIN_NS 300000ull
+#define SL_HW_CURSOR_MAX_SIDE 64u
+#define SL_HW_CURSOR_SCALE_DEFAULT 200u
 
 // Converts a uint32_t to decimal text.
 // Returns `out` on success, NULL on error.
@@ -88,10 +88,73 @@ static int sl_hw_cursor_apply(sl_ctx_t *ctx, const uint8_t *rgba,
     return 1;
 }
 
+static int sl_cursor_scale_rgba_nn(const uint8_t *src_rgba,
+                                   uint32_t src_w, uint32_t src_h, uint32_t src_stride,
+                                   uint32_t scale_pct,
+                                   uint8_t *dst_rgba,
+                                   uint32_t *out_w, uint32_t *out_h) {
+    if (!src_rgba || !dst_rgba || !out_w || !out_h) return 0;
+    if (src_w == 0 || src_h == 0) return 0;
+    if (scale_pct == 0) return 0;
+    if (src_stride < src_w * 4u) return 0;
+
+    // Round to nearest pixel: dst = src * scale_pct / 100.
+    uint64_t dst_w64 = (((uint64_t)src_w * (uint64_t)scale_pct) + 50u) / 100u;
+    uint64_t dst_h64 = (((uint64_t)src_h * (uint64_t)scale_pct) + 50u) / 100u;
+    if (dst_w64 == 0 || dst_h64 == 0) return 0;
+    if (dst_w64 > SL_HW_CURSOR_MAX_SIDE || dst_h64 > SL_HW_CURSOR_MAX_SIDE) return 0;
+
+    uint32_t dst_w = (uint32_t)dst_w64;
+    uint32_t dst_h = (uint32_t)dst_h64;
+
+    for (uint32_t y = 0; y < dst_h; y++) {
+        uint32_t sy = (uint32_t)(((uint64_t)y * (uint64_t)src_h) / (uint64_t)dst_h);
+        if (sy >= src_h) sy = src_h - 1u;
+        const uint8_t *srow = src_rgba + ((size_t)sy * (size_t)src_stride);
+        uint8_t *drow = dst_rgba + ((size_t)y * (size_t)dst_w * 4u);
+
+        for (uint32_t x = 0; x < dst_w; x++) {
+            uint32_t sx = (uint32_t)(((uint64_t)x * (uint64_t)src_w) / (uint64_t)dst_w);
+            if (sx >= src_w) sx = src_w - 1u;
+            const uint8_t *s = srow + ((size_t)sx * 4u);
+            uint8_t *d = drow + ((size_t)x * 4u);
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+            d[3] = s[3];
+        }
+    }
+
+    *out_w = dst_w;
+    *out_h = dst_h;
+    return 1;
+}
+
 static int sl_hw_cursor_set_default(sl_ctx_t *ctx) {
-    uint8_t cursor_rgba[SL_HW_CURSOR_W * SL_HW_CURSOR_H * 4u];
-    sl_build_default_cursor_rgba(cursor_rgba, SL_HW_CURSOR_W, SL_HW_CURSOR_H);
-    return sl_hw_cursor_apply(ctx, cursor_rgba, SL_HW_CURSOR_W, SL_HW_CURSOR_H, 0u, 0u);
+    if (!ctx) return 0;
+    enum {
+        SL_DEFAULT_CURSOR_W = 20u,
+        SL_DEFAULT_CURSOR_H = 20u,
+    };
+
+    uint8_t base_rgba[SL_DEFAULT_CURSOR_W * SL_DEFAULT_CURSOR_H * 4u];
+    uint8_t *scaled_rgba = (uint8_t *)malloc(SL_HW_CURSOR_MAX_SIDE * SL_HW_CURSOR_MAX_SIDE * 4u);
+    uint32_t out_w = 0;
+    uint32_t out_h = 0;
+    if (!scaled_rgba) return 0;
+
+    sl_build_default_cursor_rgba(base_rgba, SL_DEFAULT_CURSOR_W, SL_DEFAULT_CURSOR_H);
+    if (!sl_cursor_scale_rgba_nn(base_rgba,
+                                 SL_DEFAULT_CURSOR_W, SL_DEFAULT_CURSOR_H, SL_DEFAULT_CURSOR_W * 4u,
+                                 ctx->hw_cursor_scale_pct,
+                                 scaled_rgba,
+                                 &out_w, &out_h)) {
+        free(scaled_rgba);
+        return 0;
+    }
+    int ok = sl_hw_cursor_apply(ctx, scaled_rgba, out_w, out_h, 0u, 0u);
+    free(scaled_rgba);
+    return ok;
 }
 
 static int sl_hw_cursor_load_resource(sl_ctx_t *ctx, const char *path) {
@@ -100,15 +163,28 @@ static int sl_hw_cursor_load_resource(sl_ctx_t *ctx, const char *path) {
     sl_image_t img;
     if (!sl_decode_image_file(path, &img)) return 0;
 
+    uint8_t *scaled_rgba = (uint8_t *)malloc(SL_HW_CURSOR_MAX_SIDE * SL_HW_CURSOR_MAX_SIDE * 4u);
+    if (!scaled_rgba) {
+        sl_image_free(&img);
+        return 0;
+    }
+    uint32_t out_w = 0;
+    uint32_t out_h = 0;
     int ok = 0;
     if (img.data &&
         img.channels == 4u &&
         img.width > 0u && img.height > 0u &&
-        img.width <= 64u && img.height <= 64u &&
         img.stride >= (img.width * 4u)) {
-        ok = sl_hw_cursor_apply(ctx, img.data, img.width, img.height, 0u, 0u);
+        if (sl_cursor_scale_rgba_nn(img.data,
+                                    img.width, img.height, img.stride,
+                                    ctx->hw_cursor_scale_pct,
+                                    scaled_rgba,
+                                    &out_w, &out_h)) {
+            ok = sl_hw_cursor_apply(ctx, scaled_rgba, out_w, out_h, 0u, 0u);
+        }
     }
 
+    free(scaled_rgba);
     sl_image_free(&img);
     return ok;
 }
@@ -166,11 +242,12 @@ static int sl_init(sl_ctx_t *ctx) {
 
     ctx->cursor_x = ctx->fb.width / 2u;
     ctx->cursor_y = ctx->fb.height / 2u;
+    ctx->hw_cursor_scale_pct = SL_HW_CURSOR_SCALE_DEFAULT;
     ctx->hw_cursor = 0u;
 
-    // Try hardware cursor first, fallback to software cursor if unavailable.
-    if (sl_hw_cursor_set_default(ctx)) {
-        (void)sl_hw_cursor_load_resource(ctx, SL_RESOURCE_CURSOR);
+    // Prefer resource cursor (size from image), fallback to default shape.
+    if (!sl_hw_cursor_load_resource(ctx, SL_RESOURCE_CURSOR)) {
+        (void)sl_hw_cursor_set_default(ctx);
     }
 
     ctx->fps_last_ns = peos_time_ns();
