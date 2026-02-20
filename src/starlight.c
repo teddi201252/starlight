@@ -1,7 +1,5 @@
 #include "starlight.h"
-#include "resources.h"
 #include "render/pixels.h"
-#include "render/image_decode.h"
 #include <stdbool.h>
 
 #define SL_CURSOR_W 3u
@@ -150,6 +148,11 @@ static int sl_update_fb_info(sl_ctx_t *ctx) {
     return 1;
 }
 
+static void sl_load_background(sl_ctx_t *ctx) {
+    int ok = sl_decode_image_file(SL_RESOURCE_BACKGROUND, &ctx->bg_image);
+    ctx->bg_loaded = ok;
+}
+
 // Initialize renderer state, map framebuffer memory, and enable raw input mode.
 static int sl_init(sl_ctx_t *ctx) {
     if (!ctx) return 0;
@@ -173,6 +176,8 @@ static int sl_init(sl_ctx_t *ctx) {
     ctx->fps_last_ns = peos_time_ns();
     ctx->fps_frames = 0;
     ctx->fps_value = 0;
+
+    sl_load_background(ctx);
 
     return 1;
 }
@@ -288,14 +293,10 @@ static void sl_sw_cursor_restore(sl_ctx_t *ctx) {
 
 // Render the full desktop background into the active framebuffer.
 static void sl_render_full(sl_ctx_t *ctx) {
-    if (!ctx || !ctx->frame) return;
-
-    sl_image_t bg_image;
-    sl_decode_image_file(SL_RESOURCE_BACKGROUND, &bg_image);
-    if (bg_image.data && bg_image.channels >= 3u) {
-        sl_blit_rgba(ctx, 0, 0, bg_image.data, bg_image.width, bg_image.height, bg_image.stride);
+    if (!ctx || !ctx->frame || !ctx->bg_loaded) return;
+    if (ctx->bg_image.data && ctx->bg_image.channels >= 3u) {
+        sl_blit_rgba_stretch(ctx, 0, 0, ctx->fb.width, ctx->fb.height, ctx->bg_image.data, ctx->bg_image.width, ctx->bg_image.height, ctx->bg_image.stride);
     }
-    sl_image_free(&bg_image);
 }
 
 // Present the frame when using copy mode; no-op in direct fbmap mode.
@@ -404,6 +405,9 @@ int main(void) {
 
     }
 
+    if (ctx.bg_loaded) {
+        sl_image_free(&ctx.bg_image);
+    }
     sl_shutdown(&ctx);
     peos_exit(0);
 }
