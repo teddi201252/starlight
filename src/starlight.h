@@ -22,6 +22,7 @@ typedef struct {
     uint32_t cursor_saved_y;
     uint32_t cursor_saved_w;
     uint32_t cursor_saved_h;
+    uint32_t hw_cursor_scale_pct;
 
     // Background
     sl_image_t bg_image;
