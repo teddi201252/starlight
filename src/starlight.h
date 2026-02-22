@@ -7,8 +7,11 @@
 typedef struct {
     peos_fb_info_t fb;
     uint8_t *frame;
+    uint8_t *fb_front;
     size_t row_stride;
+    size_t fb_front_stride;
     size_t frame_bytes;
+    size_t fb_front_bytes;
     size_t map_bytes;
     uint8_t bytespp;
     uint8_t fb_direct;
