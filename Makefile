@@ -4,7 +4,7 @@ CC := x86_64-elf-gcc
 CFLAGS ?= -std=gnu11 -O2 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pie -mno-red-zone -mcmodel=kernel
 LDFLAGS ?= -nostdlib -ffreestanding -fno-pie -Wl,-T,$(ROOT_DIR)/userland/linker.ld -Wl,-z,max-page-size=0x1000
 
-SRC := src/starlight.c src/render/pixels.c src/render/font8x8.c src/render/image_decode.c
+SRC := $(shell find src -type f -name '*.c')
 OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
 DEP := $(OBJ:.o=.d)
 BIN ?= $(ROOT_DIR)/userland/bin/starlight

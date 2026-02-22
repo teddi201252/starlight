@@ -1,5 +1,6 @@
 #include "starlight.h"
 #include "render/pixels.h"
+#include "window.h"
 #include <SDL2/SDL_mixer.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -26,6 +27,151 @@
 
 static Mix_Music *g_startup_music = NULL;
 static int g_audio_open = 0;
+
+// List of windows
+static sl_window_t *g_windows = NULL;
+static size_t g_window_count = 0;
+static size_t g_focused_window = (size_t)-1;
+static uint8_t g_prev_mouse_buttons = 0u;
+
+static int sl_window_contains_point(const sl_window_t *win, uint32_t x, uint32_t y) {
+    if (!win) return 0;
+    if (x < win->x || y < win->y) return 0;
+    if (x >= (win->x + win->width)) return 0;
+    if (y >= (win->y + win->height)) return 0;
+    return 1;
+}
+
+static void sl_window_refresh_zorder(void) {
+    for (size_t i = 0; i < g_window_count; i++) {
+        g_windows[i].z_index = (uint32_t)i;
+        g_windows[i].focused = (i == g_focused_window) ? 1u : 0u;
+    }
+}
+
+static void sl_focus_window(size_t index) {
+    if (!g_windows || g_window_count == 0u || index >= g_window_count) return;
+    if (index == g_window_count - 1u) {
+        g_focused_window = index;
+        sl_window_refresh_zorder();
+        return;
+    }
+
+    sl_window_t win = g_windows[index];
+    for (size_t i = index; i + 1u < g_window_count; i++) {
+        g_windows[i] = g_windows[i + 1u];
+    }
+    g_windows[g_window_count - 1u] = win;
+    g_focused_window = g_window_count - 1u;
+    sl_window_refresh_zorder();
+}
+
+static void sl_focus_window_at_cursor(uint32_t x, uint32_t y) {
+    if (!g_windows || g_window_count == 0u) return;
+    for (size_t i = g_window_count; i > 0u; i--) {
+        size_t idx = i - 1u;
+        if (sl_window_contains_point(&g_windows[idx], x, y)) {
+            sl_focus_window(idx);
+            return;
+        }
+    }
+}
+
+typedef struct {
+    uint32_t x;
+    uint32_t y;
+    uint32_t w;
+    uint32_t h;
+} sl_rect_t;
+
+#define SL_DIRTY_MAX_RECTS 128u
+
+static struct {
+    sl_rect_t rects[SL_DIRTY_MAX_RECTS];
+    size_t count;
+    uint8_t full;
+} g_dirty = {0};
+
+static void sl_dirty_reset(void) {
+    g_dirty.count = 0;
+    g_dirty.full = 0u;
+}
+
+static int sl_rects_overlap_or_touch(const sl_rect_t *a, const sl_rect_t *b) {
+    if (!a || !b) return 0;
+    uint64_t ax2 = (uint64_t)a->x + (uint64_t)a->w;
+    uint64_t ay2 = (uint64_t)a->y + (uint64_t)a->h;
+    uint64_t bx2 = (uint64_t)b->x + (uint64_t)b->w;
+    uint64_t by2 = (uint64_t)b->y + (uint64_t)b->h;
+    return !((ax2 < b->x) || (bx2 < a->x) || (ay2 < b->y) || (by2 < a->y));
+}
+
+static sl_rect_t sl_rect_union(const sl_rect_t *a, const sl_rect_t *b) {
+    sl_rect_t r = {0, 0, 0, 0};
+    if (!a) return b ? *b : r;
+    if (!b) return *a;
+
+    uint32_t x1 = (a->x < b->x) ? a->x : b->x;
+    uint32_t y1 = (a->y < b->y) ? a->y : b->y;
+    uint64_t ax2 = (uint64_t)a->x + (uint64_t)a->w;
+    uint64_t ay2 = (uint64_t)a->y + (uint64_t)a->h;
+    uint64_t bx2 = (uint64_t)b->x + (uint64_t)b->w;
+    uint64_t by2 = (uint64_t)b->y + (uint64_t)b->h;
+    uint64_t x2 = (ax2 > bx2) ? ax2 : bx2;
+    uint64_t y2 = (ay2 > by2) ? ay2 : by2;
+
+    r.x = x1;
+    r.y = y1;
+    r.w = (uint32_t)(x2 - x1);
+    r.h = (uint32_t)(y2 - y1);
+    return r;
+}
+
+static void sl_dirty_mark_full(void) {
+    g_dirty.full = 1u;
+    g_dirty.count = 0;
+}
+
+static void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (!ctx || g_dirty.full) return;
+    if (w == 0u || h == 0u) return;
+    if (x >= ctx->fb.width || y >= ctx->fb.height) return;
+
+    if (x + w > ctx->fb.width) w = ctx->fb.width - x;
+    if (y + h > ctx->fb.height) h = ctx->fb.height - y;
+    if (w == 0u || h == 0u) return;
+
+    sl_rect_t in = {x, y, w, h};
+
+    // Merge overlapping/touching rects to keep copy list compact.
+    for (size_t i = 0; i < g_dirty.count; i++) {
+        if (sl_rects_overlap_or_touch(&g_dirty.rects[i], &in)) {
+            g_dirty.rects[i] = sl_rect_union(&g_dirty.rects[i], &in);
+
+            // Try cascading merges after expanding this rect.
+            for (size_t j = 0; j < g_dirty.count; ) {
+                if (j == i) {
+                    j++;
+                    continue;
+                }
+                if (sl_rects_overlap_or_touch(&g_dirty.rects[i], &g_dirty.rects[j])) {
+                    g_dirty.rects[i] = sl_rect_union(&g_dirty.rects[i], &g_dirty.rects[j]);
+                    g_dirty.rects[j] = g_dirty.rects[g_dirty.count - 1u];
+                    g_dirty.count--;
+                    continue;
+                }
+                j++;
+            }
+            return;
+        }
+    }
+
+    if (g_dirty.count >= SL_DIRTY_MAX_RECTS) {
+        sl_dirty_mark_full();
+        return;
+    }
+    g_dirty.rects[g_dirty.count++] = in;
+}
 
 static void sl_copy_text(char *dst, size_t cap, const char *src) {
     if (!dst || cap == 0) return;
@@ -432,6 +578,9 @@ static int sl_update_fb_info(sl_ctx_t *ctx) {
     ctx->row_stride = (size_t)ctx->fb.width * (size_t)ctx->bytespp;
     ctx->frame_bytes = (size_t)ctx->fb.width * (size_t)ctx->fb.height * (size_t)ctx->bytespp;
     ctx->map_bytes = (size_t)align_up((uint64_t)ctx->frame_bytes, 4096u);
+    ctx->fb_front = NULL;
+    ctx->fb_front_stride = 0;
+    ctx->fb_front_bytes = 0;
 
     peos_fb_map_t fbm;
     size_t fb_row_stride = ctx->fb.pitch ? (size_t)ctx->fb.pitch : ctx->row_stride;
@@ -439,17 +588,18 @@ static int sl_update_fb_info(sl_ctx_t *ctx) {
     if (peos_fbmap(&fbm, PEOS_FBMAP_EXCLUSIVE) == 0 &&
         fbm.addr != 0 &&
         fbm.len >= fb_needed) {
-        ctx->frame = (uint8_t *)(uintptr_t)fbm.addr;
-        ctx->map_bytes = (size_t)fbm.len;
-        ctx->row_stride = fb_row_stride;
+        ctx->fb_front = (uint8_t *)(uintptr_t)fbm.addr;
+        ctx->fb_front_stride = fb_row_stride;
+        ctx->fb_front_bytes = (size_t)fbm.len;
         ctx->fb_direct = 1;
-    } else {
-        uint64_t map = peos_mmap(0, ctx->map_bytes,
-                                 PEOS_PROT_READ | PEOS_PROT_WRITE,
-                                 PEOS_MAP_ANON | PEOS_MAP_PRIVATE);
-        if ((int64_t)map < 0) return 0;
-        ctx->frame = (uint8_t *)(uintptr_t)map;
     }
+
+    uint64_t map = peos_mmap(0, ctx->map_bytes,
+                             PEOS_PROT_READ | PEOS_PROT_WRITE,
+                             PEOS_MAP_ANON | PEOS_MAP_PRIVATE);
+    if ((int64_t)map < 0) return 0;
+    ctx->frame = (uint8_t *)(uintptr_t)map;
+
     return 1;
 }
 
@@ -510,7 +660,7 @@ static void sl_shutdown(sl_ctx_t *ctx) {
     if (!ctx) return;
     if (ctx->hw_cursor) (void)peos_cursor_set_visible(0);
     if (ctx->input_raw) (void)peos_input_mode(PEOS_INPUT_MODE_COOKED);
-    if (ctx->frame && !ctx->fb_direct) (void)peos_munmap((uint64_t)(uintptr_t)ctx->frame, ctx->map_bytes);
+    if (ctx->frame) (void)peos_munmap((uint64_t)(uintptr_t)ctx->frame, ctx->map_bytes);
 }
 
 // Poll keyboard/mouse events and update the cursor position.
@@ -536,6 +686,13 @@ static int sl_handle_input(sl_ctx_t *ctx) {
 
         ctx->cursor_x = (uint32_t)nx;
         ctx->cursor_y = (uint32_t)ny;
+
+        uint8_t left_now = (uint8_t)(mev.buttons & 0x01u);
+        uint8_t left_prev = (uint8_t)(g_prev_mouse_buttons & 0x01u);
+        if (left_now && !left_prev) {
+            sl_focus_window_at_cursor(ctx->cursor_x, ctx->cursor_y);
+        }
+        g_prev_mouse_buttons = mev.buttons;
     }
     return 0;
 }
@@ -625,8 +782,33 @@ static void sl_render_full(sl_ctx_t *ctx) {
 // Present the frame when using copy mode; no-op in direct fbmap mode.
 static int sl_present(sl_ctx_t *ctx) {
     if (!ctx || !ctx->frame) return 0;
-    if (ctx->fb_direct) return 1;
+    if (ctx->fb_direct) {
+        if (!ctx->fb_front) return 0;
+        if (g_dirty.full) {
+            size_t rows = (size_t)ctx->fb.height;
+            size_t row_bytes = (size_t)ctx->fb.width * (size_t)ctx->bytespp;
+            for (size_t y = 0; y < rows; y++) {
+                uint8_t *dst = ctx->fb_front + (y * ctx->fb_front_stride);
+                const uint8_t *src = ctx->frame + (y * ctx->row_stride);
+                peos_memcpy(dst, src, row_bytes);
+            }
+        } else {
+            for (size_t i = 0; i < g_dirty.count; i++) {
+                const sl_rect_t *r = &g_dirty.rects[i];
+                size_t row_bytes = (size_t)r->w * (size_t)ctx->bytespp;
+                for (uint32_t y = 0; y < r->h; y++) {
+                    size_t yy = (size_t)r->y + (size_t)y;
+                    uint8_t *dst = ctx->fb_front + (yy * ctx->fb_front_stride) + ((size_t)r->x * (size_t)ctx->bytespp);
+                    const uint8_t *src = ctx->frame + (yy * ctx->row_stride) + ((size_t)r->x * (size_t)ctx->bytespp);
+                    peos_memcpy(dst, src, row_bytes);
+                }
+            }
+        }
+        sl_dirty_reset();
+        return 1;
+    }
     uint64_t wr = peos_fbpresent(ctx->frame, ctx->frame_bytes, PEOS_FBPRESENT_EXCLUSIVE);
+    sl_dirty_reset();
     return (int64_t)wr >= 0 && wr == (uint64_t)ctx->frame_bytes;
 }
 
@@ -676,9 +858,11 @@ int main(void) {
     else peos_puts("starlight: cursor mode = software\n");
 
     sl_render_full(&ctx);
+    sl_dirty_mark_full();
     if (!ctx.hw_cursor) {
         sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);
         sl_render_cursor(&ctx);
+        sl_dirty_add(&ctx, ctx.cursor_x, ctx.cursor_y, SL_CURSOR_W, SL_CURSOR_H);
     }
     else sl_hw_cursor_sync_pos(&ctx);
     if (!sl_present(&ctx)) {
@@ -687,10 +871,30 @@ int main(void) {
         peos_exit(1);
     }
 
+    // Create 5 test windows
+    for (size_t i = 0; i < 5; i++) {
+        sl_window_t w;
+        sl_window_init(&w, &ctx, 50u + (i * 30u), 50u + (i * 30u), 200u, 150u);
+        // Add to list of windows
+        g_windows = (sl_window_t *)realloc(g_windows, sizeof(sl_window_t) * (g_window_count + 1));
+        if (g_windows) {
+            g_windows[g_window_count] = w;
+            g_window_count++;
+            g_focused_window = g_window_count - 1u;
+            sl_window_refresh_zorder();
+        }
+    }
+
     uint64_t next_frame_ns = peos_time_ns() + SL_FRAME_NS;
 
     for (;;) {
-        if (!ctx.hw_cursor) sl_sw_cursor_restore(&ctx);
+        if (!ctx.hw_cursor) {
+            if (ctx.cursor_saved_valid) {
+                sl_dirty_add(&ctx, ctx.cursor_saved_x, ctx.cursor_saved_y,
+                             ctx.cursor_saved_w, ctx.cursor_saved_h);
+            }
+            sl_sw_cursor_restore(&ctx);
+        }
 
         uint32_t old_x = ctx.cursor_x;
         uint32_t old_y = ctx.cursor_y;
@@ -716,12 +920,22 @@ int main(void) {
             fps_str[0] = '?';
             fps_str[1] = '\0';
         }
+        sl_dirty_add(&ctx, 0u, 0u, 128u, 16u);
         sl_fill_rect(&ctx, 0, 0, 128, 16, 0x00, 0x00, 0x00);
         sl_draw_text(&ctx, 0, 0, "fps: ", 0xFF, 0xFF, 0xFF);
         sl_draw_text(&ctx, 32, 0, fps_str, 0xFF, 0xFF, 0xFF);
+
+        // Render all windows
+        for (size_t i = 0; i < g_window_count; i++) {
+            sl_dirty_add(&ctx, g_windows[i].x, g_windows[i].y,
+                         g_windows[i].width, g_windows[i].height);
+            sl_window_render(&g_windows[i]);
+        }
+
         if (!ctx.hw_cursor) {
             sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);
             sl_render_cursor(&ctx);
+            sl_dirty_add(&ctx, ctx.cursor_x, ctx.cursor_y, SL_CURSOR_W, SL_CURSOR_H);
         }
         if (!sl_present(&ctx)) break;
 
