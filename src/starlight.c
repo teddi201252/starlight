@@ -1,5 +1,6 @@
 #include "starlight.h"
 #include "render/pixels.h"
+#include <SDL2/SDL_mixer.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,9 @@
 #define SL_HW_CURSOR_SCALE_DEFAULT 100u
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
+
+static Mix_Music *g_startup_music = NULL;
+static int g_audio_open = 0;
 
 static void sl_copy_text(char *dst, size_t cap, const char *src) {
     if (!dst || cap == 0) return;
@@ -234,6 +238,41 @@ static char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap) {
     }
     out[n] = '\0';
     return out;
+}
+
+static void sl_audio_init(void) {
+    if (Mix_OpenAudio(44100, AUDIO_S16SYS, 2, 1024) != 0) {
+        fprintf(stderr, "starlight: Mix_OpenAudio failed: %s\n", Mix_GetError());
+        return;
+    }
+
+    g_audio_open = 1;
+    Mix_VolumeMusic(MIX_MAX_VOLUME);
+
+    g_startup_music = Mix_LoadMUS(SL_RESOURCE_START_WAV);
+    if (!g_startup_music) {
+        fprintf(stderr, "starlight: Mix_LoadMUS failed for '%s': %s\n",
+                SL_RESOURCE_START_WAV, Mix_GetError());
+        return;
+    }
+
+    if (Mix_PlayMusic(g_startup_music, 0) != 0) {
+        fprintf(stderr, "starlight: Mix_PlayMusic failed: %s\n", Mix_GetError());
+    }
+}
+
+static void sl_audio_shutdown(void) {
+    if (!g_audio_open) return;
+
+    Mix_HaltMusic();
+
+    if (g_startup_music) {
+        Mix_FreeMusic(g_startup_music);
+        g_startup_music = NULL;
+    }
+
+    Mix_CloseAudio();
+    g_audio_open = 0;
 }
 
 static void sl_build_default_cursor_rgba(uint8_t *dst, uint32_t w, uint32_t h) {
@@ -626,7 +665,7 @@ int main(void) {
         peos_puts("starlight: init failed\n");
         peos_exit(1);
     }
-
+    sl_audio_init();
     peos_puts("starlight: minimal skeleton running (ESC to exit)\n");
     if (ctx.fb_direct) {
         peos_puts("starlight: renderer mode = fbmap zero-copy\n");
@@ -643,6 +682,7 @@ int main(void) {
     }
     else sl_hw_cursor_sync_pos(&ctx);
     if (!sl_present(&ctx)) {
+        sl_audio_shutdown();
         sl_shutdown(&ctx);
         peos_exit(1);
     }
@@ -692,6 +732,7 @@ int main(void) {
     if (ctx.bg_loaded) {
         sl_image_free(&ctx.bg_image);
     }
+    sl_audio_shutdown();
     sl_shutdown(&ctx);
     peos_exit(0);
 }
