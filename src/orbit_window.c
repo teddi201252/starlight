@@ -1,26 +1,30 @@
 #include "orbit_window.h"
 
-#include "orbit_shell.h"
-
 #include <stddef.h>
 #include <stdint.h>
 
 #define ORBIT_MAX_LINES 256u
 #define ORBIT_LINE_CHARS 160u
-#define ORBIT_INPUT_CHARS 128u
 #define ORBIT_KEY_BACKSPACE 0x000Eu
+#define ORBIT_APP_SLOTS 2u
+#define ORBIT_MAX_POLL_READS 16u
 
 typedef struct {
     char lines[ORBIT_MAX_LINES][ORBIT_LINE_CHARS];
     size_t line_head;
     size_t line_count;
-    char input[ORBIT_INPUT_CHARS];
-    size_t input_len;
+    char pending_line[ORBIT_LINE_CHARS];
+    size_t pending_len;
     uint8_t shift_down;
     uint8_t initialized;
+    int64_t child_pid;
+    int64_t child_stdin_fd;
+    int64_t child_stdout_fd;
 } orbit_shell_t;
 
-static orbit_shell_t g_orbit;
+static orbit_shell_t g_orbit[ORBIT_APP_SLOTS];
+static app_instance_t g_orbit_app[ORBIT_APP_SLOTS];
+static uint8_t g_orbit_apps_bound = 0u;
 
 static void orbit_copy_str(char *dst, size_t cap, const char *src) {
     if (!dst || cap == 0u) return;
@@ -45,145 +49,149 @@ static void orbit_push_line(orbit_shell_t *shell, const char *line) {
     }
 }
 
-static void orbit_push_text(orbit_shell_t *shell, const char *text) {
-    if (!shell || !text) return;
-
-    char line[ORBIT_LINE_CHARS];
-    size_t n = 0u;
-
-    for (size_t i = 0u;; i++) {
-        char c = text[i];
-        if (c == '\n' || c == '\0') {
-            line[n] = '\0';
-            orbit_push_line(shell, line);
-            n = 0u;
-            if (c == '\0') break;
-            continue;
-        }
-
-        if (n + 1u < sizeof(line)) {
-            line[n++] = c;
-        }
-    }
-}
-
-static void orbit_clear_lines(orbit_shell_t *shell) {
+static void orbit_reset_buffer(orbit_shell_t *shell) {
     if (!shell) return;
     shell->line_head = 0u;
     shell->line_count = 0u;
+    shell->pending_len = 0u;
+    shell->pending_line[0] = '\0';
 }
 
-static void orbit_ui_writer(const char *text, size_t len, void *ctx) {
-    orbit_shell_t *shell = (orbit_shell_t *)ctx;
+static void orbit_feed_char(orbit_shell_t *shell, char c) {
+    if (!shell) return;
+    if (c == '\r') return;
+
+    if (c == '\n') {
+        shell->pending_line[shell->pending_len] = '\0';
+        orbit_push_line(shell, shell->pending_line);
+        shell->pending_len = 0u;
+        shell->pending_line[0] = '\0';
+        return;
+    }
+
+    if (c == '\b') {
+        if (shell->pending_len > 0u) {
+            shell->pending_len--;
+            shell->pending_line[shell->pending_len] = '\0';
+        }
+        return;
+    }
+
+    if ((uint8_t)c < 32u) return;
+    if (shell->pending_len + 1u >= sizeof(shell->pending_line)) {
+        shell->pending_line[shell->pending_len] = '\0';
+        orbit_push_line(shell, shell->pending_line);
+        shell->pending_len = 0u;
+    }
+    shell->pending_line[shell->pending_len++] = c;
+    shell->pending_line[shell->pending_len] = '\0';
+}
+
+static void orbit_feed_text(orbit_shell_t *shell, const char *text, size_t len) {
     if (!shell || !text || len == 0u) return;
-
-    char line[ORBIT_LINE_CHARS];
-    size_t ln = 0u;
     for (size_t i = 0u; i < len; i++) {
-        char c = text[i];
-        if (c == '\n') {
-            line[ln] = '\0';
-            orbit_push_line(shell, line);
-            ln = 0u;
-            continue;
-        }
-        if (ln + 1u < sizeof(line)) {
-            line[ln++] = c;
-        }
-    }
-
-    if (ln > 0u) {
-        line[ln] = '\0';
-        orbit_push_line(shell, line);
+        orbit_feed_char(shell, text[i]);
     }
 }
 
-static uint64_t orbit_exec_capture(const char *path, const char *arg_str, void *ctx) {
-    orbit_shell_t *shell = (orbit_shell_t *)ctx;
-    if (!shell || !path || !*path) return (uint64_t)-1;
-
-    uint64_t pipe_fds[2] = {0, 0};
-    if (peos_pipe(pipe_fds) != 0) return (uint64_t)-1;
-
-    int64_t rd_fd = (int64_t)pipe_fds[0];
-    int64_t wr_fd = (int64_t)pipe_fds[1];
-    int64_t pid = peos_spawnv(path, peos_strlen(path), arg_str, -1, wr_fd, wr_fd);
-
-    (void)peos_fclose((uint64_t)wr_fd);
-    if (pid <= 0) {
-        (void)peos_fclose((uint64_t)rd_fd);
-        return (uint64_t)-1;
+static void orbit_close_fds(orbit_shell_t *shell) {
+    if (!shell) return;
+    if (shell->child_stdin_fd >= 0) {
+        (void)peos_fclose((uint64_t)shell->child_stdin_fd);
+        shell->child_stdin_fd = -1;
     }
+    if (shell->child_stdout_fd >= 0) {
+        (void)peos_fclose((uint64_t)shell->child_stdout_fd);
+        shell->child_stdout_fd = -1;
+    }
+}
+
+static int orbit_spawn_process(orbit_shell_t *shell) {
+    if (!shell) return 0;
+
+    uint64_t stdin_pipe[2] = {0, 0};
+    uint64_t stdout_pipe[2] = {0, 0};
+    if (peos_pipe(stdin_pipe) != 0) return 0;
+    if (peos_pipe(stdout_pipe) != 0) {
+        (void)peos_fclose(stdin_pipe[0]);
+        (void)peos_fclose(stdin_pipe[1]);
+        return 0;
+    }
+
+    int64_t child_stdin_rd = (int64_t)stdin_pipe[0];
+    int64_t parent_stdin_wr = (int64_t)stdin_pipe[1];
+    int64_t parent_stdout_rd = (int64_t)stdout_pipe[0];
+    int64_t child_stdout_wr = (int64_t)stdout_pipe[1];
+
+    const char *path = "/bin/orbit";
+    int64_t pid = peos_spawnv(path, peos_strlen(path), NULL,
+                              child_stdin_rd, child_stdout_wr, child_stdout_wr);
+
+    (void)peos_fclose((uint64_t)child_stdin_rd);
+    (void)peos_fclose((uint64_t)child_stdout_wr);
+
+    if (pid <= 0) {
+        (void)peos_fclose((uint64_t)parent_stdin_wr);
+        (void)peos_fclose((uint64_t)parent_stdout_rd);
+        return 0;
+    }
+
+    shell->child_pid = pid;
+    shell->child_stdin_fd = parent_stdin_wr;
+    shell->child_stdout_fd = parent_stdout_rd;
+    return 1;
+}
+
+static void orbit_stop_process(orbit_shell_t *shell) {
+    if (!shell) return;
+    if (shell->child_stdin_fd >= 0) {
+        (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "exit\n", 5u);
+    }
+    orbit_close_fds(shell);
+    shell->child_pid = -1;
+}
+
+static void orbit_mark_child_exited(orbit_shell_t *shell) {
+    if (!shell) return;
+    orbit_close_fds(shell);
+    shell->child_pid = -1;
+    orbit_push_line(shell, "[orbit exited] Press Enter to restart.");
+}
+
+static void orbit_poll_output(orbit_shell_t *shell) {
+    if (!shell || shell->child_stdout_fd < 0) return;
 
     char buf[256];
-    uint8_t child_done = 0u;
-    for (;;) {
-        uint64_t n = peos_fread((uint64_t)rd_fd, buf, sizeof(buf));
+    for (uint32_t i = 0u; i < ORBIT_MAX_POLL_READS; i++) {
+        uint64_t n = peos_fread((uint64_t)shell->child_stdout_fd, buf, sizeof(buf));
         if ((int64_t)n < 0) {
-            (void)peos_fclose((uint64_t)rd_fd);
-            return (uint64_t)-1;
-        }
-        if (n > 0) {
-            orbit_ui_writer(buf, (size_t)n, shell);
-        }
-
-        if (!child_done) {
-            int status = 0;
-            uint64_t w = peos_waitpid_flags((uint64_t)pid, &status, PEOS_WAIT_NOHANG);
-            if ((int64_t)w < 0) {
-                (void)peos_fclose((uint64_t)rd_fd);
-                return (uint64_t)-1;
-            }
-            if (w == (uint64_t)pid) {
-                child_done = 1u;
-            }
-        }
-
-        if (child_done && n == 0) {
             break;
         }
+        if (n == 0u) {
+            break;
+        }
+        orbit_feed_text(shell, buf, (size_t)n);
+    }
 
-        if (n == 0 && !child_done) {
-            peos_sleep(1);
+    if (shell->child_pid > 0) {
+        int status = 0;
+        uint64_t w = peos_waitpid_flags((uint64_t)shell->child_pid, &status, PEOS_WAIT_NOHANG);
+        if (w == (uint64_t)shell->child_pid) {
+            orbit_mark_child_exited(shell);
         }
     }
-
-    (void)peos_fclose((uint64_t)rd_fd);
-    return 0;
 }
 
-static void orbit_execute_line(orbit_shell_t *shell, const char *line) {
-    if (!shell || !line) return;
-
-    char cmdline[ORBIT_LINE_CHARS];
-    size_t p = 0u;
-    const char *prompt = orbit_shell_prompt();
-    while (prompt[p] && p + 1u < sizeof(cmdline)) {
-        cmdline[p] = prompt[p];
-        p++;
+static void orbit_send_input(orbit_shell_t *shell, const char *buf, size_t len) {
+    if (!shell || !buf || len == 0u) return;
+    if (shell->child_pid <= 0) {
+        if (!orbit_spawn_process(shell)) {
+            orbit_push_line(shell, "failed to start /bin/orbit");
+            return;
+        }
     }
-    size_t i = 0u;
-    while (line[i] && p + 1u < sizeof(cmdline)) {
-        cmdline[p++] = line[i++];
-    }
-    cmdline[p] = '\0';
-    orbit_push_line(shell, cmdline);
-
-    orbit_shell_io_t io = {
-        .write = orbit_ui_writer,
-        .execv = orbit_exec_capture,
-        .ctx = shell,
-    };
-
-    int clear_requested = 0;
-    int exit_requested = 0;
-    orbit_shell_execute_line(&io, line, &clear_requested, &exit_requested);
-
-    if (clear_requested) {
-        orbit_clear_lines(shell);
-    }
-    if (exit_requested) {
-        orbit_push_text(shell, "Use ESC to leave Starlight.");
+    if (shell->child_stdin_fd >= 0) {
+        (void)peos_fwrite((uint64_t)shell->child_stdin_fd, buf, len);
     }
 }
 
@@ -241,44 +249,54 @@ static char orbit_key_to_char(uint16_t code, uint8_t shift) {
     }
 }
 
+static uint16_t orbit_norm_keycode(uint16_t code) {
+    if ((code & 0xFF00u) == 0xE000u) {
+        return (uint16_t)(code & 0x00FFu);
+    }
+    return code;
+}
+
 static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
-                           const peos_input_event_t *event) {
+                           const peos_input_event_t *event, void *userdata) {
     (void)ctx;
     (void)frame;
     if (!event) return;
 
-    orbit_shell_t *shell = &g_orbit;
+    orbit_shell_t *shell = (orbit_shell_t *)userdata;
+    if (!shell) return;
 
-    if (event->code == PEOS_KEY_LSHIFT || event->code == PEOS_KEY_RSHIFT) {
+    uint16_t code = orbit_norm_keycode(event->code);
+
+    if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) {
         shell->shift_down = event->pressed ? 1u : 0u;
         return;
     }
 
     if (!event->pressed) return;
 
-    if (event->code == PEOS_KEY_ENTER) {
-        shell->input[shell->input_len] = '\0';
-        orbit_execute_line(shell, shell->input);
-        shell->input_len = 0u;
-        shell->input[0] = '\0';
-        return;
-    }
-
-    if (event->code == ORBIT_KEY_BACKSPACE) {
-        if (shell->input_len > 0u) {
-            shell->input_len--;
-            shell->input[shell->input_len] = '\0';
+    if (code == PEOS_KEY_ENTER) {
+        if (shell->child_pid <= 0) {
+            if (!orbit_spawn_process(shell)) {
+                orbit_push_line(shell, "failed to start /bin/orbit");
+            }
+        } else {
+            orbit_send_input(shell, "\n", 1u);
         }
         return;
     }
 
-    char c = orbit_key_to_char(event->code, shell->shift_down);
+    if (code == ORBIT_KEY_BACKSPACE) {
+        orbit_send_input(shell, "\b", 1u);
+        return;
+    }
+
+    char c = orbit_key_to_char(code, shell->shift_down);
+    if (!c && code >= 32u && code <= 126u) {
+        c = (char)code;
+    }
     if (!c) return;
 
-    if (shell->input_len + 1u < sizeof(shell->input)) {
-        shell->input[shell->input_len++] = c;
-        shell->input[shell->input_len] = '\0';
-    }
+    orbit_send_input(shell, &c, 1u);
 }
 
 static const char *orbit_get_line(const orbit_shell_t *shell, size_t logical_index) {
@@ -290,6 +308,8 @@ static const char *orbit_get_line(const orbit_shell_t *shell, size_t logical_ind
 static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdata) {
     orbit_shell_t *shell = (orbit_shell_t *)userdata;
     if (!ctx || !win || !shell) return;
+
+    orbit_poll_output(shell);
 
     uint32_t body_x = win->x + 2u;
     uint32_t body_y = win->y + win->top_bar_height + 1u;
@@ -305,76 +325,115 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     uint32_t text_y = body_y + 4u;
     uint32_t text_w = (body_w > 8u) ? (body_w - 8u) : 0u;
     uint32_t text_h = (body_h > 8u) ? (body_h - 8u) : 0u;
-    if (text_w < 8u || text_h < 16u) return;
+    if (text_w < 8u || text_h < 8u) return;
 
     uint32_t cols = text_w / 8u;
     uint32_t rows = text_h / 8u;
-    if (cols < 8u || rows < 2u) return;
+    if (cols < 8u || rows < 1u) return;
 
-    uint32_t history_rows = rows - 1u;
+    uint32_t history_rows = rows;
+    size_t virtual_total = shell->line_count + ((shell->pending_len > 0u) ? 1u : 0u);
     size_t start = 0u;
-    if (shell->line_count > history_rows) {
-        start = shell->line_count - history_rows;
+    if (virtual_total > history_rows) {
+        start = virtual_total - history_rows;
     }
 
     for (uint32_t r = 0u; r < history_rows; r++) {
         size_t idx = start + r;
-        if (idx >= shell->line_count) break;
-        sl_draw_text(ctx, text_x, text_y + (r * 8u), orbit_get_line(shell, idx), 200u, 230u, 200u);
+        if (idx >= virtual_total) break;
+
+        const char *src = NULL;
+        char line_buf[ORBIT_LINE_CHARS];
+        if (idx < shell->line_count) {
+            src = orbit_get_line(shell, idx);
+        } else {
+            orbit_copy_str(line_buf, sizeof(line_buf), shell->pending_line);
+            uint64_t blink = (peos_time_ns() / 500000000ull) & 1ull;
+            size_t n = peos_strlen(line_buf);
+            if (win->focused && blink && n + 1u < sizeof(line_buf)) {
+                line_buf[n++] = '_';
+                line_buf[n] = '\0';
+            }
+            src = line_buf;
+        }
+
+        size_t n = peos_strlen(src);
+        if (n > cols) {
+            const char *tail = src + (n - cols);
+            char clipped[ORBIT_LINE_CHARS];
+            orbit_copy_str(clipped, sizeof(clipped), tail);
+            sl_draw_text(ctx, text_x, text_y + (r * 8u), clipped, 200u, 230u, 200u);
+        } else {
+            sl_draw_text(ctx, text_x, text_y + (r * 8u), src, 200u, 230u, 200u);
+        }
     }
 
-    char prompt_line[ORBIT_LINE_CHARS];
-    size_t n = 0u;
-    const char *prompt = orbit_shell_prompt();
-    while (prompt[n] && n + 1u < sizeof(prompt_line)) {
-        prompt_line[n] = prompt[n];
-        n++;
-    }
-    for (size_t i = 0u; shell->input[i] && n + 1u < sizeof(prompt_line); i++) {
-        prompt_line[n++] = shell->input[i];
-    }
-
-    uint64_t blink = (peos_time_ns() / 500000000ull) & 1ull;
-    if (win->focused && blink && n + 1u < sizeof(prompt_line)) {
-        prompt_line[n++] = '_';
-    }
-    prompt_line[n] = '\0';
-
-    if (n > cols) {
-        size_t keep = cols;
-        const char *tail = prompt_line + (n - keep);
-        char clipped[ORBIT_LINE_CHARS];
-        orbit_copy_str(clipped, sizeof(clipped), tail);
-        sl_draw_text(ctx, text_x, text_y + (history_rows * 8u), clipped, 255u, 255u, 255u);
+    if (shell->child_pid <= 0 && shell->pending_len == 0u) {
+        const char *hint = "[Enter] start orbit";
+        size_t n = peos_strlen(hint);
+        if (n > cols) {
+            hint += (n - cols);
+        }
+        sl_draw_text(ctx, text_x, text_y + ((history_rows - 1u) * 8u), hint, 170u, 170u, 170u);
     } else {
-        sl_draw_text(ctx, text_x, text_y + (history_rows * 8u), prompt_line, 255u, 255u, 255u);
+        g_orbit_app[0].pid = (shell == &g_orbit[0]) ? (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u) : g_orbit_app[0].pid;
+        g_orbit_app[1].pid = (shell == &g_orbit[1]) ? (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u) : g_orbit_app[1].pid;
     }
 }
 
-static app_instance_t g_orbit_app = {
-    .pid = 0u,
-    .tid = 0u,
-    .on_input = orbit_on_input,
-    .on_render = orbit_on_render,
-    .userdata = &g_orbit,
-};
+static void orbit_bind_apps(void) {
+    if (g_orbit_apps_bound) return;
+    for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
+        g_orbit_app[i].pid = 0u;
+        g_orbit_app[i].tid = 0u;
+        g_orbit_app[i].on_input = orbit_on_input;
+        g_orbit_app[i].on_render = orbit_on_render;
+        g_orbit_app[i].userdata = &g_orbit[i];
+    }
+    g_orbit_apps_bound = 1u;
+}
 
 void sl_orbit_app_reset(void) {
-    peos_memset(&g_orbit, 0, sizeof(g_orbit));
+    orbit_bind_apps();
+    for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
+        orbit_stop_process(&g_orbit[i]);
+        peos_memset(&g_orbit[i], 0, sizeof(g_orbit[i]));
+        g_orbit[i].child_pid = -1;
+        g_orbit[i].child_stdin_fd = -1;
+        g_orbit[i].child_stdout_fd = -1;
+        orbit_reset_buffer(&g_orbit[i]);
 
-    orbit_shell_io_t io = {
-        .write = orbit_ui_writer,
-        .execv = orbit_exec_capture,
-        .ctx = &g_orbit,
-    };
-    orbit_shell_print_banner(&io);
+        if (!orbit_spawn_process(&g_orbit[i])) {
+            orbit_push_line(&g_orbit[i], "failed to start /bin/orbit");
+        }
 
-    g_orbit.initialized = 1u;
+        g_orbit_app[i].pid = (uint32_t)((g_orbit[i].child_pid > 0) ? g_orbit[i].child_pid : 0u);
+        g_orbit[i].initialized = 1u;
+    }
 }
 
 app_instance_t *sl_orbit_app_instance(void) {
-    if (!g_orbit.initialized) {
-        sl_orbit_app_reset();
+    return sl_orbit_app_instance_at(0u);
+}
+
+app_instance_t *sl_orbit_app_instance_at(size_t index) {
+    orbit_bind_apps();
+    if (index >= ORBIT_APP_SLOTS) return NULL;
+    if (!g_orbit[index].initialized) {
+        peos_memset(&g_orbit[index], 0, sizeof(g_orbit[index]));
+        g_orbit[index].child_pid = -1;
+        g_orbit[index].child_stdin_fd = -1;
+        g_orbit[index].child_stdout_fd = -1;
+        orbit_reset_buffer(&g_orbit[index]);
+
+        if (!orbit_spawn_process(&g_orbit[index])) {
+            orbit_push_line(&g_orbit[index], "failed to start /bin/orbit");
+        }
+
+        g_orbit_app[index].pid = (uint32_t)((g_orbit[index].child_pid > 0) ? g_orbit[index].child_pid : 0u);
+        g_orbit[index].initialized = 1u;
+    } else {
+        g_orbit_app[index].pid = (uint32_t)((g_orbit[index].child_pid > 0) ? g_orbit[index].child_pid : 0u);
     }
-    return &g_orbit_app;
+    return &g_orbit_app[index];
 }

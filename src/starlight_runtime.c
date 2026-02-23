@@ -463,7 +463,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
     sl_window_t *focused = sl_window_get_focused();
     if (focused && focused->task && focused->task->on_input && input.key_event_count) {
         for (uint8_t i = 0u; i < input.key_event_count; i++) {
-            focused->task->on_input(ctx, &input, &input.key_events[i]);
+            focused->task->on_input(ctx, &input, &input.key_events[i], focused->task->userdata);
         }
         sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
     }
