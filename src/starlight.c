@@ -32,7 +32,7 @@ int main(void) {
         peos_exit(1);
     }
 
-    sl_windows_create_test(&ctx, 5u);
+    sl_windows_create_default(&ctx);
 
     uint64_t next_frame_ns = 0;
 
