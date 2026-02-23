@@ -18,8 +18,13 @@ static int sl_window_contains_point(const sl_window_t *win, uint32_t x, uint32_t
 
 static void sl_window_refresh_zorder(void) {
     for (size_t i = 0; i < g_window_count; i++) {
+        uint8_t was_focused = g_windows[i].focused;
         g_windows[i].z_index = (uint32_t)i;
         g_windows[i].focused = (i == g_focused_window) ? 1u : 0u;
+        if (g_windows[i].focused != was_focused) {
+            g_windows[i].force_redraw = 1u;
+            g_windows[i].next_render_ns = 0ull;
+        }
     }
 }
 
@@ -88,14 +93,26 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
 
     sl_window_t win;
     sl_window_init(&win, ctx, sl_orbit_app_instance(), x, y, w, h);
+    sl_window_set_fps_profile(&win, 30u, 10u);
+
+    sl_window_t win2;
+    uint32_t w2 = (w > 80u) ? (w - 80u) : w;
+    uint32_t h2 = (h > 60u) ? (h - 60u) : h;
+    uint32_t x2 = x + 48u;
+    uint32_t y2 = y + 36u;
+    if (x2 + w2 > ctx->fb.width) x2 = (ctx->fb.width > w2) ? (ctx->fb.width - w2) : 0u;
+    if (y2 + h2 > ctx->fb.height) y2 = (ctx->fb.height > h2) ? (ctx->fb.height - h2) : 0u;
+    sl_window_init(&win2, ctx, sl_orbit_app_instance_at(1u), x2, y2, w2, h2);
+    sl_window_set_fps_profile(&win2, 30u, 10u);
 
     sl_window_t *new_windows =
-        (sl_window_t *)realloc(g_windows, sizeof(sl_window_t) * (g_window_count + 1u));
+        (sl_window_t *)realloc(g_windows, sizeof(sl_window_t) * (g_window_count + 2u));
     if (!new_windows) return;
 
     g_windows = new_windows;
     g_windows[g_window_count] = win;
-    g_window_count++;
+    g_windows[g_window_count + 1u] = win2;
+    g_window_count += 2u;
     g_focused_window = g_window_count - 1u;
     sl_window_refresh_zorder();
 }

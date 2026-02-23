@@ -7,7 +7,7 @@ typedef struct sl_window sl_window_t;
 typedef struct app_instance app_instance_t;
 
 typedef void (*sl_app_on_input_fn)(sl_ctx_t *ctx, const sl_input_frame_t *frame,
-                                   const peos_input_event_t *event);
+                                   const peos_input_event_t *event, void *userdata);
 typedef void (*sl_app_on_render_fn)(sl_ctx_t *ctx, const sl_window_t *win, void *userdata);
 
 struct app_instance {
@@ -36,8 +36,14 @@ struct sl_window {
     uint32_t client_width;
     uint32_t client_height;
     uint32_t client_stride;
+    uint8_t cache_valid;
+    uint8_t force_redraw;
+    uint16_t fps_focused;
+    uint16_t fps_unfocused;
+    uint64_t next_render_ns;
 };
 
 int sl_window_init(sl_window_t *win, sl_ctx_t *ctx, app_instance_t* task, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 void sl_window_shutdown(sl_window_t *win);
 int sl_window_render(sl_window_t *win);
+void sl_window_set_fps_profile(sl_window_t *win, uint16_t focused_fps, uint16_t unfocused_fps);
