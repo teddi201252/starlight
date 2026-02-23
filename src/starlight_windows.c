@@ -48,6 +48,7 @@ void sl_windows_focus_at_cursor(uint32_t x, uint32_t y) {
             return;
         }
     }
+    return;
 }
 
 void sl_windows_create_test(sl_ctx_t *ctx, size_t count) {
@@ -87,4 +88,15 @@ void sl_windows_destroy_all(void) {
     g_windows = NULL;
     g_window_count = 0u;
     g_focused_window = (size_t)-1;
+}
+
+void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y) {
+    if (!win) return;
+    win->x = new_x;
+    win->y = new_y;
+}
+
+sl_window_t* sl_window_get_focused(void) {
+    if (!g_windows || g_window_count == 0u || g_focused_window >= g_window_count) return NULL;
+    return &g_windows[g_focused_window];
 }

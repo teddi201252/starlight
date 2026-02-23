@@ -1,6 +1,7 @@
 #pragma once
 
 #include "starlight.h"
+#include "window.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -15,6 +16,7 @@ int sl_init(sl_ctx_t *ctx);
 void sl_shutdown(sl_ctx_t *ctx);
 int sl_handle_input(sl_ctx_t *ctx);
 void sl_render_full(sl_ctx_t *ctx);
+void sl_render_dirty_background(sl_ctx_t *ctx);
 int sl_present(sl_ctx_t *ctx);
 void sl_frame_pace(uint64_t *next_deadline_ns);
 
@@ -29,6 +31,8 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count);
 void sl_windows_render_all(sl_ctx_t *ctx);
 void sl_windows_focus_at_cursor(uint32_t x, uint32_t y);
 void sl_windows_destroy_all(void);
+void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y);
+sl_window_t* sl_window_get_focused(void);
 
 void sl_dirty_reset(void);
 void sl_dirty_mark_full(void);
