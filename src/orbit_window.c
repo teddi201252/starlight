@@ -116,6 +116,7 @@ static uint64_t orbit_exec_capture(const char *path, const char *arg_str, void *
     }
 
     char buf[256];
+    uint8_t child_done = 0u;
     for (;;) {
         uint64_t n = peos_fread((uint64_t)rd_fd, buf, sizeof(buf));
         if ((int64_t)n < 0) {
@@ -126,18 +127,23 @@ static uint64_t orbit_exec_capture(const char *path, const char *arg_str, void *
             orbit_ui_writer(buf, (size_t)n, shell);
         }
 
-        int status = 0;
-        uint64_t w = peos_waitpid_flags((uint64_t)pid, &status, PEOS_WAIT_NOHANG);
-        if ((int64_t)w < 0) {
-            (void)peos_fclose((uint64_t)rd_fd);
-            return (uint64_t)-1;
+        if (!child_done) {
+            int status = 0;
+            uint64_t w = peos_waitpid_flags((uint64_t)pid, &status, PEOS_WAIT_NOHANG);
+            if ((int64_t)w < 0) {
+                (void)peos_fclose((uint64_t)rd_fd);
+                return (uint64_t)-1;
+            }
+            if (w == (uint64_t)pid) {
+                child_done = 1u;
+            }
         }
 
-        if (w == (uint64_t)pid && n == 0) {
+        if (child_done && n == 0) {
             break;
         }
 
-        if (n == 0) {
+        if (n == 0 && !child_done) {
             peos_sleep(1);
         }
     }
