@@ -35,6 +35,7 @@ int main(void) {
     sl_windows_create_default(&ctx);
 
     uint64_t next_frame_ns = 0;
+    uint8_t orbit_prompt_blink_prev = 0u;
 
     for (;;) {
         if (!ctx.hw_cursor) {
@@ -51,6 +52,17 @@ int main(void) {
         if (ctx.cursor_x != old_x || ctx.cursor_y != old_y) {
             if (ctx.hw_cursor) {
                 sl_hw_cursor_sync_pos(&ctx);
+            }
+        }
+
+        {
+            uint8_t orbit_prompt_blink_now = (uint8_t)((peos_time_ns() / 500000000ull) & 1ull);
+            if (orbit_prompt_blink_now != orbit_prompt_blink_prev) {
+                orbit_prompt_blink_prev = orbit_prompt_blink_now;
+                sl_window_t *focused = sl_window_get_focused();
+                if (focused) {
+                    sl_dirty_add(&ctx, focused->x, focused->y, focused->width, focused->height);
+                }
             }
         }
 

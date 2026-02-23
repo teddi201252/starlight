@@ -23,8 +23,46 @@ void sl_put_pixel(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint8_t r, uint8_t g, u
 void sl_fill_rect(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                   uint8_t r, uint8_t g, uint8_t b) {
     if (!ctx || !ctx->frame) return;
-    for (uint32_t j = 0; j < h; j++) {
-        for (uint32_t i = 0; i < w; i++) {
+    if (w == 0u || h == 0u) return;
+    if (x >= ctx->fb.width || y >= ctx->fb.height) return;
+
+    uint32_t x_end = x + w;
+    uint32_t y_end = y + h;
+    if (x_end > ctx->fb.width) x_end = ctx->fb.width;
+    if (y_end > ctx->fb.height) y_end = ctx->fb.height;
+
+    uint32_t draw_w = x_end - x;
+    uint32_t draw_h = y_end - y;
+    if (draw_w == 0u || draw_h == 0u) return;
+
+    uint8_t *row = ctx->frame + ((size_t)y * ctx->row_stride) + ((size_t)x * (size_t)ctx->bytespp);
+
+    if (ctx->bytespp == 4u) {
+        uint32_t px = ((uint32_t)0xFFu << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+        for (uint32_t j = 0; j < draw_h; j++) {
+            uint32_t *dst = (uint32_t *)(void *)row;
+            for (uint32_t i = 0; i < draw_w; i++) dst[i] = px;
+            row += ctx->row_stride;
+        }
+        return;
+    }
+
+    if (ctx->bytespp == 3u) {
+        for (uint32_t j = 0; j < draw_h; j++) {
+            uint8_t *dst = row;
+            for (uint32_t i = 0; i < draw_w; i++) {
+                dst[0] = b;
+                dst[1] = g;
+                dst[2] = r;
+                dst += 3;
+            }
+            row += ctx->row_stride;
+        }
+        return;
+    }
+
+    for (uint32_t j = 0; j < draw_h; j++) {
+        for (uint32_t i = 0; i < draw_w; i++) {
             sl_put_pixel(ctx, x + i, y + j, r, g, b);
         }
     }
@@ -125,13 +163,27 @@ void sl_blit_rgba_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_
 
 void sl_draw_char(sl_ctx_t *ctx, uint32_t x, uint32_t y, char c, uint8_t r, uint8_t g, uint8_t b) {
     if (!ctx || !ctx->frame) return;
+    if (x >= ctx->fb.width || y >= ctx->fb.height) return;
+    if (ctx->bytespp != 3u && ctx->bytespp != 4u) return;
 
     const uint8_t *glyph = peos_font8x8_glyph(c);
     for (uint32_t j = 0; j < 8; j++) {
+        uint32_t yy = y + j;
+        if (yy >= ctx->fb.height) break;
+        uint8_t bits = glyph[j];
+        if (!bits) continue;
+
+        uint8_t *dst = ctx->frame + ((size_t)yy * ctx->row_stride) + ((size_t)x * (size_t)ctx->bytespp);
         for (uint32_t i = 0; i < 8; i++) {
-            if (glyph[j] & (1 << i)) {
-                sl_put_pixel(ctx, x + i, y + j, r, g, b);
+            uint32_t xx = x + i;
+            if (xx >= ctx->fb.width) break;
+            if ((bits & (uint8_t)(1u << i)) != 0u) {
+                dst[0] = b;
+                dst[1] = g;
+                dst[2] = r;
+                if (ctx->bytespp == 4u) dst[3] = 0xFFu;
             }
+            dst += ctx->bytespp;
         }
     }
 }

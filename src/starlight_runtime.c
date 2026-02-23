@@ -21,7 +21,7 @@
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
 #define SL_DIRTY_MAX_RECTS 128u
-#define SL_DRAG_DIRTY_PADDING 50u
+#define SL_DRAG_DIRTY_PADDING 8u
 
 typedef struct {
     uint32_t x;
@@ -53,6 +53,18 @@ static int sl_rects_overlap_or_touch(const sl_rect_t *a, const sl_rect_t *b) {
     uint64_t bx2 = (uint64_t)b->x + (uint64_t)b->w;
     uint64_t by2 = (uint64_t)b->y + (uint64_t)b->h;
     return !((ax2 < b->x) || (bx2 < a->x) || (ay2 < b->y) || (by2 < a->y));
+}
+
+int sl_dirty_intersects_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (w == 0u || h == 0u) return 0;
+    if (g_dirty.full) return 1;
+    if (g_dirty.count == 0u) return 0;
+
+    sl_rect_t in = { x, y, w, h };
+    for (size_t i = 0; i < g_dirty.count; i++) {
+        if (sl_rects_overlap_or_touch(&g_dirty.rects[i], &in)) return 1;
+    }
+    return 0;
 }
 
 static sl_rect_t sl_rect_union(const sl_rect_t *a, const sl_rect_t *b) {
@@ -461,6 +473,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
     if (input.mouse_left_pressed) {
         sl_windows_focus_at_cursor(ctx->cursor_x, ctx->cursor_y);
         focused = sl_window_get_focused();
+        sl_dirty_mark_full();
 
         g_drag_active = 0u;
         g_drag_window = NULL;

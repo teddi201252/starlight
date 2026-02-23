@@ -103,8 +103,10 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
 void sl_windows_render_all(sl_ctx_t *ctx) {
     if (!ctx || !g_windows || g_window_count == 0u) return;
     for (size_t i = 0; i < g_window_count; i++) {
-        sl_dirty_add(ctx, g_windows[i].x, g_windows[i].y,
-                     g_windows[i].width, g_windows[i].height);
+        if (!sl_dirty_intersects_rect(g_windows[i].x, g_windows[i].y,
+                                      g_windows[i].width, g_windows[i].height)) {
+            continue;
+        }
         sl_window_render(&g_windows[i]);
     }
 }
