@@ -28,6 +28,7 @@ void sl_sw_cursor_restore(sl_ctx_t *ctx);
 void sl_hw_cursor_sync_pos(sl_ctx_t *ctx);
 
 void sl_windows_create_test(sl_ctx_t *ctx, size_t count);
+void sl_windows_create_default(sl_ctx_t *ctx);
 void sl_windows_render_all(sl_ctx_t *ctx);
 void sl_windows_focus_at_cursor(uint32_t x, uint32_t y);
 void sl_windows_destroy_all(void);

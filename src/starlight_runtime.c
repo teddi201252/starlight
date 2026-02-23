@@ -7,7 +7,7 @@
 #include <string.h>
 
 #ifndef SL_TARGET_FPS
-#define SL_TARGET_FPS 144u
+#define SL_TARGET_FPS 60u
 #endif
 
 #if SL_TARGET_FPS == 0
@@ -21,6 +21,7 @@
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
 #define SL_DIRTY_MAX_RECTS 128u
+#define SL_DRAG_DIRTY_PADDING 50u
 
 typedef struct {
     uint32_t x;
@@ -34,6 +35,11 @@ static struct {
     size_t count;
     uint8_t full;
 } g_dirty = {0};
+
+static sl_window_t *g_drag_window = NULL;
+static uint8_t g_drag_active = 0u;
+static int32_t g_drag_grab_offset_x = 0;
+static int32_t g_drag_grab_offset_y = 0;
 
 void sl_dirty_reset(void) {
     g_dirty.count = 0;
@@ -80,8 +86,10 @@ void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint3
     if (w == 0u || h == 0u) return;
     if (x >= ctx->fb.width || y >= ctx->fb.height) return;
 
-    if (x + w > ctx->fb.width) w = ctx->fb.width - x;
-    if (y + h > ctx->fb.height) h = ctx->fb.height - y;
+    uint64_t x2 = (uint64_t)x + (uint64_t)w;
+    uint64_t y2 = (uint64_t)y + (uint64_t)h;
+    if (x2 > (uint64_t)ctx->fb.width) w = ctx->fb.width - x;
+    if (y2 > (uint64_t)ctx->fb.height) h = ctx->fb.height - y;
     if (w == 0u || h == 0u) return;
 
     sl_rect_t in = {x, y, w, h};
@@ -112,6 +120,29 @@ void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint3
         return;
     }
     g_dirty.rects[g_dirty.count++] = in;
+}
+
+static void sl_dirty_add_padded(const sl_ctx_t *ctx, uint32_t x, uint32_t y,
+                                uint32_t w, uint32_t h, uint32_t pad) {
+    if (!ctx || w == 0u || h == 0u) return;
+
+    int64_t x0 = (int64_t)x - (int64_t)pad;
+    int64_t y0 = (int64_t)y - (int64_t)pad;
+    int64_t x1 = (int64_t)x + (int64_t)w + (int64_t)pad;
+    int64_t y1 = (int64_t)y + (int64_t)h + (int64_t)pad;
+
+    if (x1 <= 0 || y1 <= 0) return;
+    if (x0 >= (int64_t)ctx->fb.width || y0 >= (int64_t)ctx->fb.height) return;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int64_t)ctx->fb.width) x1 = (int64_t)ctx->fb.width;
+    if (y1 > (int64_t)ctx->fb.height) y1 = (int64_t)ctx->fb.height;
+
+    uint32_t cw = (uint32_t)(x1 - x0);
+    uint32_t ch = (uint32_t)(y1 - y0);
+    if (cw == 0u || ch == 0u) return;
+    sl_dirty_add(ctx, (uint32_t)x0, (uint32_t)y0, cw, ch);
 }
 
 static void sl_copy_text(char *dst, size_t cap, const char *src) {
@@ -416,28 +447,62 @@ void sl_shutdown(sl_ctx_t *ctx) {
 int sl_handle_input(sl_ctx_t *ctx) {
     sl_input_frame_t input;
     if (sl_input_poll(ctx, &input) < 0) return 1;
+
+    sl_window_t *focused = sl_window_get_focused();
+    if (focused && focused->task && focused->task->on_input && input.key_event_count) {
+        for (uint8_t i = 0u; i < input.key_event_count; i++) {
+            focused->task->on_input(ctx, &input, &input.key_events[i]);
+        }
+        sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
+    }
+
     if (input.quit_requested) return 1;
+
     if (input.mouse_left_pressed) {
         sl_windows_focus_at_cursor(ctx->cursor_x, ctx->cursor_y);
-    }
-    if (input.mouse_moved && input.mouse_buttons & 0x01) {
-        uint32_t old_x = 0u;
-        uint32_t old_y = 0u;
-        uint32_t old_w = 0u;
-        uint32_t old_h = 0u;
-        // Find the currently focused window (if any) to mark it dirty after moving the cursor
-        sl_window_t *last_focused_window = sl_window_get_focused();
-        if (last_focused_window) {
-            old_x = last_focused_window->x;
-            old_y = last_focused_window->y;
-            old_w = last_focused_window->width;
-            old_h = last_focused_window->height;
+        focused = sl_window_get_focused();
+
+        g_drag_active = 0u;
+        g_drag_window = NULL;
+        if (focused) {
+            uint32_t top_bar_h = focused->top_bar_height;
+            if (top_bar_h > focused->height) top_bar_h = focused->height;
+
+            uint8_t inside_x = (ctx->cursor_x >= focused->x) &&
+                               (ctx->cursor_x < (focused->x + focused->width));
+            uint8_t inside_topbar = (ctx->cursor_y >= focused->y) &&
+                                    (ctx->cursor_y < (focused->y + top_bar_h));
+            if (inside_x && inside_topbar) {
+                g_drag_active = 1u;
+                g_drag_window = focused;
+                g_drag_grab_offset_x = (int32_t)(ctx->cursor_x - focused->x);
+                g_drag_grab_offset_y = (int32_t)(ctx->cursor_y - focused->y);
+            }
         }
-        sl_window_move(last_focused_window, ctx->cursor_x, ctx->cursor_y);
-        if (last_focused_window) {
-            sl_dirty_add(ctx, old_x, old_y, old_w, old_h);
-            sl_dirty_add(ctx, last_focused_window->x, last_focused_window->y,
-                         last_focused_window->width, last_focused_window->height);
+    }
+
+    if (input.mouse_left_released) {
+        g_drag_active = 0u;
+        g_drag_window = NULL;
+    }
+
+    if (input.mouse_moved && (input.mouse_buttons & 0x01u) && g_drag_active && g_drag_window) {
+        uint32_t old_x = g_drag_window->x;
+        uint32_t old_y = g_drag_window->y;
+
+        int64_t new_x = (int64_t)ctx->cursor_x - (int64_t)g_drag_grab_offset_x;
+        int64_t new_y = (int64_t)ctx->cursor_y - (int64_t)g_drag_grab_offset_y;
+        if (new_x < 0) new_x = 0;
+        if (new_y < 0) new_y = 0;
+
+        sl_window_move(g_drag_window, (uint32_t)new_x, (uint32_t)new_y);
+        if (g_drag_window->x != old_x || g_drag_window->y != old_y) {
+            sl_dirty_add_padded(ctx, old_x, old_y,
+                                g_drag_window->width, g_drag_window->height,
+                                SL_DRAG_DIRTY_PADDING);
+            sl_dirty_add_padded(ctx, g_drag_window->x, g_drag_window->y,
+                                g_drag_window->width, g_drag_window->height,
+                                SL_DRAG_DIRTY_PADDING);
         }
     }
     return 0;

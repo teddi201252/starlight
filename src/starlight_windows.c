@@ -1,4 +1,5 @@
 #include "starlight_internal.h"
+#include "orbit_window.h"
 #include "window.h"
 
 #include <stdlib.h>
@@ -56,7 +57,7 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count) {
 
     for (size_t i = 0; i < count; i++) {
         sl_window_t w;
-        sl_window_init(&w, ctx, 50u + (i * 30u), 50u + (i * 30u), 200u, 150u);
+        sl_window_init(&w, ctx, NULL, 50u + (i * 30u), 50u + (i * 30u), 200u, 150u);
 
         sl_window_t *new_windows =
             (sl_window_t *)realloc(g_windows, sizeof(sl_window_t) * (g_window_count + 1u));
@@ -68,6 +69,35 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count) {
         g_focused_window = g_window_count - 1u;
         sl_window_refresh_zorder();
     }
+}
+
+void sl_windows_create_default(sl_ctx_t *ctx) {
+    if (!ctx) return;
+
+    sl_orbit_app_reset();
+
+    uint32_t w = 860u;
+    uint32_t h = 520u;
+    if (ctx->fb.width > 40u && w > ctx->fb.width - 40u) w = ctx->fb.width - 40u;
+    if (ctx->fb.height > 40u && h > ctx->fb.height - 40u) h = ctx->fb.height - 40u;
+    if (w < 320u) w = (ctx->fb.width > 20u) ? (ctx->fb.width - 20u) : ctx->fb.width;
+    if (h < 220u) h = (ctx->fb.height > 20u) ? (ctx->fb.height - 20u) : ctx->fb.height;
+
+    uint32_t x = (ctx->fb.width > w) ? ((ctx->fb.width - w) / 2u) : 0u;
+    uint32_t y = (ctx->fb.height > h) ? ((ctx->fb.height - h) / 2u) : 0u;
+
+    sl_window_t win;
+    sl_window_init(&win, ctx, sl_orbit_app_instance(), x, y, w, h);
+
+    sl_window_t *new_windows =
+        (sl_window_t *)realloc(g_windows, sizeof(sl_window_t) * (g_window_count + 1u));
+    if (!new_windows) return;
+
+    g_windows = new_windows;
+    g_windows[g_window_count] = win;
+    g_window_count++;
+    g_focused_window = g_window_count - 1u;
+    sl_window_refresh_zorder();
 }
 
 void sl_windows_render_all(sl_ctx_t *ctx) {
