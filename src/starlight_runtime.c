@@ -1,4 +1,5 @@
 #include "starlight_internal.h"
+#include "starlight_input.h"
 #include "render/pixels.h"
 
 #include <stdio.h>
@@ -20,8 +21,6 @@
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
 #define SL_DIRTY_MAX_RECTS 128u
-
-static uint8_t g_prev_mouse_buttons = 0u;
 
 typedef struct {
     uint32_t x;
@@ -392,6 +391,7 @@ int sl_init(sl_ctx_t *ctx) {
     if ((int64_t)peos_input_mode(PEOS_INPUT_MODE_RAW) == 0) {
         ctx->input_raw = 1;
     }
+    sl_input_state_reset();
 
     ctx->cursor_x = ctx->fb.width / 2u;
     ctx->cursor_y = ctx->fb.height / 2u;
@@ -414,34 +414,31 @@ void sl_shutdown(sl_ctx_t *ctx) {
 }
 
 int sl_handle_input(sl_ctx_t *ctx) {
-    peos_input_event_t evs[16];
-    peos_mouse_event_t mev;
-    uint64_t n = peos_input_poll(evs, 16);
-    int64_t mr = peos_input_mouse(&mev);
-    if ((int64_t)n < 0 || mr < 0) return 1;
-
-    for (uint64_t i = 0; i < n; i++) {
-        if (evs[i].pressed && evs[i].code == PEOS_KEY_ESC) return 1;
+    sl_input_frame_t input;
+    if (sl_input_poll(ctx, &input) < 0) return 1;
+    if (input.quit_requested) return 1;
+    if (input.mouse_left_pressed) {
+        sl_windows_focus_at_cursor(ctx->cursor_x, ctx->cursor_y);
     }
-
-    if (mr >= 0) {
-        int64_t nx = (int64_t)ctx->cursor_x + (int64_t)mev.dx;
-        int64_t ny = (int64_t)ctx->cursor_y + (int64_t)mev.dy;
-
-        if (nx < 0) nx = 0;
-        if (ny < 0) ny = 0;
-        if (ctx->fb.width > 0 && nx >= (int64_t)ctx->fb.width) nx = (int64_t)ctx->fb.width - 1;
-        if (ctx->fb.height > 0 && ny >= (int64_t)ctx->fb.height) ny = (int64_t)ctx->fb.height - 1;
-
-        ctx->cursor_x = (uint32_t)nx;
-        ctx->cursor_y = (uint32_t)ny;
-
-        uint8_t left_now = (uint8_t)(mev.buttons & 0x01u);
-        uint8_t left_prev = (uint8_t)(g_prev_mouse_buttons & 0x01u);
-        if (left_now && !left_prev) {
-            sl_windows_focus_at_cursor(ctx->cursor_x, ctx->cursor_y);
+    if (input.mouse_moved && input.mouse_buttons & 0x01) {
+        uint32_t old_x = 0u;
+        uint32_t old_y = 0u;
+        uint32_t old_w = 0u;
+        uint32_t old_h = 0u;
+        // Find the currently focused window (if any) to mark it dirty after moving the cursor
+        sl_window_t *last_focused_window = sl_window_get_focused();
+        if (last_focused_window) {
+            old_x = last_focused_window->x;
+            old_y = last_focused_window->y;
+            old_w = last_focused_window->width;
+            old_h = last_focused_window->height;
         }
-        g_prev_mouse_buttons = mev.buttons;
+        sl_window_move(last_focused_window, ctx->cursor_x, ctx->cursor_y);
+        if (last_focused_window) {
+            sl_dirty_add(ctx, old_x, old_y, old_w, old_h);
+            sl_dirty_add(ctx, last_focused_window->x, last_focused_window->y,
+                         last_focused_window->width, last_focused_window->height);
+        }
     }
     return 0;
 }
@@ -452,6 +449,78 @@ void sl_render_full(sl_ctx_t *ctx) {
         sl_blit_rgba_stretch(ctx, 0, 0, ctx->fb.width, ctx->fb.height,
                              ctx->bg_image.data, ctx->bg_image.width,
                              ctx->bg_image.height, ctx->bg_image.stride);
+    }
+}
+
+static void sl_render_bg_rect(sl_ctx_t *ctx, const sl_rect_t *r) {
+    if (!ctx || !r || !ctx->frame || !ctx->bg_image.data) return;
+    if (ctx->bg_image.channels < 3u) return;
+    if (ctx->bytespp != 3u && ctx->bytespp != 4u) return;
+    if (r->w == 0u || r->h == 0u) return;
+
+    uint32_t x0 = r->x;
+    uint32_t y0 = r->y;
+    uint32_t w = r->w;
+    uint32_t h = r->h;
+
+    if (x0 >= ctx->fb.width || y0 >= ctx->fb.height) return;
+    if (x0 + w > ctx->fb.width) w = ctx->fb.width - x0;
+    if (y0 + h > ctx->fb.height) h = ctx->fb.height - y0;
+    if (w == 0u || h == 0u) return;
+
+    const uint8_t *src_base = (const uint8_t *)ctx->bg_image.data;
+    uint32_t src_w = ctx->bg_image.width;
+    uint32_t src_h = ctx->bg_image.height;
+    uint32_t src_stride = ctx->bg_image.stride;
+    uint32_t src_ch = ctx->bg_image.channels;
+
+    for (uint32_t dy = 0; dy < h; dy++) {
+        uint32_t fb_y = y0 + dy;
+        uint32_t sy = (uint32_t)(((uint64_t)fb_y * (uint64_t)src_h) / (uint64_t)ctx->fb.height);
+        if (sy >= src_h) sy = src_h - 1u;
+
+        uint8_t *dst = ctx->frame + ((size_t)fb_y * ctx->row_stride) +
+                       ((size_t)x0 * (size_t)ctx->bytespp);
+        const uint8_t *srow = src_base + ((size_t)sy * (size_t)src_stride);
+
+        for (uint32_t dx = 0; dx < w; dx++) {
+            uint32_t fb_x = x0 + dx;
+            uint32_t sx = (uint32_t)(((uint64_t)fb_x * (uint64_t)src_w) / (uint64_t)ctx->fb.width);
+            if (sx >= src_w) sx = src_w - 1u;
+
+            const uint8_t *s = srow + ((size_t)sx * (size_t)src_ch);
+            uint8_t sr = s[0];
+            uint8_t sg = s[1];
+            uint8_t sb = s[2];
+            uint8_t sa = (src_ch >= 4u) ? s[3] : 255u;
+
+            if (sa == 255u) {
+                dst[0] = sb;
+                dst[1] = sg;
+                dst[2] = sr;
+            } else if (sa != 0u) {
+                dst[0] = (uint8_t)((((uint32_t)sb * (uint32_t)sa) + ((uint32_t)dst[0] * (255u - (uint32_t)sa)) + 127u) / 255u);
+                dst[1] = (uint8_t)((((uint32_t)sg * (uint32_t)sa) + ((uint32_t)dst[1] * (255u - (uint32_t)sa)) + 127u) / 255u);
+                dst[2] = (uint8_t)((((uint32_t)sr * (uint32_t)sa) + ((uint32_t)dst[2] * (255u - (uint32_t)sa)) + 127u) / 255u);
+            }
+
+            if (ctx->bytespp == 4u) dst[3] = 0xFFu;
+            dst += ctx->bytespp;
+        }
+    }
+}
+
+void sl_render_dirty_background(sl_ctx_t *ctx) {
+    if (!ctx || !ctx->frame || !ctx->bg_loaded) return;
+    if (!ctx->bg_image.data || ctx->bg_image.channels < 3u) return;
+
+    if (g_dirty.full) {
+        sl_render_full(ctx);
+        return;
+    }
+
+    for (size_t i = 0; i < g_dirty.count; i++) {
+        sl_render_bg_rect(ctx, &g_dirty.rects[i]);
     }
 }
 

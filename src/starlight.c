@@ -54,6 +54,8 @@ int main(void) {
             }
         }
 
+        sl_render_dirty_background(&ctx);
+
         // FPS Counter
         ctx.fps_frames++;
         uint64_t now = peos_time_ns();
