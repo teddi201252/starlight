@@ -340,10 +340,6 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
     if (*p == ':') p++;
     p = orbit_skip_spaces(p);
 
-    if (!shell->ui.host_hello_sent) {
-        orbit_send_host_hello(shell);
-    }
-
     const char *cmd_tok = NULL;
     size_t cmd_len = 0u;
     if (!orbit_next_token(&p, &cmd_tok, &cmd_len)) {
@@ -573,7 +569,6 @@ static int orbit_spawn_process(orbit_shell_t *shell) {
     shell->ui.hello_seen = 0u;
     shell->ui.client_proto_ver = 0u;
     shell->ui.client_caps_mask = 0u;
-    orbit_send_host_hello(shell);
     return 1;
 }
 
