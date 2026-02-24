@@ -12,13 +12,16 @@
 #define SL_APP_SLOT_MAX 8u
 
 #define SL_LAUNCHER_WIDTH 104u
+#define SL_LAUNCHER_MARGIN_LEFT 20u
 #define SL_LAUNCHER_RESERVED_GAP 12u
 #define SL_LAUNCHER_PAD_X 10u
 #define SL_LAUNCHER_PAD_Y 14u
 #define SL_LAUNCHER_HEADER_H 12u
 #define SL_LAUNCHER_ITEM_H 44u
 #define SL_LAUNCHER_ITEM_GAP 10u
-#define SL_LAUNCHER_ICON_SIZE 30u
+#define SL_LAUNCHER_ICON_SIZE 40u
+#define SL_LAUNCHER_TOOLTIP_PAD_X 8u
+#define SL_LAUNCHER_TOOLTIP_W_MAX 210u
 #define SL_APP_RESOURCE_MAX 16u
 
 typedef struct {
@@ -53,8 +56,13 @@ static size_t g_focused_window = (size_t)-1;
 
 static sl_launcher_item_t g_launcher_items[SL_APP_SLOT_MAX];
 static size_t g_launcher_count = 0u;
+static sl_image_t g_launcher_placeholder_icon;
+static uint8_t g_launcher_placeholder_loaded = 0u;
+static uint8_t g_launcher_placeholder_failed = 0u;
+static size_t g_launcher_hover_index = (size_t)-1;
 
 static void sl_window_refresh_zorder(void);
+static void sl_launcher_compact_label(const char *src, char *dst, size_t cap);
 
 static int sl_is_space(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
@@ -279,6 +287,7 @@ static void sl_launcher_items_reset(void) {
     }
     peos_memset(g_launcher_items, 0, sizeof(g_launcher_items));
     g_launcher_count = 0u;
+    g_launcher_hover_index = (size_t)-1;
 }
 
 static void sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app) {
@@ -301,10 +310,48 @@ static uint32_t sl_launcher_width(void) {
     return (g_launcher_count > 0u) ? SL_LAUNCHER_WIDTH : 0u;
 }
 
-static void sl_launcher_item_rect(size_t index, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+static uint32_t sl_launcher_panel_height(void) {
+    if (g_launcher_count == 0u) return 0u;
+    uint32_t count = (uint32_t)g_launcher_count;
+    uint32_t items_h = count * SL_LAUNCHER_ITEM_H;
+    if (count > 1u) {
+        items_h += (count - 1u) * SL_LAUNCHER_ITEM_GAP;
+    }
+    return SL_LAUNCHER_PAD_Y + SL_LAUNCHER_HEADER_H + 8u + items_h + SL_LAUNCHER_PAD_Y;
+}
+
+static void sl_launcher_panel_rect(const sl_ctx_t *ctx,
+                                   uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
     uint32_t panel_w = sl_launcher_width();
-    uint32_t item_x = SL_LAUNCHER_PAD_X;
-    uint32_t item_y = SL_LAUNCHER_PAD_Y + SL_LAUNCHER_HEADER_H + 8u +
+    uint32_t panel_h = sl_launcher_panel_height();
+    uint32_t panel_x = SL_LAUNCHER_MARGIN_LEFT;
+    uint32_t panel_y = 0u;
+
+    if (ctx) {
+        if (panel_w > ctx->fb.width) panel_w = ctx->fb.width;
+        if (panel_h > ctx->fb.height) panel_h = ctx->fb.height;
+        if (panel_x + panel_w > ctx->fb.width) {
+            panel_x = (panel_w >= ctx->fb.width) ? 0u : (ctx->fb.width - panel_w);
+        }
+        if (ctx->fb.height > panel_h) {
+            panel_y = (ctx->fb.height - panel_h) / 2u;
+        }
+    }
+
+    if (x) *x = panel_x;
+    if (y) *y = panel_y;
+    if (w) *w = panel_w;
+    if (h) *h = panel_h;
+}
+
+static void sl_launcher_item_rect(const sl_ctx_t *ctx, size_t index,
+                                  uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
+    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
+    (void)panel_h;
+
+    uint32_t item_x = panel_x + SL_LAUNCHER_PAD_X;
+    uint32_t item_y = panel_y + SL_LAUNCHER_PAD_Y + SL_LAUNCHER_HEADER_H + 8u +
                       (uint32_t)index * (SL_LAUNCHER_ITEM_H + SL_LAUNCHER_ITEM_GAP);
     uint32_t item_w = (panel_w > SL_LAUNCHER_PAD_X * 2u) ? (panel_w - SL_LAUNCHER_PAD_X * 2u) : panel_w;
 
@@ -314,16 +361,91 @@ static void sl_launcher_item_rect(size_t index, uint32_t *x, uint32_t *y, uint32
     if (h) *h = SL_LAUNCHER_ITEM_H;
 }
 
-static int sl_launcher_hit_test(uint32_t x, uint32_t y, size_t *out_index) {
-    uint32_t panel_w = sl_launcher_width();
-    if (panel_w == 0u) return 0;
-    if (x >= panel_w) return 0;
+static int sl_point_in_rect(uint32_t px, uint32_t py, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (w == 0u || h == 0u) return 0;
+    if (px < x || py < y) return 0;
+    if (px >= x + w || py >= y + h) return 0;
+    return 1;
+}
+
+static void sl_launcher_hover_label_rect(const sl_ctx_t *ctx, size_t index,
+                                         uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!ctx || index >= g_launcher_count) {
+        if (x) *x = 0u;
+        if (y) *y = 0u;
+        if (w) *w = 0u;
+        if (h) *h = 0u;
+        return;
+    }
+
+    const sl_launcher_item_t *item = &g_launcher_items[index];
+    char label[26];
+    sl_launcher_compact_label(item->title, label, sizeof(label));
+
+    uint32_t text_w = (uint32_t)strlen(label) * 8u;
+    uint32_t tip_w = text_w + SL_LAUNCHER_TOOLTIP_PAD_X * 2u;
+    if (tip_w > SL_LAUNCHER_TOOLTIP_W_MAX) tip_w = SL_LAUNCHER_TOOLTIP_W_MAX;
+    if (tip_w < 48u) tip_w = 48u;
+    uint32_t tip_h = SL_LAUNCHER_ITEM_H;
+
+    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
+    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
+    (void)panel_y;
+    (void)panel_h;
+
+    uint32_t item_x = 0u, item_y = 0u, item_w = 0u, item_h = 0u;
+    sl_launcher_item_rect(ctx, index, &item_x, &item_y, &item_w, &item_h);
+    (void)item_x;
+    (void)item_w;
+
+    uint32_t tip_x = panel_x + panel_w + 8u;
+    uint32_t tip_y = item_y;
+    if (item_h > tip_h) {
+        tip_y = item_y + ((item_h - tip_h) / 2u);
+    }
+
+    if (tip_x + tip_w > ctx->fb.width) {
+        tip_x = (ctx->fb.width > tip_w + 4u) ? (ctx->fb.width - tip_w - 4u) : 0u;
+    }
+    if (tip_y + tip_h > ctx->fb.height) {
+        tip_y = (ctx->fb.height > tip_h) ? (ctx->fb.height - tip_h) : 0u;
+    }
+
+    if (x) *x = tip_x;
+    if (y) *y = tip_y;
+    if (w) *w = tip_w;
+    if (h) *h = tip_h;
+}
+
+static void sl_launcher_draw_hover_label(sl_ctx_t *ctx, size_t index) {
+    if (!ctx || index >= g_launcher_count) return;
+
+    const sl_launcher_item_t *item = &g_launcher_items[index];
+    char label[26];
+    sl_launcher_compact_label(item->title, label, sizeof(label));
+
+    uint32_t tip_x = 0u, tip_y = 0u, tip_w = 0u, tip_h = 0u;
+    sl_launcher_hover_label_rect(ctx, index, &tip_x, &tip_y, &tip_w, &tip_h);
+    if (tip_w == 0u || tip_h == 0u) return;
+
+    sl_fill_rect(ctx, tip_x, tip_y, tip_w, tip_h, 20u, 25u, 34u);
+    sl_fill_rect(ctx, tip_x, tip_y, tip_w, 1u, 90u, 110u, 132u);
+    sl_fill_rect(ctx, tip_x, tip_y + tip_h - 1u, tip_w, 1u, 90u, 110u, 132u);
+    sl_fill_rect(ctx, tip_x, tip_y, 1u, tip_h, 90u, 110u, 132u);
+    sl_fill_rect(ctx, tip_x + tip_w - 1u, tip_y, 1u, tip_h, 90u, 110u, 132u);
+    sl_draw_text(ctx, tip_x + SL_LAUNCHER_TOOLTIP_PAD_X, tip_y + 15u, label, 242u, 244u, 247u);
+}
+
+static int sl_launcher_hit_test(const sl_ctx_t *ctx, uint32_t x, uint32_t y, size_t *out_index) {
+    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
+    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
+    if (panel_w == 0u || panel_h == 0u) return 0;
+    if (!sl_point_in_rect(x, y, panel_x, panel_y, panel_w, panel_h)) return 0;
 
     for (size_t i = 0u; i < g_launcher_count; i++) {
         uint32_t ix, iy, iw, ih;
-        sl_launcher_item_rect(i, &ix, &iy, &iw, &ih);
-        if (x < ix || y < iy) continue;
-        if (x >= ix + iw || y >= iy + ih) continue;
+        sl_launcher_item_rect(ctx, i, &ix, &iy, &iw, &ih);
+        if (!sl_point_in_rect(x, y, ix, iy, iw, ih)) continue;
         if (out_index) *out_index = i;
         return 1;
     }
@@ -454,6 +576,15 @@ static void sl_launcher_try_load_icon(sl_launcher_item_t *item) {
         item->icon_loaded = 1u;
     } else {
         item->icon_failed = 1u;
+    }
+}
+
+static void sl_launcher_try_load_placeholder_icon(void) {
+    if (g_launcher_placeholder_loaded || g_launcher_placeholder_failed) return;
+    if (sl_decode_image_file(SL_RESOURCE_APP_PLACEHOLDER, &g_launcher_placeholder_icon)) {
+        g_launcher_placeholder_loaded = 1u;
+    } else {
+        g_launcher_placeholder_failed = 1u;
     }
 }
 
@@ -688,6 +819,12 @@ void sl_windows_destroy_all(void) {
     g_window_count = 0u;
     g_focused_window = (size_t)-1;
     sl_launcher_items_reset();
+    if (g_launcher_placeholder_icon.data) {
+        sl_image_free(&g_launcher_placeholder_icon);
+    }
+    g_launcher_placeholder_loaded = 0u;
+    g_launcher_placeholder_failed = 0u;
+    g_launcher_hover_index = (size_t)-1;
 }
 
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y) {
@@ -702,43 +839,87 @@ sl_window_t* sl_window_get_focused(void) {
 }
 
 uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx) {
-    (void)ctx;
-    uint32_t panel_w = sl_launcher_width();
+    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
+    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
+    (void)panel_y;
+    (void)panel_h;
     if (panel_w == 0u) return 0u;
-    return panel_w + SL_LAUNCHER_RESERVED_GAP;
+    return panel_x + panel_w + SL_LAUNCHER_RESERVED_GAP;
 }
 
 int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx) return 0;
 
-    uint32_t panel_w = sl_launcher_width();
-    if (panel_w == 0u || x >= panel_w) return 0;
+    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
+    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
+    if (panel_w == 0u || panel_h == 0u) return 0;
+    if (x < panel_x || y < panel_y) return 0;
+    if (x >= panel_x + panel_w || y >= panel_y + panel_h) return 0;
 
     size_t index = 0u;
-    if (sl_launcher_hit_test(x, y, &index)) {
+    if (sl_launcher_hit_test(ctx, x, y, &index)) {
         (void)sl_windows_open_launcher_item(ctx, index);
     }
 
-    sl_dirty_add(ctx, 0u, 0u, panel_w, ctx->fb.height);
+    sl_dirty_add(ctx, panel_x, panel_y, panel_w, panel_h);
     return 1;
+}
+
+void sl_launcher_handle_hover(sl_ctx_t *ctx) {
+    if (!ctx) return;
+
+    size_t next_hover = (size_t)-1;
+    (void)sl_launcher_hit_test(ctx, ctx->cursor_x, ctx->cursor_y, &next_hover);
+    if (next_hover == g_launcher_hover_index) return;
+
+    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
+    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
+    if (panel_w > 0u && panel_h > 0u) {
+        sl_dirty_add(ctx, panel_x, panel_y, panel_w, panel_h);
+    }
+
+    if (g_launcher_hover_index != (size_t)-1) {
+        uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
+        sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
+        if (tw > 0u && th > 0u) sl_dirty_add(ctx, tx, ty, tw, th);
+    }
+    if (next_hover != (size_t)-1) {
+        uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
+        sl_launcher_hover_label_rect(ctx, next_hover, &tx, &ty, &tw, &th);
+        if (tw > 0u && th > 0u) sl_dirty_add(ctx, tx, ty, tw, th);
+    }
+
+    g_launcher_hover_index = next_hover;
 }
 
 void sl_launcher_render(sl_ctx_t *ctx) {
     if (!ctx) return;
 
-    uint32_t panel_w = sl_launcher_width();
-    if (panel_w == 0u) return;
-    if (!sl_dirty_intersects_rect(0u, 0u, panel_w, ctx->fb.height)) return;
+    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
+    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
+    if (panel_w == 0u || panel_h == 0u) return;
 
-    sl_fill_rect(ctx, 0u, 0u, panel_w, ctx->fb.height, 16u, 20u, 26u);
-    sl_fill_rect(ctx, panel_w - 1u, 0u, 1u, ctx->fb.height, 54u, 65u, 78u);
-    sl_draw_text(ctx, SL_LAUNCHER_PAD_X, SL_LAUNCHER_PAD_Y, "APPS", 228u, 233u, 238u);
+    uint8_t needs_panel = sl_dirty_intersects_rect(panel_x, panel_y, panel_w, panel_h) ? 1u : 0u;
+    uint8_t needs_tip = 0u;
+    if (g_launcher_hover_index != (size_t)-1) {
+        uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
+        sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
+        if (tw > 0u && th > 0u && sl_dirty_intersects_rect(tx, ty, tw, th)) {
+            needs_tip = 1u;
+        }
+    }
+    if (!needs_panel && !needs_tip) return;
+
+    sl_fill_rect(ctx, panel_x, panel_y, panel_w, panel_h, 16u, 20u, 26u);
+    sl_fill_rect(ctx, panel_x + panel_w - 1u, panel_y, 1u, panel_h, 54u, 65u, 78u);
+    sl_draw_text(ctx, panel_x + SL_LAUNCHER_PAD_X, panel_y + SL_LAUNCHER_PAD_Y, "APPS", 228u, 233u, 238u);
 
     for (size_t i = 0u; i < g_launcher_count; i++) {
         sl_launcher_item_t *item = &g_launcher_items[i];
         uint32_t ix, iy, iw, ih;
-        sl_launcher_item_rect(i, &ix, &iy, &iw, &ih);
+        sl_launcher_item_rect(ctx, i, &ix, &iy, &iw, &ih);
         sl_launcher_try_load_icon(item);
+        uint8_t hovered = (i == g_launcher_hover_index) ? 1u : 0u;
 
         size_t win_idx = (item->instance) ? sl_window_index_for_task(item->instance) : (size_t)-1;
         uint8_t running = (win_idx != (size_t)-1) ? 1u : 0u;
@@ -755,6 +936,11 @@ void sl_launcher_render(sl_ctx_t *ctx) {
             bg = 118u;
             bb = 146u;
         }
+        if (hovered) {
+            br = (uint8_t)(br + 10u);
+            bg = (uint8_t)(bg + 10u);
+            bb = (uint8_t)(bb + 10u);
+        }
 
         sl_fill_rect(ctx, ix, iy, iw, ih, br, bg, bb);
         sl_fill_rect(ctx, ix, iy + ih - 1u, iw, 1u, 24u, 30u, 38u);
@@ -763,19 +949,26 @@ void sl_launcher_render(sl_ctx_t *ctx) {
             sl_fill_rect(ctx, ix + 3u, iy + 3u, 4u, ih - 6u, 173u, 228u, 109u);
         }
 
-        uint8_t drew_icon = 0u;
+        const sl_image_t *icon_img = NULL;
         if (item->icon_loaded && item->icon_image.data) {
-            uint32_t icon_x = ix + ((iw > SL_LAUNCHER_ICON_SIZE)
-                                  ? ((iw - SL_LAUNCHER_ICON_SIZE) / 2u)
-                                  : 0u);
-            uint32_t icon_y = iy + ((ih > SL_LAUNCHER_ICON_SIZE)
-                                  ? ((ih - SL_LAUNCHER_ICON_SIZE) / 2u)
-                                  : 0u);
-            sl_blit_rgba_stretch(ctx, icon_x, icon_y, SL_LAUNCHER_ICON_SIZE, SL_LAUNCHER_ICON_SIZE,
-                                 item->icon_image.data,
-                                 item->icon_image.width,
-                                 item->icon_image.height,
-                                 item->icon_image.stride);
+            icon_img = &item->icon_image;
+        } else {
+            sl_launcher_try_load_placeholder_icon();
+            if (g_launcher_placeholder_loaded && g_launcher_placeholder_icon.data) {
+                icon_img = &g_launcher_placeholder_icon;
+            }
+        }
+
+        uint8_t drew_icon = 0u;
+        if (icon_img && icon_img->data) {
+            uint32_t icon_size = SL_LAUNCHER_ICON_SIZE;
+            uint32_t icon_x = ix + ((iw > icon_size) ? ((iw - icon_size) / 2u) : 0u);
+            uint32_t icon_y = iy + ((ih > icon_size) ? ((ih - icon_size) / 2u) : 0u);
+            sl_blit_rgba_stretch(ctx, icon_x, icon_y, icon_size, icon_size,
+                                 icon_img->data,
+                                 icon_img->width,
+                                 icon_img->height,
+                                 icon_img->stride);
             drew_icon = 1u;
         }
 
@@ -784,5 +977,9 @@ void sl_launcher_render(sl_ctx_t *ctx) {
             sl_launcher_compact_label(item->title, short_label, sizeof(short_label));
             sl_draw_text(ctx, ix + 12u, iy + 15u, short_label, 242u, 244u, 247u);
         }
+    }
+
+    if (g_launcher_hover_index != (size_t)-1) {
+        sl_launcher_draw_hover_label(ctx, g_launcher_hover_index);
     }
 }

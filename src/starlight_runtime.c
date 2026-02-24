@@ -488,6 +488,10 @@ int sl_handle_input(sl_ctx_t *ctx) {
     sl_input_frame_t input;
     if (sl_input_poll(ctx, &input) < 0) return 1;
 
+    if (input.mouse_moved) {
+        sl_launcher_handle_hover(ctx);
+    }
+
     uint32_t reserved_left = sl_launcher_reserved_left(ctx);
     uint8_t mouse_on_launcher = (reserved_left > 0u && ctx->cursor_x < reserved_left) ? 1u : 0u;
 
