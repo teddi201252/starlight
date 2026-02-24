@@ -7,7 +7,7 @@
 #define ORBIT_LINE_CHARS 160u
 #define ORBIT_KEY_BACKSPACE 0x000Eu
 #define ORBIT_APP_SLOTS 2u
-#define ORBIT_MAX_POLL_READS 16u
+#define ORBIT_MAX_POLL_READS 8u
 
 typedef struct {
     char lines[ORBIT_MAX_LINES][ORBIT_LINE_CHARS];
@@ -171,6 +171,9 @@ static void orbit_poll_output(orbit_shell_t *shell) {
             break;
         }
         orbit_feed_text(shell, buf, (size_t)n);
+        if (n < sizeof(buf)) {
+            break;
+        }
     }
 
     if (shell->child_pid > 0) {
