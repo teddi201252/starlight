@@ -18,11 +18,19 @@
 #define SL_LAUNCHER_HEADER_H 12u
 #define SL_LAUNCHER_ITEM_H 44u
 #define SL_LAUNCHER_ITEM_GAP 10u
+#define SL_LAUNCHER_ICON_SIZE 30u
+#define SL_APP_RESOURCE_MAX 16u
+
+typedef struct {
+    char key[48];
+    char path[160];
+} sl_bundle_resource_t;
 
 typedef struct {
     char title[64];
     char exec[160];
     char args[160];
+    char icon[160];
     uint32_t width;
     uint32_t height;
 } sl_app_bundle_t;
@@ -30,6 +38,10 @@ typedef struct {
 typedef struct {
     size_t slot;
     char title[64];
+    char icon_path[160];
+    sl_image_t icon_image;
+    uint8_t icon_loaded;
+    uint8_t icon_failed;
     uint32_t width;
     uint32_t height;
     app_instance_t *instance;
@@ -124,10 +136,10 @@ static int sl_join_path(char *out, size_t out_cap, const char *base, const char 
     return 1;
 }
 
-static int sl_resolve_exec_path(const char *bundle_dir, const char *exec_val,
-                                char *out, size_t out_cap) {
-    if (!bundle_dir || !exec_val || !out || out_cap == 0u) return 0;
-    const char *val = exec_val;
+static int sl_resolve_bundle_path(const char *bundle_dir, const char *path_val,
+                                  char *out, size_t out_cap) {
+    if (!bundle_dir || !path_val || !out || out_cap == 0u) return 0;
+    const char *val = path_val;
     while (*val == ' ') val++;
     if (*val == '\0') return 0;
 
@@ -140,6 +152,23 @@ static int sl_resolve_exec_path(const char *bundle_dir, const char *exec_val,
     return sl_join_path(out, out_cap, bundle_dir, val);
 }
 
+static int sl_resolve_exec_path(const char *bundle_dir, const char *exec_val,
+                                char *out, size_t out_cap) {
+    return sl_resolve_bundle_path(bundle_dir, exec_val, out, out_cap);
+}
+
+static const char *sl_resource_lookup(const sl_bundle_resource_t *resources,
+                                      size_t resource_count,
+                                      const char *key) {
+    if (!resources || !key || key[0] == '\0') return NULL;
+    for (size_t i = 0u; i < resource_count; i++) {
+        if (strcmp(resources[i].key, key) == 0) {
+            return resources[i].path;
+        }
+    }
+    return NULL;
+}
+
 static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir, sl_app_bundle_t *out) {
     if (!manifest_path || !out) return 0;
     FILE *f = fopen(manifest_path, "r");
@@ -150,16 +179,47 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
 
     char raw_exec[160];
     raw_exec[0] = '\0';
+    char raw_icon[160];
+    raw_icon[0] = '\0';
+    sl_bundle_resource_t resources[SL_APP_RESOURCE_MAX];
+    size_t resource_count = 0u;
+    uint8_t section_resources = 0u;
 
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         char *p = sl_trim(line);
         if (*p == '\0' || *p == '#' || *p == ';') continue;
+
+        if (p[0] == '[') {
+            size_t n = strlen(p);
+            if (n >= 2u && p[n - 1u] == ']') {
+                p[n - 1u] = '\0';
+                char *section = sl_trim(p + 1);
+                section_resources = (strcmp(section, "resources") == 0) ? 1u : 0u;
+            }
+            continue;
+        }
+
         char *eq = strchr(p, '=');
         if (!eq) continue;
         *eq = '\0';
         char *key = sl_trim(p);
         char *val = sl_trim(eq + 1);
+
+        if (section_resources) {
+            if (resource_count >= SL_APP_RESOURCE_MAX) continue;
+            if (key[0] == '\0' || val[0] == '\0') continue;
+            sl_bundle_resource_t *res = &resources[resource_count];
+            sl_copy_str(res->key, sizeof(res->key), key);
+            if (bundle_dir && bundle_dir[0]) {
+                if (!sl_resolve_bundle_path(bundle_dir, val, res->path, sizeof(res->path))) continue;
+            } else {
+                sl_copy_str(res->path, sizeof(res->path), val);
+            }
+            if (res->path[0] == '\0') continue;
+            resource_count++;
+            continue;
+        }
 
         if (strcmp(key, "title") == 0) {
             sl_copy_str(out->title, sizeof(out->title), val);
@@ -167,6 +227,8 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
             sl_copy_str(raw_exec, sizeof(raw_exec), val);
         } else if (strcmp(key, "args") == 0) {
             sl_copy_str(out->args, sizeof(out->args), val);
+        } else if (strcmp(key, "icon") == 0) {
+            sl_copy_str(raw_icon, sizeof(raw_icon), val);
         } else if (strcmp(key, "width") == 0) {
             (void)sl_parse_u32(val, &out->width);
         } else if (strcmp(key, "height") == 0) {
@@ -183,10 +245,38 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
     } else {
         sl_copy_str(out->exec, sizeof(out->exec), raw_exec);
     }
+
+    if (raw_icon[0] != '\0') {
+        const char *icon_src = raw_icon;
+        const char *resolved_icon = NULL;
+        uint8_t icon_is_resource_ref = 0u;
+
+        if (strncmp(icon_src, "res:", 4u) == 0) {
+            icon_is_resource_ref = 1u;
+            resolved_icon = sl_resource_lookup(resources, resource_count, icon_src + 4u);
+        } else {
+            resolved_icon = sl_resource_lookup(resources, resource_count, icon_src);
+        }
+
+        if (resolved_icon) {
+            sl_copy_str(out->icon, sizeof(out->icon), resolved_icon);
+        } else if (icon_is_resource_ref) {
+            out->icon[0] = '\0';
+        } else if (bundle_dir && bundle_dir[0]) {
+            (void)sl_resolve_bundle_path(bundle_dir, icon_src, out->icon, sizeof(out->icon));
+        } else {
+            sl_copy_str(out->icon, sizeof(out->icon), icon_src);
+        }
+    }
     return (out->exec[0] != '\0') ? 1 : 0;
 }
 
 static void sl_launcher_items_reset(void) {
+    for (size_t i = 0u; i < g_launcher_count; i++) {
+        if (g_launcher_items[i].icon_image.data) {
+            sl_image_free(&g_launcher_items[i].icon_image);
+        }
+    }
     peos_memset(g_launcher_items, 0, sizeof(g_launcher_items));
     g_launcher_count = 0u;
 }
@@ -198,7 +288,10 @@ static void sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app) {
     item->width = app->width;
     item->height = app->height;
     item->instance = NULL;
+    item->icon_loaded = 0u;
+    item->icon_failed = 0u;
     sl_copy_str(item->title, sizeof(item->title), app->title);
+    sl_copy_str(item->icon_path, sizeof(item->icon_path), app->icon);
     if (item->title[0] == '\0') {
         sl_copy_str(item->title, sizeof(item->title), "App");
     }
@@ -351,6 +444,17 @@ static void sl_launcher_compact_label(const char *src, char *dst, size_t cap) {
     dst[keep + 1u] = '.';
     dst[keep + 2u] = '.';
     dst[keep + 3u] = '\0';
+}
+
+static void sl_launcher_try_load_icon(sl_launcher_item_t *item) {
+    if (!item) return;
+    if (item->icon_path[0] == '\0') return;
+    if (item->icon_loaded || item->icon_failed) return;
+    if (sl_decode_image_file(item->icon_path, &item->icon_image)) {
+        item->icon_loaded = 1u;
+    } else {
+        item->icon_failed = 1u;
+    }
 }
 
 static void sl_launcher_pick_window_rect(const sl_ctx_t *ctx, const sl_launcher_item_t *item,
@@ -634,6 +738,7 @@ void sl_launcher_render(sl_ctx_t *ctx) {
         sl_launcher_item_t *item = &g_launcher_items[i];
         uint32_t ix, iy, iw, ih;
         sl_launcher_item_rect(i, &ix, &iy, &iw, &ih);
+        sl_launcher_try_load_icon(item);
 
         size_t win_idx = (item->instance) ? sl_window_index_for_task(item->instance) : (size_t)-1;
         uint8_t running = (win_idx != (size_t)-1) ? 1u : 0u;
@@ -658,8 +763,26 @@ void sl_launcher_render(sl_ctx_t *ctx) {
             sl_fill_rect(ctx, ix + 3u, iy + 3u, 4u, ih - 6u, 173u, 228u, 109u);
         }
 
-        char short_label[13];
-        sl_launcher_compact_label(item->title, short_label, sizeof(short_label));
-        sl_draw_text(ctx, ix + 12u, iy + 15u, short_label, 242u, 244u, 247u);
+        uint8_t drew_icon = 0u;
+        if (item->icon_loaded && item->icon_image.data) {
+            uint32_t icon_x = ix + ((iw > SL_LAUNCHER_ICON_SIZE)
+                                  ? ((iw - SL_LAUNCHER_ICON_SIZE) / 2u)
+                                  : 0u);
+            uint32_t icon_y = iy + ((ih > SL_LAUNCHER_ICON_SIZE)
+                                  ? ((ih - SL_LAUNCHER_ICON_SIZE) / 2u)
+                                  : 0u);
+            sl_blit_rgba_stretch(ctx, icon_x, icon_y, SL_LAUNCHER_ICON_SIZE, SL_LAUNCHER_ICON_SIZE,
+                                 item->icon_image.data,
+                                 item->icon_image.width,
+                                 item->icon_image.height,
+                                 item->icon_image.stride);
+            drew_icon = 1u;
+        }
+
+        if (!drew_icon) {
+            char short_label[13];
+            sl_launcher_compact_label(item->title, short_label, sizeof(short_label));
+            sl_draw_text(ctx, ix + 12u, iy + 15u, short_label, 242u, 244u, 247u);
+        }
     }
 }
