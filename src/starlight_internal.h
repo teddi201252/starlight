@@ -36,6 +36,9 @@ void sl_windows_destroy_all(void);
 void sl_windows_mark_focused_activity(void);
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y);
 sl_window_t* sl_window_get_focused(void);
+void sl_launcher_render(sl_ctx_t *ctx);
+int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx);
 
 void sl_dirty_reset(void);
 void sl_dirty_mark_full(void);

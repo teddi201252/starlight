@@ -72,6 +72,7 @@ int main(void) {
         sl_render_dirty_background(&ctx);
 
         // FPS Counter
+        /*
         ctx.fps_frames++;
         uint64_t now = peos_time_ns();
         uint64_t dt = now - ctx.fps_last_ns;
@@ -93,8 +94,10 @@ int main(void) {
             sl_draw_text(&ctx, 0, 0, "fps: ", 0xFF, 0xFF, 0xFF);
             sl_draw_text(&ctx, 32, 0, fps_str, 0xFF, 0xFF, 0xFF);
         }
+        */
 
         sl_windows_render_all(&ctx);
+        sl_launcher_render(&ctx);
 
         if (!ctx.hw_cursor) {
             sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);
