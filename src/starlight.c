@@ -35,7 +35,7 @@ int main(void) {
     sl_windows_create_default(&ctx);
 
     uint64_t next_frame_ns = 0;
-    uint8_t orbit_prompt_blink_prev = 0u;
+    uint8_t app_prompt_blink_prev = 0u;
     uint32_t fps_value_prev = 0xFFFFFFFFu;
 
     for (;;) {
@@ -56,12 +56,12 @@ int main(void) {
             }
         }
 
-        sl_orbit_tick(&ctx);
+        sl_app_host_tick(&ctx);
 
         {
-            uint8_t orbit_prompt_blink_now = (uint8_t)((peos_time_ns() / 500000000ull) & 1ull);
-            if (orbit_prompt_blink_now != orbit_prompt_blink_prev) {
-                orbit_prompt_blink_prev = orbit_prompt_blink_now;
+            uint8_t app_prompt_blink_now = (uint8_t)((peos_time_ns() / 500000000ull) & 1ull);
+            if (app_prompt_blink_now != app_prompt_blink_prev) {
+                app_prompt_blink_prev = app_prompt_blink_now;
                 sl_window_t *focused = sl_window_get_focused();
                 if (focused) {
                     sl_dirty_add(&ctx, focused->x, focused->y, focused->width, focused->height);

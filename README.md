@@ -16,6 +16,12 @@ make -C starlight ROOT_DIR=$(pwd)
 
 The generated binary is written to `userland/bin/starlight` so it can be included in disk images.
 
+## Phase 5 Integration
+
+Phase 5 SLUI contract + integration checks are documented in:
+
+- `docs/slui_phase5_integration.md`
+
 ## Config Files
 
 Starlight loads persistent configuration from:
