@@ -104,6 +104,10 @@ typedef struct {
     char exec_path[ORBIT_EXEC_CHARS];
     char exec_args[ORBIT_ARGS_CHARS];
     orbit_ui_state_t ui;
+    uint8_t esc_active;
+    uint8_t csi_active;
+    char csi_buf[16];
+    size_t csi_len;
 } orbit_shell_t;
 
 static orbit_shell_t g_orbit[ORBIT_APP_SLOTS];
@@ -468,20 +472,110 @@ static void orbit_push_line(orbit_shell_t *shell, const char *line) {
     }
 }
 
-static void orbit_reset_buffer(orbit_shell_t *shell) {
+static void orbit_clear_text_buffer(orbit_shell_t *shell) {
     if (!shell) return;
-    orbit_ui_cmd_release_array(shell->ui.cmds, shell->ui.cmd_count);
-    orbit_ui_cmd_release_array(shell->ui.staged_cmds, shell->ui.staged_count);
     shell->line_head = 0u;
     shell->line_count = 0u;
     shell->pending_len = 0u;
     shell->pending_line[0] = '\0';
+}
+
+static uint32_t orbit_parse_csi_first_param(const char *buf, size_t len) {
+    if (!buf || len == 0u) return 0u;
+    uint32_t v = 0u;
+    size_t i = 0u;
+    uint8_t seen_digit = 0u;
+    while (i < len && buf[i] != ';') {
+        char c = buf[i++];
+        if (c < '0' || c > '9') return 0u;
+        seen_digit = 1u;
+        v = (v * 10u) + (uint32_t)(c - '0');
+        if (v > 999u) break;
+    }
+    return seen_digit ? v : 0u;
+}
+
+static void orbit_ansi_finish(orbit_shell_t *shell, char final) {
+    if (!shell) return;
+    if (final == 'J') {
+        uint32_t mode = orbit_parse_csi_first_param(shell->csi_buf, shell->csi_len);
+        if (mode == 0u || mode == 2u || mode == 3u) {
+            orbit_clear_text_buffer(shell);
+        }
+    }
+}
+
+static int orbit_feed_ansi(orbit_shell_t *shell, char c) {
+    if (!shell) return 0;
+
+    if (!shell->esc_active) {
+        if ((uint8_t)c == 0x1Bu) {
+            shell->esc_active = 1u;
+            shell->csi_active = 0u;
+            shell->csi_len = 0u;
+            return 1;
+        }
+        return 0;
+    }
+
+    if (!shell->csi_active) {
+        if (c == '[') {
+            shell->csi_active = 1u;
+            shell->csi_len = 0u;
+            return 1;
+        }
+        if (c == 'c') {
+            orbit_clear_text_buffer(shell);
+            shell->esc_active = 0u;
+            return 1;
+        }
+        shell->esc_active = 0u;
+        return 1;
+    }
+
+    if ((c >= '0' && c <= '9') || c == ';' || c == '?') {
+        if (shell->csi_len + 1u < sizeof(shell->csi_buf)) {
+            shell->csi_buf[shell->csi_len++] = c;
+            shell->csi_buf[shell->csi_len] = '\0';
+        }
+        return 1;
+    }
+
+    if ((uint8_t)c >= 0x40u && (uint8_t)c <= 0x7Eu) {
+        orbit_ansi_finish(shell, c);
+        shell->esc_active = 0u;
+        shell->csi_active = 0u;
+        shell->csi_len = 0u;
+        return 1;
+    }
+
+    shell->esc_active = 0u;
+    shell->csi_active = 0u;
+    shell->csi_len = 0u;
+    return 1;
+}
+
+static void orbit_reset_buffer(orbit_shell_t *shell) {
+    if (!shell) return;
+    orbit_ui_cmd_release_array(shell->ui.cmds, shell->ui.cmd_count);
+    orbit_ui_cmd_release_array(shell->ui.staged_cmds, shell->ui.staged_count);
+    orbit_clear_text_buffer(shell);
+    shell->esc_active = 0u;
+    shell->csi_active = 0u;
+    shell->csi_len = 0u;
+    shell->csi_buf[0] = '\0';
     peos_memset(&shell->ui, 0, sizeof(shell->ui));
 }
 
 static void orbit_feed_char(orbit_shell_t *shell, char c) {
     if (!shell) return;
+    if (orbit_feed_ansi(shell, c)) return;
     if (c == '\r') return;
+
+    if (c == '\f') {
+        orbit_clear_text_buffer(shell);
+        return;
+    }
 
     if (c == '\n') {
         shell->pending_line[shell->pending_len] = '\0';
@@ -1028,8 +1122,12 @@ app_instance_t *sl_app_host_instance_at(size_t index) {
         g_orbit_app[index].pid = (uint32_t)((g_orbit[index].child_pid > 0) ? g_orbit[index].child_pid : 0u);
         g_orbit[index].initialized = 1u;
     } else {
+        if (g_orbit[index].enabled && g_orbit[index].child_pid <= 0) {
+            if (!orbit_spawn_process(&g_orbit[index])) {
+                orbit_push_line(&g_orbit[index], "failed to start app process");
+            }
+        }
         g_orbit_app[index].pid = (uint32_t)((g_orbit[index].child_pid > 0) ? g_orbit[index].child_pid : 0u);
     }
     return &g_orbit_app[index];
 }
-

@@ -488,8 +488,12 @@ int sl_handle_input(sl_ctx_t *ctx) {
     sl_input_frame_t input;
     if (sl_input_poll(ctx, &input) < 0) return 1;
 
+    uint32_t reserved_left = sl_launcher_reserved_left(ctx);
+    uint8_t mouse_on_launcher = (reserved_left > 0u && ctx->cursor_x < reserved_left) ? 1u : 0u;
+
     sl_window_t *focused = sl_window_get_focused();
     if (focused && focused->task && focused->task->on_input &&
+        !mouse_on_launcher &&
         (input.mouse_updated || input.mouse_left_pressed || input.mouse_left_released || input.mouse_moved)) {
         focused->task->on_input(ctx, &input, NULL, focused->task->userdata);
         sl_windows_mark_focused_activity();
@@ -507,6 +511,12 @@ int sl_handle_input(sl_ctx_t *ctx) {
     if (input.quit_requested) return 1;
 
     if (input.mouse_left_pressed) {
+        if (sl_launcher_handle_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
+            g_drag_active = 0u;
+            g_drag_window = NULL;
+            return 0;
+        }
+
         if (sl_windows_close_at_cursor(ctx, ctx->cursor_x, ctx->cursor_y)) {
             g_drag_active = 0u;
             g_drag_window = NULL;
@@ -551,7 +561,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
 
         int64_t new_x = (int64_t)ctx->cursor_x - (int64_t)g_drag_grab_offset_x;
         int64_t new_y = (int64_t)ctx->cursor_y - (int64_t)g_drag_grab_offset_y;
-        if (new_x < 0) new_x = 0;
+        if (new_x < (int64_t)reserved_left) new_x = (int64_t)reserved_left;
         if (new_y < 0) new_y = 0;
 
         sl_window_move(g_drag_window, (uint32_t)new_x, (uint32_t)new_y);
