@@ -1,5 +1,5 @@
 #include "starlight_internal.h"
-#include "orbit_window.h"
+#include "app_host.h"
 #include "sdk_demo_app.h"
 #include "window.h"
 
@@ -167,7 +167,7 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
 }
 
 static size_t sl_load_apps_from_system(void) {
-    sl_orbit_slots_clear();
+    sl_app_host_slots_clear();
 
     char list[4096];
     uint64_t n = peos_readdir(SL_APP_DIR, sizeof(SL_APP_DIR) - 1u, list, sizeof(list) - 1u);
@@ -205,7 +205,7 @@ static size_t sl_load_apps_from_system(void) {
         if (!sl_load_app_bundle(manifest_path, bundle_path, &app)) {
             if (!sl_load_app_bundle(bundle_path, NULL, &app)) continue;
         }
-        if (!sl_orbit_slot_configure(slot, app.title, app.exec, app.args)) continue;
+        if (!sl_app_host_slot_configure(slot, app.title, app.exec, app.args)) continue;
         slot++;
     }
 
@@ -342,19 +342,19 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
 
     size_t loaded = sl_load_apps_from_system();
     if (loaded == 0u) {
-        sl_orbit_slots_use_default();
-        loaded = sl_orbit_slot_count_enabled();
+        sl_app_host_slots_use_default();
+        loaded = sl_app_host_slot_count_enabled();
     }
 
-    sl_orbit_app_reset();
+    sl_app_host_reset();
 
-    size_t orbit_count = loaded;
-    if (orbit_count == 0u) orbit_count = 1u;
+    size_t app_count = loaded;
+    if (app_count == 0u) app_count = 1u;
 
     uint32_t cols = 1u;
-    if (orbit_count >= 2u) cols = 2u;
-    if (orbit_count >= 5u) cols = 3u;
-    uint32_t rows = (uint32_t)((orbit_count + (size_t)cols - 1u) / (size_t)cols);
+    if (app_count >= 2u) cols = 2u;
+    if (app_count >= 5u) cols = 3u;
+    uint32_t rows = (uint32_t)((app_count + (size_t)cols - 1u) / (size_t)cols);
 
     uint32_t margin = 20u;
     uint32_t gap = 20u;
@@ -370,9 +370,9 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
     if (cell_w < 320u) cell_w = (ctx->fb.width > 20u) ? (ctx->fb.width - 20u) : ctx->fb.width;
     if (cell_h < 220u) cell_h = (ctx->fb.height > 20u) ? (ctx->fb.height - 20u) : ctx->fb.height;
 
-    sl_window_t wins[orbit_count];
+    sl_window_t wins[app_count];
     size_t win_count = 0u;
-    for (size_t i = 0u; i < orbit_count; i++) {
+    for (size_t i = 0u; i < app_count; i++) {
         uint32_t col = (uint32_t)(i % cols);
         uint32_t row = (uint32_t)(i / cols);
         uint32_t x = margin + col * (cell_w + gap);
@@ -381,7 +381,7 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
         if (x + cell_w > ctx->fb.width) x = (ctx->fb.width > cell_w) ? (ctx->fb.width - cell_w) : 0u;
         if (y + cell_h > ctx->fb.height) y = (ctx->fb.height > cell_h) ? (ctx->fb.height - cell_h) : 0u;
 
-        app_instance_t *app = sl_orbit_app_instance_at(i);
+        app_instance_t *app = sl_app_host_instance_at(i);
         if (!app) continue;
         sl_window_init(&wins[win_count], ctx, app, x, y, cell_w, cell_h);
         sl_window_set_fps_profile(&wins[win_count], 30u, 8u);
