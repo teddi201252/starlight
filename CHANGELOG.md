@@ -2,6 +2,11 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.1.2] - 2026-02-24
+- Launcher: aggiunto placeholder icon per app senza icona
+- Launcher: nome app mostrato in hover fuori dal pannello, allineato al bottone
+- Hover gestito su movimento mouse senza click
+
 ## [0.1.1] - 2026-02-24
 - Launcher: supporto icone da manifest (icon= e [resources]) con rendering dedicato
 - Migliorata UI launcher: icona piu grande e titolo nascosto quando l'icona e presente

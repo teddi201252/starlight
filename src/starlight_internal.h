@@ -38,6 +38,7 @@ void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y);
 sl_window_t* sl_window_get_focused(void);
 void sl_launcher_render(sl_ctx_t *ctx);
 int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+void sl_launcher_handle_hover(sl_ctx_t *ctx);
 uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx);
 
 void sl_dirty_reset(void);
