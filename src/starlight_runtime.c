@@ -499,6 +499,12 @@ int sl_handle_input(sl_ctx_t *ctx) {
     if (input.quit_requested) return 1;
 
     if (input.mouse_left_pressed) {
+        if (sl_windows_close_at_cursor(ctx, ctx->cursor_x, ctx->cursor_y)) {
+            g_drag_active = 0u;
+            g_drag_window = NULL;
+            return 0;
+        }
+
         sl_windows_focus_at_cursor(ctx->cursor_x, ctx->cursor_y);
         focused = sl_window_get_focused();
         sl_windows_mark_focused_activity();

@@ -245,6 +245,14 @@ int sl_window_render(sl_window_t *win) {
         sl_fill_rect(win->ctx, win->x, win->y + win->height - 1u, win->width, 1u, br, bg, bb);
         sl_fill_rect(win->ctx, win->x, win->y, 1u, win->height, br, bg, bb);
         sl_fill_rect(win->ctx, win->x + win->width - 1u, win->y, 1u, win->height, br, bg, bb);
+
+        if (win->width > (SL_WIN_CLOSE_BTN_W + SL_WIN_CLOSE_BTN_MARGIN + 2u) &&
+            win->top_bar_height > (SL_WIN_CLOSE_BTN_H + 2u)) {
+            uint32_t cb_x = win->x + win->width - SL_WIN_CLOSE_BTN_MARGIN - SL_WIN_CLOSE_BTN_W - 1u;
+            uint32_t cb_y = win->y + 1u + ((win->top_bar_height - 2u - SL_WIN_CLOSE_BTN_H) / 2u);
+            sl_fill_rect(win->ctx, cb_x, cb_y, SL_WIN_CLOSE_BTN_W, SL_WIN_CLOSE_BTN_H, 176u, 48u, 48u);
+            sl_draw_text(win->ctx, cb_x + 3u, cb_y + 3u, "x", 255u, 255u, 255u);
+        }
     }
 
     if (win->task && win->task->on_render) {

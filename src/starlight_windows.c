@@ -8,12 +8,55 @@ static sl_window_t *g_windows = NULL;
 static size_t g_window_count = 0;
 static size_t g_focused_window = (size_t)-1;
 
+static void sl_window_refresh_zorder(void);
+
 static int sl_window_contains_point(const sl_window_t *win, uint32_t x, uint32_t y) {
     if (!win) return 0;
     if (x < win->x || y < win->y) return 0;
     if (x >= (win->x + win->width)) return 0;
     if (y >= (win->y + win->height)) return 0;
     return 1;
+}
+
+static int sl_window_close_btn_hit(const sl_window_t *win, uint32_t x, uint32_t y) {
+    if (!win) return 0;
+    if (!sl_window_contains_point(win, x, y)) return 0;
+    if (y >= win->y + win->top_bar_height) return 0;
+    if (win->width <= (SL_WIN_CLOSE_BTN_W + SL_WIN_CLOSE_BTN_MARGIN + 2u)) return 0;
+    if (win->top_bar_height <= (SL_WIN_CLOSE_BTN_H + 2u)) return 0;
+
+    uint32_t cb_x = win->x + win->width - SL_WIN_CLOSE_BTN_MARGIN - SL_WIN_CLOSE_BTN_W - 1u;
+    uint32_t cb_y = win->y + 1u + ((win->top_bar_height - 2u - SL_WIN_CLOSE_BTN_H) / 2u);
+    if (x < cb_x || y < cb_y) return 0;
+    if (x >= cb_x + SL_WIN_CLOSE_BTN_W) return 0;
+    if (y >= cb_y + SL_WIN_CLOSE_BTN_H) return 0;
+    return 1;
+}
+
+static void sl_window_close_index(size_t index) {
+    if (!g_windows || index >= g_window_count) return;
+
+    if (g_windows[index].task && g_windows[index].task->on_close) {
+        g_windows[index].task->on_close(g_windows[index].task->userdata);
+    }
+    sl_window_shutdown(&g_windows[index]);
+
+    for (size_t i = index + 1u; i < g_window_count; i++) {
+        g_windows[i - 1u] = g_windows[i];
+    }
+
+    g_window_count--;
+    if (g_window_count == 0u) {
+        free(g_windows);
+        g_windows = NULL;
+        g_focused_window = (size_t)-1;
+        return;
+    }
+
+    if (g_focused_window >= g_window_count) {
+        g_focused_window = g_window_count - 1u;
+    }
+    sl_window_refresh_zorder();
 }
 
 static void sl_window_refresh_zorder(void) {
@@ -59,6 +102,18 @@ void sl_windows_focus_at_cursor(uint32_t x, uint32_t y) {
         }
     }
     return;
+}
+
+int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || !g_windows || g_window_count == 0u) return 0;
+    for (size_t i = g_window_count; i > 0u; i--) {
+        size_t idx = i - 1u;
+        if (!sl_window_close_btn_hit(&g_windows[idx], x, y)) continue;
+        sl_window_close_index(idx);
+        sl_dirty_mark_full();
+        return 1;
+    }
+    return 0;
 }
 
 void sl_windows_create_test(sl_ctx_t *ctx, size_t count) {
