@@ -36,6 +36,7 @@ int main(void) {
 
     uint64_t next_frame_ns = 0;
     uint8_t orbit_prompt_blink_prev = 0u;
+    uint32_t fps_value_prev = 0xFFFFFFFFu;
 
     for (;;) {
         if (!ctx.hw_cursor) {
@@ -54,6 +55,8 @@ int main(void) {
                 sl_hw_cursor_sync_pos(&ctx);
             }
         }
+
+        sl_orbit_tick(&ctx);
 
         {
             uint8_t orbit_prompt_blink_now = (uint8_t)((peos_time_ns() / 500000000ull) & 1ull);
@@ -78,15 +81,18 @@ int main(void) {
             ctx.fps_last_ns = now;
         }
 
-        char fps_str[16];
-        if (!sl_u32_to_str(ctx.fps_value, fps_str, sizeof(fps_str))) {
-            fps_str[0] = '?';
-            fps_str[1] = '\0';
+        if (ctx.fps_value != fps_value_prev) {
+            fps_value_prev = ctx.fps_value;
+            char fps_str[16];
+            if (!sl_u32_to_str(ctx.fps_value, fps_str, sizeof(fps_str))) {
+                fps_str[0] = '?';
+                fps_str[1] = '\0';
+            }
+            sl_dirty_add(&ctx, 0u, 0u, 128u, 16u);
+            sl_fill_rect(&ctx, 0, 0, 128, 16, 0x00, 0x00, 0x00);
+            sl_draw_text(&ctx, 0, 0, "fps: ", 0xFF, 0xFF, 0xFF);
+            sl_draw_text(&ctx, 32, 0, fps_str, 0xFF, 0xFF, 0xFF);
         }
-        sl_dirty_add(&ctx, 0u, 0u, 128u, 16u);
-        sl_fill_rect(&ctx, 0, 0, 128, 16, 0x00, 0x00, 0x00);
-        sl_draw_text(&ctx, 0, 0, "fps: ", 0xFF, 0xFF, 0xFF);
-        sl_draw_text(&ctx, 32, 0, fps_str, 0xFF, 0xFF, 0xFF);
 
         sl_windows_render_all(&ctx);
 
