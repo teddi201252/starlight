@@ -17,6 +17,7 @@ static int sl_window_contains_point(const sl_window_t *win, uint32_t x, uint32_t
 }
 
 static void sl_window_refresh_zorder(void) {
+    uint64_t now = peos_time_ns();
     for (size_t i = 0; i < g_window_count; i++) {
         uint8_t was_focused = g_windows[i].focused;
         g_windows[i].z_index = (uint32_t)i;
@@ -24,6 +25,9 @@ static void sl_window_refresh_zorder(void) {
         if (g_windows[i].focused != was_focused) {
             g_windows[i].force_redraw = 1u;
             g_windows[i].next_render_ns = 0ull;
+            if (g_windows[i].focused) {
+                sl_window_mark_activity(&g_windows[i], now);
+            }
         }
     }
 }
@@ -122,11 +126,19 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
 
 void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata) {
     if (!ctx || !userdata || !g_windows || g_window_count == 0u) return;
+    uint64_t now = peos_time_ns();
     for (size_t i = 0; i < g_window_count; i++) {
         if (!g_windows[i].task) continue;
         if (g_windows[i].task->userdata != userdata) continue;
+        sl_window_mark_activity(&g_windows[i], now);
         sl_dirty_add(ctx, g_windows[i].x, g_windows[i].y, g_windows[i].width, g_windows[i].height);
     }
+}
+
+void sl_windows_mark_focused_activity(void) {
+    sl_window_t *focused = sl_window_get_focused();
+    if (!focused) return;
+    sl_window_mark_activity(focused, peos_time_ns());
 }
 
 void sl_windows_render_all(sl_ctx_t *ctx) {

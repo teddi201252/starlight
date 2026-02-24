@@ -41,9 +41,11 @@ struct sl_window {
     uint16_t fps_focused;
     uint16_t fps_unfocused;
     uint64_t next_render_ns;
+    uint64_t last_activity_ns;
 };
 
 int sl_window_init(sl_window_t *win, sl_ctx_t *ctx, app_instance_t* task, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 void sl_window_shutdown(sl_window_t *win);
 int sl_window_render(sl_window_t *win);
 void sl_window_set_fps_profile(sl_window_t *win, uint16_t focused_fps, uint16_t unfocused_fps);
+void sl_window_mark_activity(sl_window_t *win, uint64_t now_ns);

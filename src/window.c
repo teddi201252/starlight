@@ -4,6 +4,11 @@
 
 #include <stdlib.h>
 
+#define SL_FPS_BOOST_FOCUSED 60u
+#define SL_FPS_BOOST_UNFOCUSED 24u
+#define SL_ACTIVITY_BOOST_NS 300000000ull
+#define SL_ACTIVITY_IDLE_NS 2500000000ull
+
 static int sl_window_ensure_surface(sl_window_t *win) {
     if (!win || !win->ctx || win->width == 0u || win->height == 0u) return 0;
     uint32_t stride = win->width * win->ctx->bytespp;
@@ -156,6 +161,13 @@ void sl_window_set_fps_profile(sl_window_t *win, uint16_t focused_fps, uint16_t 
     win->next_render_ns = 0ull;
 }
 
+void sl_window_mark_activity(sl_window_t *win, uint64_t now_ns) {
+    if (!win) return;
+    if (now_ns == 0ull) now_ns = peos_time_ns();
+    win->last_activity_ns = now_ns;
+    win->next_render_ns = 0ull;
+}
+
 int sl_window_init(sl_window_t *win, sl_ctx_t *ctx, app_instance_t* task, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (!win) return 0;
     peos_memset(win, 0, sizeof(*win));
@@ -172,6 +184,7 @@ int sl_window_init(sl_window_t *win, sl_ctx_t *ctx, app_instance_t* task, uint32
     win->fps_focused = 60u;
     win->fps_unfocused = 24u;
     win->next_render_ns = 0ull;
+    win->last_activity_ns = peos_time_ns();
     if (task) {
         win->task = task;
     }
@@ -193,8 +206,21 @@ void sl_window_shutdown(sl_window_t *win) {
 int sl_window_render(sl_window_t *win) {
     if (!win) return 0;
 
-    uint16_t target_fps = win->focused ? win->fps_focused : win->fps_unfocused;
     uint64_t now = peos_time_ns();
+    uint16_t base_fps = win->focused ? win->fps_focused : win->fps_unfocused;
+    uint16_t target_fps = base_fps;
+    uint64_t idle_ns = (now > win->last_activity_ns) ? (now - win->last_activity_ns) : 0ull;
+
+    if (idle_ns <= SL_ACTIVITY_BOOST_NS) {
+        uint16_t boost = win->focused ? SL_FPS_BOOST_FOCUSED : SL_FPS_BOOST_UNFOCUSED;
+        if (boost > target_fps) target_fps = boost;
+    } else if (idle_ns >= SL_ACTIVITY_IDLE_NS) {
+        uint16_t min_idle = win->focused ? 18u : 6u;
+        uint16_t decayed = (base_fps > 1u) ? (uint16_t)(base_fps / 2u) : base_fps;
+        if (decayed < min_idle) decayed = min_idle;
+        target_fps = decayed;
+    }
+
     uint8_t due = 1u;
     if (target_fps > 0u && win->cache_valid && !win->force_redraw && win->next_render_ns > now) {
         due = 0u;
