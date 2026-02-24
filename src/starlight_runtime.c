@@ -222,6 +222,7 @@ static int sl_parse_u32(const char *s, uint32_t *out) {
 static void sl_ensure_config_dirs(void) {
     (void)mkdir("/system", 0755);
     (void)mkdir(SL_OS_CONFIG_DIR, 0755);
+    (void)mkdir("/system/apps", 0755);
     (void)mkdir(SL_RESOURCE_ROOT, 0755);
     (void)mkdir(SL_RESOURCE_CONFIG_DIR, 0755);
 }
