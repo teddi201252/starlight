@@ -39,5 +39,9 @@ void sl_dirty_reset(void);
 void sl_dirty_mark_full(void);
 void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 int sl_dirty_intersects_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+int sl_dirty_get_bounds(uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
+void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata);
+
+void sl_orbit_tick(sl_ctx_t *ctx);
 
 char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap);

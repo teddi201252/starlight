@@ -1,4 +1,5 @@
 #include "orbit_window.h"
+#include "starlight_internal.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -6,8 +7,9 @@
 #define ORBIT_MAX_LINES 256u
 #define ORBIT_LINE_CHARS 160u
 #define ORBIT_KEY_BACKSPACE 0x000Eu
-#define ORBIT_APP_SLOTS 2u
+#define ORBIT_APP_SLOTS 4u
 #define ORBIT_MAX_POLL_READS 8u
+#define ORBIT_POLL_INTERVAL_NS 10000000ull
 
 typedef struct {
     char lines[ORBIT_MAX_LINES][ORBIT_LINE_CHARS];
@@ -20,6 +22,7 @@ typedef struct {
     int64_t child_pid;
     int64_t child_stdin_fd;
     int64_t child_stdout_fd;
+    uint64_t next_poll_ns;
 } orbit_shell_t;
 
 static orbit_shell_t g_orbit[ORBIT_APP_SLOTS];
@@ -158,8 +161,10 @@ static void orbit_mark_child_exited(orbit_shell_t *shell) {
     orbit_push_line(shell, "[orbit exited] Press Enter to restart.");
 }
 
-static void orbit_poll_output(orbit_shell_t *shell) {
-    if (!shell || shell->child_stdout_fd < 0) return;
+static uint8_t orbit_poll_output(orbit_shell_t *shell) {
+    if (!shell || shell->child_stdout_fd < 0) return 0u;
+
+    uint8_t changed = 0u;
 
     char buf[256];
     for (uint32_t i = 0u; i < ORBIT_MAX_POLL_READS; i++) {
@@ -170,6 +175,7 @@ static void orbit_poll_output(orbit_shell_t *shell) {
         if (n == 0u) {
             break;
         }
+        changed = 1u;
         orbit_feed_text(shell, buf, (size_t)n);
         if (n < sizeof(buf)) {
             break;
@@ -181,8 +187,11 @@ static void orbit_poll_output(orbit_shell_t *shell) {
         uint64_t w = peos_waitpid_flags((uint64_t)shell->child_pid, &status, PEOS_WAIT_NOHANG);
         if (w == (uint64_t)shell->child_pid) {
             orbit_mark_child_exited(shell);
+            changed = 1u;
         }
     }
+
+    return changed;
 }
 
 static void orbit_send_input(orbit_shell_t *shell, const char *buf, size_t len) {
@@ -312,8 +321,6 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     orbit_shell_t *shell = (orbit_shell_t *)userdata;
     if (!ctx || !win || !shell) return;
 
-    orbit_poll_output(shell);
-
     uint32_t body_x = win->x + 2u;
     uint32_t body_y = win->y + win->top_bar_height + 1u;
     uint32_t body_w = (win->width > 4u) ? (win->width - 4u) : 0u;
@@ -379,8 +386,27 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         }
         sl_draw_text(ctx, text_x, text_y + ((history_rows - 1u) * 8u), hint, 170u, 170u, 170u);
     } else {
-        g_orbit_app[0].pid = (shell == &g_orbit[0]) ? (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u) : g_orbit_app[0].pid;
-        g_orbit_app[1].pid = (shell == &g_orbit[1]) ? (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u) : g_orbit_app[1].pid;
+        size_t idx = (size_t)(shell - &g_orbit[0]);
+        if (idx < ORBIT_APP_SLOTS) {
+            g_orbit_app[idx].pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);
+        }
+    }
+}
+
+void sl_orbit_tick(sl_ctx_t *ctx) {
+    if (!ctx) return;
+    uint64_t now = peos_time_ns();
+    for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
+        orbit_shell_t *shell = &g_orbit[i];
+        if (!shell->initialized) continue;
+        if (shell->next_poll_ns > now) continue;
+        shell->next_poll_ns = now + ORBIT_POLL_INTERVAL_NS;
+
+        if (orbit_poll_output(shell)) {
+            sl_windows_mark_app_dirty(ctx, shell);
+        }
+
+        g_orbit_app[i].pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);
     }
 }
 
@@ -404,6 +430,7 @@ void sl_orbit_app_reset(void) {
         g_orbit[i].child_pid = -1;
         g_orbit[i].child_stdin_fd = -1;
         g_orbit[i].child_stdout_fd = -1;
+        g_orbit[i].next_poll_ns = 0ull;
         orbit_reset_buffer(&g_orbit[i]);
 
         if (!orbit_spawn_process(&g_orbit[i])) {
@@ -427,6 +454,7 @@ app_instance_t *sl_orbit_app_instance_at(size_t index) {
         g_orbit[index].child_pid = -1;
         g_orbit[index].child_stdin_fd = -1;
         g_orbit[index].child_stdout_fd = -1;
+        g_orbit[index].next_poll_ns = 0ull;
         orbit_reset_buffer(&g_orbit[index]);
 
         if (!orbit_spawn_process(&g_orbit[index])) {

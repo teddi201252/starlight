@@ -67,6 +67,33 @@ int sl_dirty_intersects_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     return 0;
 }
 
+int sl_dirty_get_bounds(uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!x || !y || !w || !h) return 0;
+    if (g_dirty.full || g_dirty.count == 0u) return 0;
+
+    uint32_t min_x = g_dirty.rects[0].x;
+    uint32_t min_y = g_dirty.rects[0].y;
+    uint64_t max_x = (uint64_t)g_dirty.rects[0].x + (uint64_t)g_dirty.rects[0].w;
+    uint64_t max_y = (uint64_t)g_dirty.rects[0].y + (uint64_t)g_dirty.rects[0].h;
+
+    for (size_t i = 1u; i < g_dirty.count; i++) {
+        const sl_rect_t *r = &g_dirty.rects[i];
+        if (r->x < min_x) min_x = r->x;
+        if (r->y < min_y) min_y = r->y;
+        uint64_t rx2 = (uint64_t)r->x + (uint64_t)r->w;
+        uint64_t ry2 = (uint64_t)r->y + (uint64_t)r->h;
+        if (rx2 > max_x) max_x = rx2;
+        if (ry2 > max_y) max_y = ry2;
+    }
+
+    if (max_x <= min_x || max_y <= min_y) return 0;
+    *x = min_x;
+    *y = min_y;
+    *w = (uint32_t)(max_x - min_x);
+    *h = (uint32_t)(max_y - min_y);
+    return 1;
+}
+
 static sl_rect_t sl_rect_union(const sl_rect_t *a, const sl_rect_t *b) {
     sl_rect_t r = {0, 0, 0, 0};
     if (!a) return b ? *b : r;

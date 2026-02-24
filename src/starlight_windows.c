@@ -81,40 +81,52 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
 
     sl_orbit_app_reset();
 
-    uint32_t w = 860u;
-    uint32_t h = 520u;
-    if (ctx->fb.width > 40u && w > ctx->fb.width - 40u) w = ctx->fb.width - 40u;
-    if (ctx->fb.height > 40u && h > ctx->fb.height - 40u) h = ctx->fb.height - 40u;
-    if (w < 320u) w = (ctx->fb.width > 20u) ? (ctx->fb.width - 20u) : ctx->fb.width;
-    if (h < 220u) h = (ctx->fb.height > 20u) ? (ctx->fb.height - 20u) : ctx->fb.height;
+    const size_t orbit_count = 4u;
+    const uint32_t margin = 20u;
+    const uint32_t gap_x = 24u;
+    const uint32_t gap_y = 24u;
 
-    uint32_t x = (ctx->fb.width > w) ? ((ctx->fb.width - w) / 2u) : 0u;
-    uint32_t y = (ctx->fb.height > h) ? ((ctx->fb.height - h) / 2u) : 0u;
+    uint32_t avail_w = (ctx->fb.width > (margin * 2u + gap_x)) ? (ctx->fb.width - (margin * 2u + gap_x)) : ctx->fb.width;
+    uint32_t avail_h = (ctx->fb.height > (margin * 2u + gap_y)) ? (ctx->fb.height - (margin * 2u + gap_y)) : ctx->fb.height;
+    uint32_t cell_w = avail_w / 2u;
+    uint32_t cell_h = avail_h / 2u;
+    if (cell_w < 280u) cell_w = (ctx->fb.width > 40u) ? ((ctx->fb.width - 40u) / 2u) : ctx->fb.width;
+    if (cell_h < 180u) cell_h = (ctx->fb.height > 40u) ? ((ctx->fb.height - 40u) / 2u) : ctx->fb.height;
 
-    sl_window_t win;
-    sl_window_init(&win, ctx, sl_orbit_app_instance(), x, y, w, h);
-    sl_window_set_fps_profile(&win, 30u, 10u);
+    sl_window_t wins[orbit_count];
+    for (size_t i = 0u; i < orbit_count; i++) {
+        uint32_t col = (uint32_t)(i & 1u);
+        uint32_t row = (uint32_t)(i >> 1u);
+        uint32_t x = margin + col * (cell_w + gap_x);
+        uint32_t y = margin + row * (cell_h + gap_y);
 
-    sl_window_t win2;
-    uint32_t w2 = (w > 80u) ? (w - 80u) : w;
-    uint32_t h2 = (h > 60u) ? (h - 60u) : h;
-    uint32_t x2 = x + 48u;
-    uint32_t y2 = y + 36u;
-    if (x2 + w2 > ctx->fb.width) x2 = (ctx->fb.width > w2) ? (ctx->fb.width - w2) : 0u;
-    if (y2 + h2 > ctx->fb.height) y2 = (ctx->fb.height > h2) ? (ctx->fb.height - h2) : 0u;
-    sl_window_init(&win2, ctx, sl_orbit_app_instance_at(1u), x2, y2, w2, h2);
-    sl_window_set_fps_profile(&win2, 30u, 10u);
+        if (x + cell_w > ctx->fb.width) x = (ctx->fb.width > cell_w) ? (ctx->fb.width - cell_w) : 0u;
+        if (y + cell_h > ctx->fb.height) y = (ctx->fb.height > cell_h) ? (ctx->fb.height - cell_h) : 0u;
+
+        sl_window_init(&wins[i], ctx, sl_orbit_app_instance_at(i), x, y, cell_w, cell_h);
+        sl_window_set_fps_profile(&wins[i], 30u, 8u);
+    }
 
     sl_window_t *new_windows =
-        (sl_window_t *)realloc(g_windows, sizeof(sl_window_t) * (g_window_count + 2u));
+        (sl_window_t *)realloc(g_windows, sizeof(sl_window_t) * (g_window_count + orbit_count));
     if (!new_windows) return;
 
     g_windows = new_windows;
-    g_windows[g_window_count] = win;
-    g_windows[g_window_count + 1u] = win2;
-    g_window_count += 2u;
+    for (size_t i = 0u; i < orbit_count; i++) {
+        g_windows[g_window_count + i] = wins[i];
+    }
+    g_window_count += orbit_count;
     g_focused_window = g_window_count - 1u;
     sl_window_refresh_zorder();
+}
+
+void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata) {
+    if (!ctx || !userdata || !g_windows || g_window_count == 0u) return;
+    for (size_t i = 0; i < g_window_count; i++) {
+        if (!g_windows[i].task) continue;
+        if (g_windows[i].task->userdata != userdata) continue;
+        sl_dirty_add(ctx, g_windows[i].x, g_windows[i].y, g_windows[i].width, g_windows[i].height);
+    }
 }
 
 void sl_windows_render_all(sl_ctx_t *ctx) {
