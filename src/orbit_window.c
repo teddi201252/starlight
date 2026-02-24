@@ -49,6 +49,9 @@ typedef struct {
     sl_ui_ctx_t ui;
     orbit_ui_cmd_t cmds[ORBIT_UI_MAX_CMDS];
     size_t cmd_count;
+    orbit_ui_cmd_t staged_cmds[ORBIT_UI_MAX_CMDS];
+    size_t staged_count;
+    uint8_t staged_enabled;
 } orbit_ui_state_t;
 
 typedef struct {
@@ -116,16 +119,15 @@ static int orbit_parse_u32(const char **ps, uint32_t *out) {
 
 static void orbit_ui_clear(orbit_shell_t *shell) {
     if (!shell) return;
-    shell->ui.enabled = 1u;
-    shell->ui.committed = 0u;
-    shell->ui.cmd_count = 0u;
+    shell->ui.staged_enabled = 1u;
+    shell->ui.staged_count = 0u;
 }
 
 static orbit_ui_cmd_t *orbit_ui_next_cmd(orbit_shell_t *shell, uint8_t type) {
     if (!shell) return NULL;
-    shell->ui.enabled = 1u;
-    if (shell->ui.cmd_count >= ORBIT_UI_MAX_CMDS) return NULL;
-    orbit_ui_cmd_t *cmd = &shell->ui.cmds[shell->ui.cmd_count++];
+    shell->ui.staged_enabled = 1u;
+    if (shell->ui.staged_count >= ORBIT_UI_MAX_CMDS) return NULL;
+    orbit_ui_cmd_t *cmd = &shell->ui.staged_cmds[shell->ui.staged_count++];
     peos_memset(cmd, 0, sizeof(*cmd));
     cmd->type = type;
     return cmd;
@@ -198,22 +200,42 @@ static void orbit_send_ui_event_slider(orbit_shell_t *shell, uint32_t id, uint32
 
 static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
     if (!shell || !line) return 0;
-    const char *prefix = "@SLUI ";
-    size_t i = 0u;
-    while (prefix[i]) {
-        if (line[i] != prefix[i]) return 0;
-        i++;
+    const char *p = line;
+    const char *token = "@SLUI";
+    size_t pos = 0u;
+    while (p[pos]) {
+        size_t i = 0u;
+        while (token[i] && p[pos + i] == token[i]) i++;
+        if (token[i] == '\0') {
+            p = p + pos + i;
+            break;
+        }
+        pos++;
+    }
+    if (token[0] != '\0' && p == line) {
+        size_t i = 0u;
+        while (token[i] && line[i] == token[i]) i++;
+        if (token[i] != '\0') return 0;
+        p = line + i;
     }
 
-    const char *p = line + i;
+    if (*p == ':') p++;
     p = orbit_skip_spaces(p);
 
-    if (p[0] == 'C' && p[1] == 'L' && p[2] == 'E' && p[3] == 'A' && p[4] == 'R' && p[5] == '\0') {
+    size_t pn = peos_strlen(p);
+    while (pn > 0u && (p[pn - 1u] == ' ' || p[pn - 1u] == '\t')) pn--;
+
+    if (pn == 5u && p[0] == 'C' && p[1] == 'L' && p[2] == 'E' && p[3] == 'A' && p[4] == 'R') {
         orbit_ui_clear(shell);
         return 1;
     }
-    if (p[0] == 'C' && p[1] == 'O' && p[2] == 'M' && p[3] == 'M' && p[4] == 'I' && p[5] == 'T' && p[6] == '\0') {
-        shell->ui.enabled = 1u;
+    if (pn == 6u && p[0] == 'C' && p[1] == 'O' && p[2] == 'M' && p[3] == 'M' && p[4] == 'I' && p[5] == 'T') {
+        shell->ui.enabled = shell->ui.staged_enabled;
+        shell->ui.cmd_count = shell->ui.staged_count;
+        if (shell->ui.cmd_count > 0u) {
+            peos_memcpy(shell->ui.cmds, shell->ui.staged_cmds,
+                        shell->ui.cmd_count * sizeof(shell->ui.cmds[0]));
+        }
         shell->ui.committed = 1u;
         return 1;
     }
