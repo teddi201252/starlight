@@ -154,6 +154,28 @@ static void orbit_stop_process(orbit_shell_t *shell) {
     shell->child_pid = -1;
 }
 
+static void orbit_on_close(void *userdata) {
+    orbit_shell_t *shell = (orbit_shell_t *)userdata;
+    if (!shell) return;
+
+    int64_t pid = shell->child_pid;
+    if (shell->child_stdin_fd >= 0) {
+        (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "exit\n", 5u);
+    }
+    orbit_close_fds(shell);
+
+    if (pid > 0) {
+        int status = 0;
+        for (uint32_t i = 0u; i < 20u; i++) {
+            uint64_t w = peos_waitpid_flags((uint64_t)pid, &status, PEOS_WAIT_NOHANG);
+            if (w == (uint64_t)pid) break;
+            peos_sleep(1u);
+        }
+    }
+
+    shell->child_pid = -1;
+}
+
 static void orbit_mark_child_exited(orbit_shell_t *shell) {
     if (!shell) return;
     orbit_close_fds(shell);
@@ -417,6 +439,7 @@ static void orbit_bind_apps(void) {
         g_orbit_app[i].tid = 0u;
         g_orbit_app[i].on_input = orbit_on_input;
         g_orbit_app[i].on_render = orbit_on_render;
+        g_orbit_app[i].on_close = orbit_on_close;
         g_orbit_app[i].userdata = &g_orbit[i];
     }
     g_orbit_apps_bound = 1u;

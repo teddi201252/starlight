@@ -31,6 +31,7 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count);
 void sl_windows_create_default(sl_ctx_t *ctx);
 void sl_windows_render_all(sl_ctx_t *ctx);
 void sl_windows_focus_at_cursor(uint32_t x, uint32_t y);
+int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_windows_destroy_all(void);
 void sl_windows_mark_focused_activity(void);
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y);

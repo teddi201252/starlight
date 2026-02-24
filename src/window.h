@@ -9,12 +9,18 @@ typedef struct app_instance app_instance_t;
 typedef void (*sl_app_on_input_fn)(sl_ctx_t *ctx, const sl_input_frame_t *frame,
                                    const peos_input_event_t *event, void *userdata);
 typedef void (*sl_app_on_render_fn)(sl_ctx_t *ctx, const sl_window_t *win, void *userdata);
+typedef void (*sl_app_on_close_fn)(void *userdata);
+
+#define SL_WIN_CLOSE_BTN_W 14u
+#define SL_WIN_CLOSE_BTN_H 14u
+#define SL_WIN_CLOSE_BTN_MARGIN 3u
 
 struct app_instance {
     uint32_t pid;
     uint32_t tid;
     sl_app_on_input_fn on_input;
     sl_app_on_render_fn on_render;
+    sl_app_on_close_fn on_close;
     void *userdata;
 };
 
