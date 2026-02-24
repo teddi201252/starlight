@@ -8,6 +8,7 @@
 #include <stdlib.h>
 
 #define SL_APP_DIR "/system/apps"
+#define SL_APP_MANIFEST "app.ini"
 
 typedef struct {
     char title[64];
@@ -72,13 +73,63 @@ static int sl_has_suffix(const char *s, const char *suffix) {
     return (memcmp(s + (n - m), suffix, m) == 0) ? 1 : 0;
 }
 
-static int sl_load_app_bundle(const char *path, sl_app_bundle_t *out) {
-    if (!path || !out) return 0;
-    FILE *f = fopen(path, "r");
+static size_t sl_trim_trailing_slash(char *s) {
+    if (!s) return 0u;
+    size_t n = strlen(s);
+    while (n > 0u && s[n - 1u] == '/') {
+        s[n - 1u] = '\0';
+        n--;
+    }
+    return n;
+}
+
+static int sl_join_path(char *out, size_t out_cap, const char *base, const char *name) {
+    if (!out || out_cap == 0u || !base || !name) return 0;
+    size_t w = 0u;
+    while (base[w] && w + 1u < out_cap) {
+        out[w] = base[w];
+        w++;
+    }
+    if (base[w] != '\0') return 0;
+    if (w == 0u || out[w - 1u] != '/') {
+        if (w + 1u >= out_cap) return 0;
+        out[w++] = '/';
+    }
+    size_t i = 0u;
+    while (name[i] && w + 1u < out_cap) {
+        out[w++] = name[i++];
+    }
+    if (name[i] != '\0') return 0;
+    out[w] = '\0';
+    return 1;
+}
+
+static int sl_resolve_exec_path(const char *bundle_dir, const char *exec_val,
+                                char *out, size_t out_cap) {
+    if (!bundle_dir || !exec_val || !out || out_cap == 0u) return 0;
+    const char *val = exec_val;
+    while (*val == ' ') val++;
+    if (*val == '\0') return 0;
+
+    if (val[0] == '/') {
+        sl_copy_str(out, out_cap, val);
+        return out[0] != '\0';
+    }
+
+    if (val[0] == '.' && val[1] == '/') val += 2;
+    return sl_join_path(out, out_cap, bundle_dir, val);
+}
+
+static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir, sl_app_bundle_t *out) {
+    if (!manifest_path || !out) return 0;
+    FILE *f = fopen(manifest_path, "r");
     if (!f) return 0;
 
     peos_memset(out, 0, sizeof(*out));
     sl_copy_str(out->title, sizeof(out->title), "App");
+
+    char raw_exec[160];
+    raw_exec[0] = '\0';
 
     char line[256];
     while (fgets(line, sizeof(line), f)) {
@@ -93,7 +144,7 @@ static int sl_load_app_bundle(const char *path, sl_app_bundle_t *out) {
         if (strcmp(key, "title") == 0) {
             sl_copy_str(out->title, sizeof(out->title), val);
         } else if (strcmp(key, "exec") == 0) {
-            sl_copy_str(out->exec, sizeof(out->exec), val);
+            sl_copy_str(raw_exec, sizeof(raw_exec), val);
         } else if (strcmp(key, "args") == 0) {
             sl_copy_str(out->args, sizeof(out->args), val);
         } else if (strcmp(key, "width") == 0) {
@@ -104,6 +155,14 @@ static int sl_load_app_bundle(const char *path, sl_app_bundle_t *out) {
     }
 
     fclose(f);
+    if (raw_exec[0] == '\0') return 0;
+    if (bundle_dir && bundle_dir[0]) {
+        if (!sl_resolve_exec_path(bundle_dir, raw_exec, out->exec, sizeof(out->exec))) {
+            return 0;
+        }
+    } else {
+        sl_copy_str(out->exec, sizeof(out->exec), raw_exec);
+    }
     return (out->exec[0] != '\0') ? 1 : 0;
 }
 
@@ -128,26 +187,24 @@ static size_t sl_load_apps_from_system(void) {
         if (len >= sizeof(name)) continue;
         peos_memcpy(name, &list[start], len);
         name[len] = '\0';
+        size_t name_len = sl_trim_trailing_slash(name);
+        if (name_len == 0u) continue;
 
         if (!sl_has_suffix(name, ".app")) continue;
         if (slot >= 8u) break;
 
-        char path[256];
-        size_t w = 0u;
-        const char *dir = SL_APP_DIR;
-        while (dir[w] && w + 1u < sizeof(path)) {
-            path[w] = dir[w];
-            w++;
+        char bundle_path[256];
+        if (!sl_join_path(bundle_path, sizeof(bundle_path), SL_APP_DIR, name)) continue;
+
+        char manifest_path[320];
+        if (!sl_join_path(manifest_path, sizeof(manifest_path), bundle_path, SL_APP_MANIFEST)) {
+            continue;
         }
-        if (w + 1u >= sizeof(path)) continue;
-        path[w++] = '/';
-        if (w + len + 1u >= sizeof(path)) continue;
-        peos_memcpy(path + w, name, len);
-        w += len;
-        path[w] = '\0';
 
         sl_app_bundle_t app;
-        if (!sl_load_app_bundle(path, &app)) continue;
+        if (!sl_load_app_bundle(manifest_path, bundle_path, &app)) {
+            if (!sl_load_app_bundle(bundle_path, NULL, &app)) continue;
+        }
         if (!sl_orbit_slot_configure(slot, app.title, app.exec, app.args)) continue;
         slot++;
     }
