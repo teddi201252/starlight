@@ -492,6 +492,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
         for (uint8_t i = 0u; i < input.key_event_count; i++) {
             focused->task->on_input(ctx, &input, &input.key_events[i], focused->task->userdata);
         }
+        sl_windows_mark_focused_activity();
         sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
     }
 
@@ -500,6 +501,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
     if (input.mouse_left_pressed) {
         sl_windows_focus_at_cursor(ctx->cursor_x, ctx->cursor_y);
         focused = sl_window_get_focused();
+        sl_windows_mark_focused_activity();
         sl_dirty_mark_full();
 
         g_drag_active = 0u;
@@ -537,6 +539,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
 
         sl_window_move(g_drag_window, (uint32_t)new_x, (uint32_t)new_y);
         if (g_drag_window->x != old_x || g_drag_window->y != old_y) {
+            sl_windows_mark_focused_activity();
             sl_dirty_add_padded(ctx, old_x, old_y,
                                 g_drag_window->width, g_drag_window->height,
                                 SL_DRAG_DIRTY_PADDING);
