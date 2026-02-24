@@ -11,7 +11,6 @@
 #define SL_APP_MANIFEST "app.ini"
 #define SL_APP_SLOT_MAX 8u
 
-#define SL_LAUNCHER_WIDTH 104u
 #define SL_LAUNCHER_MARGIN_LEFT 20u
 #define SL_LAUNCHER_RESERVED_GAP 12u
 #define SL_LAUNCHER_PAD_X 10u
@@ -19,9 +18,10 @@
 #define SL_LAUNCHER_HEADER_H 12u
 #define SL_LAUNCHER_ITEM_H 44u
 #define SL_LAUNCHER_ITEM_GAP 10u
-#define SL_LAUNCHER_ICON_SIZE 40u
+#define SL_LAUNCHER_ICON_SIZE 60u
 #define SL_LAUNCHER_TOOLTIP_PAD_X 8u
 #define SL_LAUNCHER_TOOLTIP_W_MAX 210u
+#define SL_LAUNCHER_TOOLTIP_H 22u
 #define SL_APP_RESOURCE_MAX 16u
 
 typedef struct {
@@ -306,14 +306,28 @@ static void sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app) {
     }
 }
 
+static uint32_t sl_launcher_content_width(void) {
+    uint32_t icon_w = SL_LAUNCHER_ICON_SIZE;
+    uint32_t header_w = 4u * 8u; // "APPS"
+    return (icon_w > header_w) ? icon_w : header_w;
+}
+
+static uint32_t sl_launcher_item_height(void) {
+    uint32_t min_h = SL_LAUNCHER_ITEM_H;
+    uint32_t icon_h = SL_LAUNCHER_ICON_SIZE + 2u;
+    return (icon_h > min_h) ? icon_h : min_h;
+}
+
 static uint32_t sl_launcher_width(void) {
-    return (g_launcher_count > 0u) ? SL_LAUNCHER_WIDTH : 0u;
+    if (g_launcher_count == 0u) return 0u;
+    return SL_LAUNCHER_PAD_X * 2u + sl_launcher_content_width();
 }
 
 static uint32_t sl_launcher_panel_height(void) {
     if (g_launcher_count == 0u) return 0u;
     uint32_t count = (uint32_t)g_launcher_count;
-    uint32_t items_h = count * SL_LAUNCHER_ITEM_H;
+    uint32_t item_h = sl_launcher_item_height();
+    uint32_t items_h = count * item_h;
     if (count > 1u) {
         items_h += (count - 1u) * SL_LAUNCHER_ITEM_GAP;
     }
@@ -350,15 +364,16 @@ static void sl_launcher_item_rect(const sl_ctx_t *ctx, size_t index,
     sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
     (void)panel_h;
 
+    uint32_t item_h = sl_launcher_item_height();
     uint32_t item_x = panel_x + SL_LAUNCHER_PAD_X;
     uint32_t item_y = panel_y + SL_LAUNCHER_PAD_Y + SL_LAUNCHER_HEADER_H + 8u +
-                      (uint32_t)index * (SL_LAUNCHER_ITEM_H + SL_LAUNCHER_ITEM_GAP);
+                      (uint32_t)index * (item_h + SL_LAUNCHER_ITEM_GAP);
     uint32_t item_w = (panel_w > SL_LAUNCHER_PAD_X * 2u) ? (panel_w - SL_LAUNCHER_PAD_X * 2u) : panel_w;
 
     if (x) *x = item_x;
     if (y) *y = item_y;
     if (w) *w = item_w;
-    if (h) *h = SL_LAUNCHER_ITEM_H;
+    if (h) *h = item_h;
 }
 
 static int sl_point_in_rect(uint32_t px, uint32_t py, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
@@ -386,7 +401,7 @@ static void sl_launcher_hover_label_rect(const sl_ctx_t *ctx, size_t index,
     uint32_t tip_w = text_w + SL_LAUNCHER_TOOLTIP_PAD_X * 2u;
     if (tip_w > SL_LAUNCHER_TOOLTIP_W_MAX) tip_w = SL_LAUNCHER_TOOLTIP_W_MAX;
     if (tip_w < 48u) tip_w = 48u;
-    uint32_t tip_h = SL_LAUNCHER_ITEM_H;
+    uint32_t tip_h = SL_LAUNCHER_TOOLTIP_H;
 
     uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
     sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
@@ -433,7 +448,8 @@ static void sl_launcher_draw_hover_label(sl_ctx_t *ctx, size_t index) {
     sl_fill_rect(ctx, tip_x, tip_y + tip_h - 1u, tip_w, 1u, 90u, 110u, 132u);
     sl_fill_rect(ctx, tip_x, tip_y, 1u, tip_h, 90u, 110u, 132u);
     sl_fill_rect(ctx, tip_x + tip_w - 1u, tip_y, 1u, tip_h, 90u, 110u, 132u);
-    sl_draw_text(ctx, tip_x + SL_LAUNCHER_TOOLTIP_PAD_X, tip_y + 15u, label, 242u, 244u, 247u);
+    uint32_t text_y = tip_y + ((tip_h > 8u) ? ((tip_h - 8u) / 2u) : 0u);
+    sl_draw_text(ctx, tip_x + SL_LAUNCHER_TOOLTIP_PAD_X, text_y, label, 242u, 244u, 247u);
 }
 
 static int sl_launcher_hit_test(const sl_ctx_t *ctx, uint32_t x, uint32_t y, size_t *out_index) {
@@ -919,35 +935,10 @@ void sl_launcher_render(sl_ctx_t *ctx) {
         uint32_t ix, iy, iw, ih;
         sl_launcher_item_rect(ctx, i, &ix, &iy, &iw, &ih);
         sl_launcher_try_load_icon(item);
-        uint8_t hovered = (i == g_launcher_hover_index) ? 1u : 0u;
 
         size_t win_idx = (item->instance) ? sl_window_index_for_task(item->instance) : (size_t)-1;
         uint8_t running = (win_idx != (size_t)-1) ? 1u : 0u;
         uint8_t focused = (running && win_idx == g_focused_window) ? 1u : 0u;
-
-        uint8_t br = 38u, bg = 48u, bb = 58u;
-        if (running) {
-            br = 56u;
-            bg = 80u;
-            bb = 102u;
-        }
-        if (focused) {
-            br = 86u;
-            bg = 118u;
-            bb = 146u;
-        }
-        if (hovered) {
-            br = (uint8_t)(br + 10u);
-            bg = (uint8_t)(bg + 10u);
-            bb = (uint8_t)(bb + 10u);
-        }
-
-        sl_fill_rect(ctx, ix, iy, iw, ih, br, bg, bb);
-        sl_fill_rect(ctx, ix, iy + ih - 1u, iw, 1u, 24u, 30u, 38u);
-
-        if (running) {
-            sl_fill_rect(ctx, ix + 3u, iy + 3u, 4u, ih - 6u, 173u, 228u, 109u);
-        }
 
         const sl_image_t *icon_img = NULL;
         if (item->icon_loaded && item->icon_image.data) {
@@ -960,16 +951,27 @@ void sl_launcher_render(sl_ctx_t *ctx) {
         }
 
         uint8_t drew_icon = 0u;
+        uint32_t icon_size = SL_LAUNCHER_ICON_SIZE;
+        uint32_t icon_x = ix + ((iw > icon_size) ? ((iw - icon_size) / 2u) : 0u);
+        uint32_t icon_y = iy + ((ih > icon_size) ? ((ih - icon_size) / 2u) : 0u);
+
         if (icon_img && icon_img->data) {
-            uint32_t icon_size = SL_LAUNCHER_ICON_SIZE;
-            uint32_t icon_x = ix + ((iw > icon_size) ? ((iw - icon_size) / 2u) : 0u);
-            uint32_t icon_y = iy + ((ih > icon_size) ? ((ih - icon_size) / 2u) : 0u);
             sl_blit_rgba_stretch(ctx, icon_x, icon_y, icon_size, icon_size,
                                  icon_img->data,
                                  icon_img->width,
                                  icon_img->height,
                                  icon_img->stride);
             drew_icon = 1u;
+        }
+
+        if (running) {
+            uint32_t bar_w = focused ? 4u : 3u;
+            uint32_t bar_x = icon_x;
+            uint32_t bar_h = icon_size;
+            uint8_t gr = focused ? 188u : 173u;
+            uint8_t gg = focused ? 242u : 228u;
+            uint8_t gb = focused ? 130u : 109u;
+            sl_fill_rect(ctx, bar_x, icon_y, bar_w, bar_h, gr, gg, gb);
         }
 
         if (!drew_icon) {
