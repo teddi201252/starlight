@@ -3,13 +3,157 @@
 #include "sdk_demo_app.h"
 #include "window.h"
 
+#include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
+
+#define SL_APP_DIR "/system/apps"
+
+typedef struct {
+    char title[64];
+    char exec[160];
+    char args[160];
+    uint32_t width;
+    uint32_t height;
+} sl_app_bundle_t;
 
 static sl_window_t *g_windows = NULL;
 static size_t g_window_count = 0;
 static size_t g_focused_window = (size_t)-1;
 
 static void sl_window_refresh_zorder(void);
+
+static int sl_is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+static char *sl_trim(char *s) {
+    if (!s) return s;
+    while (*s && sl_is_space(*s)) s++;
+    size_t n = strlen(s);
+    while (n > 0u && sl_is_space(s[n - 1u])) {
+        s[n - 1u] = '\0';
+        n--;
+    }
+    return s;
+}
+
+static void sl_copy_str(char *dst, size_t cap, const char *src) {
+    if (!dst || cap == 0u) return;
+    if (!src) src = "";
+    size_t i = 0u;
+    while (i + 1u < cap && src[i]) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static int sl_parse_u32(const char *s, uint32_t *out) {
+    if (!s || !out) return 0;
+    uint64_t v = 0u;
+    size_t i = 0u;
+    if (s[0] == '\0') return 0;
+    while (s[i]) {
+        char c = s[i++];
+        if (c < '0' || c > '9') return 0;
+        v = v * 10u + (uint64_t)(c - '0');
+        if (v > 0xFFFFFFFFu) return 0;
+    }
+    *out = (uint32_t)v;
+    return 1;
+}
+
+static int sl_has_suffix(const char *s, const char *suffix) {
+    if (!s || !suffix) return 0;
+    size_t n = strlen(s);
+    size_t m = strlen(suffix);
+    if (n < m) return 0;
+    return (memcmp(s + (n - m), suffix, m) == 0) ? 1 : 0;
+}
+
+static int sl_load_app_bundle(const char *path, sl_app_bundle_t *out) {
+    if (!path || !out) return 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
+    peos_memset(out, 0, sizeof(*out));
+    sl_copy_str(out->title, sizeof(out->title), "App");
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = sl_trim(line);
+        if (*p == '\0' || *p == '#' || *p == ';') continue;
+        char *eq = strchr(p, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char *key = sl_trim(p);
+        char *val = sl_trim(eq + 1);
+
+        if (strcmp(key, "title") == 0) {
+            sl_copy_str(out->title, sizeof(out->title), val);
+        } else if (strcmp(key, "exec") == 0) {
+            sl_copy_str(out->exec, sizeof(out->exec), val);
+        } else if (strcmp(key, "args") == 0) {
+            sl_copy_str(out->args, sizeof(out->args), val);
+        } else if (strcmp(key, "width") == 0) {
+            (void)sl_parse_u32(val, &out->width);
+        } else if (strcmp(key, "height") == 0) {
+            (void)sl_parse_u32(val, &out->height);
+        }
+    }
+
+    fclose(f);
+    return (out->exec[0] != '\0') ? 1 : 0;
+}
+
+static size_t sl_load_apps_from_system(void) {
+    sl_orbit_slots_clear();
+
+    char list[4096];
+    uint64_t n = peos_readdir(SL_APP_DIR, sizeof(SL_APP_DIR) - 1u, list, sizeof(list) - 1u);
+    if ((int64_t)n <= 0) return 0u;
+    list[n] = '\0';
+
+    size_t slot = 0u;
+    size_t i = 0u;
+    while (i < (size_t)n) {
+        size_t start = i;
+        while (i < (size_t)n && list[i] != '\n') i++;
+        size_t len = i - start;
+        if (i < (size_t)n && list[i] == '\n') i++;
+        if (len == 0u) continue;
+
+        char name[128];
+        if (len >= sizeof(name)) continue;
+        peos_memcpy(name, &list[start], len);
+        name[len] = '\0';
+
+        if (!sl_has_suffix(name, ".app")) continue;
+        if (slot >= 8u) break;
+
+        char path[256];
+        size_t w = 0u;
+        const char *dir = SL_APP_DIR;
+        while (dir[w] && w + 1u < sizeof(path)) {
+            path[w] = dir[w];
+            w++;
+        }
+        if (w + 1u >= sizeof(path)) continue;
+        path[w++] = '/';
+        if (w + len + 1u >= sizeof(path)) continue;
+        peos_memcpy(path + w, name, len);
+        w += len;
+        path[w] = '\0';
+
+        sl_app_bundle_t app;
+        if (!sl_load_app_bundle(path, &app)) continue;
+        if (!sl_orbit_slot_configure(slot, app.title, app.exec, app.args)) continue;
+        slot++;
+    }
+
+    return slot;
+}
 
 static int sl_window_contains_point(const sl_window_t *win, uint32_t x, uint32_t y) {
     if (!win) return 0;
@@ -139,33 +283,65 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count) {
 void sl_windows_create_default(sl_ctx_t *ctx) {
     if (!ctx) return;
 
+    size_t loaded = sl_load_apps_from_system();
+    if (loaded == 0u) {
+        sl_orbit_slots_use_default();
+        loaded = sl_orbit_slot_count_enabled();
+    }
+
     sl_orbit_app_reset();
 
-    const size_t orbit_count = 1u;
-    uint32_t cell_w = 860u;
-    uint32_t cell_h = 520u;
-    if (ctx->fb.width > 40u && cell_w > ctx->fb.width - 40u) cell_w = ctx->fb.width - 40u;
-    if (ctx->fb.height > 40u && cell_h > ctx->fb.height - 40u) cell_h = ctx->fb.height - 40u;
+    size_t orbit_count = loaded;
+    if (orbit_count == 0u) orbit_count = 1u;
+
+    uint32_t cols = 1u;
+    if (orbit_count >= 2u) cols = 2u;
+    if (orbit_count >= 5u) cols = 3u;
+    uint32_t rows = (uint32_t)((orbit_count + (size_t)cols - 1u) / (size_t)cols);
+
+    uint32_t margin = 20u;
+    uint32_t gap = 20u;
+    uint32_t avail_w = (ctx->fb.width > (margin * 2u + gap * (cols - 1u)))
+                       ? (ctx->fb.width - (margin * 2u + gap * (cols - 1u)))
+                       : ctx->fb.width;
+    uint32_t avail_h = (ctx->fb.height > (margin * 2u + gap * (rows - 1u)))
+                       ? (ctx->fb.height - (margin * 2u + gap * (rows - 1u)))
+                       : ctx->fb.height;
+
+    uint32_t cell_w = (cols > 0u) ? (avail_w / cols) : avail_w;
+    uint32_t cell_h = (rows > 0u) ? (avail_h / rows) : avail_h;
     if (cell_w < 320u) cell_w = (ctx->fb.width > 20u) ? (ctx->fb.width - 20u) : ctx->fb.width;
     if (cell_h < 220u) cell_h = (ctx->fb.height > 20u) ? (ctx->fb.height - 20u) : ctx->fb.height;
 
     sl_window_t wins[orbit_count];
-    {
-        uint32_t x = (ctx->fb.width > cell_w) ? ((ctx->fb.width - cell_w) / 2u) : 0u;
-        uint32_t y = (ctx->fb.height > cell_h) ? ((ctx->fb.height - cell_h) / 2u) : 0u;
-        sl_window_init(&wins[0], ctx, sl_orbit_app_instance_at(0u), x, y, cell_w, cell_h);
-        sl_window_set_fps_profile(&wins[0], 30u, 8u);
+    size_t win_count = 0u;
+    for (size_t i = 0u; i < orbit_count; i++) {
+        uint32_t col = (uint32_t)(i % cols);
+        uint32_t row = (uint32_t)(i / cols);
+        uint32_t x = margin + col * (cell_w + gap);
+        uint32_t y = margin + row * (cell_h + gap);
+
+        if (x + cell_w > ctx->fb.width) x = (ctx->fb.width > cell_w) ? (ctx->fb.width - cell_w) : 0u;
+        if (y + cell_h > ctx->fb.height) y = (ctx->fb.height > cell_h) ? (ctx->fb.height - cell_h) : 0u;
+
+        app_instance_t *app = sl_orbit_app_instance_at(i);
+        if (!app) continue;
+        sl_window_init(&wins[win_count], ctx, app, x, y, cell_w, cell_h);
+        sl_window_set_fps_profile(&wins[win_count], 30u, 8u);
+        win_count++;
     }
 
+    if (win_count == 0u) return;
+
     sl_window_t *new_windows =
-        (sl_window_t *)realloc(g_windows, sizeof(sl_window_t) * (g_window_count + orbit_count));
+        (sl_window_t *)realloc(g_windows, sizeof(sl_window_t) * (g_window_count + win_count));
     if (!new_windows) return;
 
     g_windows = new_windows;
-    for (size_t i = 0u; i < orbit_count; i++) {
+    for (size_t i = 0u; i < win_count; i++) {
         g_windows[g_window_count + i] = wins[i];
     }
-    g_window_count += orbit_count;
+    g_window_count += win_count;
     g_focused_window = g_window_count - 1u;
     sl_window_refresh_zorder();
 
