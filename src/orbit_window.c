@@ -1,5 +1,6 @@
 #include "orbit_window.h"
 #include "starlight_internal.h"
+#include "ui_sdk.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -13,6 +14,42 @@
 #define ORBIT_APP_SLOTS 8u
 #define ORBIT_MAX_POLL_READS 8u
 #define ORBIT_POLL_INTERVAL_NS 10000000ull
+#define ORBIT_UI_MAX_CMDS 64u
+#define ORBIT_UI_TEXT_CHARS 96u
+
+typedef enum {
+    ORBIT_UI_CMD_NONE = 0,
+    ORBIT_UI_CMD_LABEL = 1,
+    ORBIT_UI_CMD_BUTTON = 2,
+    ORBIT_UI_CMD_SLIDER = 3,
+} orbit_ui_cmd_type_t;
+
+typedef struct {
+    uint8_t type;
+    uint32_t id;
+    uint32_t x;
+    uint32_t y;
+    uint32_t w;
+    uint32_t h;
+    uint32_t min_v;
+    uint32_t max_v;
+    uint32_t value;
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    char text[ORBIT_UI_TEXT_CHARS];
+} orbit_ui_cmd_t;
+
+typedef struct {
+    uint8_t enabled;
+    uint8_t mouse_down;
+    uint8_t mouse_pressed;
+    uint8_t mouse_released;
+    uint8_t committed;
+    sl_ui_ctx_t ui;
+    orbit_ui_cmd_t cmds[ORBIT_UI_MAX_CMDS];
+    size_t cmd_count;
+} orbit_ui_state_t;
 
 typedef struct {
     uint8_t enabled;
@@ -37,6 +74,7 @@ typedef struct {
     char title[ORBIT_TITLE_CHARS];
     char exec_path[ORBIT_EXEC_CHARS];
     char exec_args[ORBIT_ARGS_CHARS];
+    orbit_ui_state_t ui;
 } orbit_shell_t;
 
 static orbit_shell_t g_orbit[ORBIT_APP_SLOTS];
@@ -54,6 +92,177 @@ static void orbit_copy_str(char *dst, size_t cap, const char *src) {
         i++;
     }
     dst[i] = '\0';
+}
+
+static const char *orbit_skip_spaces(const char *s) {
+    while (s && (*s == ' ' || *s == '\t')) s++;
+    return s;
+}
+
+static int orbit_parse_u32(const char **ps, uint32_t *out) {
+    if (!ps || !*ps || !out) return 0;
+    const char *s = orbit_skip_spaces(*ps);
+    if (!s || *s < '0' || *s > '9') return 0;
+    uint64_t v = 0u;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10u + (uint64_t)(*s - '0');
+        if (v > 0xFFFFFFFFu) return 0;
+        s++;
+    }
+    *out = (uint32_t)v;
+    *ps = s;
+    return 1;
+}
+
+static void orbit_ui_clear(orbit_shell_t *shell) {
+    if (!shell) return;
+    shell->ui.enabled = 1u;
+    shell->ui.committed = 0u;
+    shell->ui.cmd_count = 0u;
+}
+
+static orbit_ui_cmd_t *orbit_ui_next_cmd(orbit_shell_t *shell, uint8_t type) {
+    if (!shell) return NULL;
+    shell->ui.enabled = 1u;
+    if (shell->ui.cmd_count >= ORBIT_UI_MAX_CMDS) return NULL;
+    orbit_ui_cmd_t *cmd = &shell->ui.cmds[shell->ui.cmd_count++];
+    peos_memset(cmd, 0, sizeof(*cmd));
+    cmd->type = type;
+    return cmd;
+}
+
+static void orbit_send_ui_event_button(orbit_shell_t *shell, uint32_t id) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[48];
+    size_t n = 0u;
+    const char *prefix = "@SLUI EVENT BUTTON ";
+    while (prefix[n] && n + 1u < sizeof(msg)) {
+        msg[n] = prefix[n];
+        n++;
+    }
+    char num[16];
+    size_t m = 0u;
+    uint32_t v = id;
+    if (v == 0u) {
+        num[m++] = '0';
+    } else {
+        char rev[16];
+        size_t r = 0u;
+        while (v > 0u && r < sizeof(rev)) {
+            rev[r++] = (char)('0' + (v % 10u));
+            v /= 10u;
+        }
+        while (r > 0u && m < sizeof(num)) num[m++] = rev[--r];
+    }
+    for (size_t i = 0u; i < m && n + 1u < sizeof(msg); i++) msg[n++] = num[i];
+    if (n + 1u < sizeof(msg)) msg[n++] = '\n';
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
+}
+
+static void orbit_send_ui_event_slider(orbit_shell_t *shell, uint32_t id, uint32_t value) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[64];
+    size_t n = 0u;
+    const char *prefix = "@SLUI EVENT SLIDER ";
+    while (prefix[n] && n + 1u < sizeof(msg)) {
+        msg[n] = prefix[n];
+        n++;
+    }
+
+    char a[16];
+    size_t an = 0u;
+    uint32_t va = id;
+    if (va == 0u) a[an++] = '0';
+    else {
+        char rev[16]; size_t r = 0u;
+        while (va > 0u && r < sizeof(rev)) { rev[r++] = (char)('0' + (va % 10u)); va /= 10u; }
+        while (r > 0u && an < sizeof(a)) a[an++] = rev[--r];
+    }
+    for (size_t i = 0u; i < an && n + 1u < sizeof(msg); i++) msg[n++] = a[i];
+    if (n + 1u < sizeof(msg)) msg[n++] = ' ';
+
+    char b[16];
+    size_t bn = 0u;
+    uint32_t vb = value;
+    if (vb == 0u) b[bn++] = '0';
+    else {
+        char rev[16]; size_t r = 0u;
+        while (vb > 0u && r < sizeof(rev)) { rev[r++] = (char)('0' + (vb % 10u)); vb /= 10u; }
+        while (r > 0u && bn < sizeof(b)) b[bn++] = rev[--r];
+    }
+    for (size_t i = 0u; i < bn && n + 1u < sizeof(msg); i++) msg[n++] = b[i];
+    if (n + 1u < sizeof(msg)) msg[n++] = '\n';
+
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
+}
+
+static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
+    if (!shell || !line) return 0;
+    const char *prefix = "@SLUI ";
+    size_t i = 0u;
+    while (prefix[i]) {
+        if (line[i] != prefix[i]) return 0;
+        i++;
+    }
+
+    const char *p = line + i;
+    p = orbit_skip_spaces(p);
+
+    if (p[0] == 'C' && p[1] == 'L' && p[2] == 'E' && p[3] == 'A' && p[4] == 'R' && p[5] == '\0') {
+        orbit_ui_clear(shell);
+        return 1;
+    }
+    if (p[0] == 'C' && p[1] == 'O' && p[2] == 'M' && p[3] == 'M' && p[4] == 'I' && p[5] == 'T' && p[6] == '\0') {
+        shell->ui.enabled = 1u;
+        shell->ui.committed = 1u;
+        return 1;
+    }
+
+    if (p[0] == 'L' && p[1] == 'A' && p[2] == 'B' && p[3] == 'E' && p[4] == 'L' && p[5] == ' ') {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_LABEL);
+        if (!cmd) return 1;
+        p += 6;
+        uint32_t rv = 0u, gv = 0u, bv = 0u;
+        if (!orbit_parse_u32(&p, &cmd->x) || !orbit_parse_u32(&p, &cmd->y) ||
+            !orbit_parse_u32(&p, &rv) || !orbit_parse_u32(&p, &gv) || !orbit_parse_u32(&p, &bv)) {
+            return 1;
+        }
+        cmd->r = (uint8_t)(rv & 0xFFu);
+        cmd->g = (uint8_t)(gv & 0xFFu);
+        cmd->b = (uint8_t)(bv & 0xFFu);
+        p = orbit_skip_spaces(p);
+        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        return 1;
+    }
+
+    if (p[0] == 'B' && p[1] == 'U' && p[2] == 'T' && p[3] == 'T' && p[4] == 'O' && p[5] == 'N' && p[6] == ' ') {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_BUTTON);
+        if (!cmd) return 1;
+        p += 7;
+        if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
+            !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
+            !orbit_parse_u32(&p, &cmd->h)) {
+            return 1;
+        }
+        p = orbit_skip_spaces(p);
+        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        return 1;
+    }
+
+    if (p[0] == 'S' && p[1] == 'L' && p[2] == 'I' && p[3] == 'D' && p[4] == 'E' && p[5] == 'R' && p[6] == ' ') {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_SLIDER);
+        if (!cmd) return 1;
+        p += 7;
+        if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
+            !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
+            !orbit_parse_u32(&p, &cmd->min_v) || !orbit_parse_u32(&p, &cmd->max_v) ||
+            !orbit_parse_u32(&p, &cmd->value)) {
+            return 1;
+        }
+        return 1;
+    }
+
+    return 1;
 }
 
 static void orbit_push_line(orbit_shell_t *shell, const char *line) {
@@ -74,6 +283,7 @@ static void orbit_reset_buffer(orbit_shell_t *shell) {
     shell->line_count = 0u;
     shell->pending_len = 0u;
     shell->pending_line[0] = '\0';
+    peos_memset(&shell->ui, 0, sizeof(shell->ui));
 }
 
 static void orbit_feed_char(orbit_shell_t *shell, char c) {
@@ -82,7 +292,9 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
 
     if (c == '\n') {
         shell->pending_line[shell->pending_len] = '\0';
-        orbit_push_line(shell, shell->pending_line);
+        if (!orbit_ui_handle_line(shell, shell->pending_line)) {
+            orbit_push_line(shell, shell->pending_line);
+        }
         shell->pending_len = 0u;
         shell->pending_line[0] = '\0';
         return;
@@ -198,6 +410,7 @@ static void orbit_mark_child_exited(orbit_shell_t *shell) {
     if (!shell) return;
     orbit_close_fds(shell);
     shell->child_pid = -1;
+    peos_memset(&shell->ui, 0, sizeof(shell->ui));
     orbit_push_line(shell, "[app exited] Press Enter to restart.");
 }
 
@@ -311,11 +524,17 @@ static uint16_t orbit_norm_keycode(uint16_t code) {
 static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
                            const peos_input_event_t *event, void *userdata) {
     (void)ctx;
-    (void)frame;
-    if (!event) return;
 
     orbit_shell_t *shell = (orbit_shell_t *)userdata;
     if (!shell) return;
+
+    if (frame) {
+        shell->ui.mouse_down = (frame->mouse_buttons & 0x01u) ? 1u : 0u;
+        shell->ui.mouse_pressed = frame->mouse_left_pressed;
+        shell->ui.mouse_released = frame->mouse_left_released;
+    }
+
+    if (!event) return;
 
     uint16_t code = orbit_norm_keycode(event->code);
 
@@ -371,6 +590,38 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     sl_fill_rect(ctx, body_x, body_y, body_w, body_h, 12u, 12u, 12u);
     const char *title = shell->title[0] ? shell->title : "App";
     sl_draw_text(ctx, win->x + 6u, win->y + 6u, title, 20u, 20u, 20u);
+
+    if (shell->ui.enabled && shell->ui.committed) {
+        sl_fill_rect(ctx, body_x, body_y, body_w, body_h, 20u, 22u, 30u);
+        sl_ui_begin(&shell->ui.ui, ctx, win,
+                    ctx->cursor_x, ctx->cursor_y,
+                    shell->ui.mouse_down, shell->ui.mouse_pressed, shell->ui.mouse_released);
+
+        for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
+            orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+            uint32_t x = body_x + cmd->x;
+            uint32_t y = body_y + cmd->y;
+            if (cmd->type == ORBIT_UI_CMD_LABEL) {
+                sl_ui_label(&shell->ui.ui, x, y, cmd->text, cmd->r, cmd->g, cmd->b);
+            } else if (cmd->type == ORBIT_UI_CMD_BUTTON) {
+                if (sl_ui_button(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text)) {
+                    orbit_send_ui_event_button(shell, cmd->id);
+                }
+            } else if (cmd->type == ORBIT_UI_CMD_SLIDER) {
+                uint32_t prev = cmd->value;
+                if (sl_ui_slider_u32(&shell->ui.ui, cmd->id, x, y, cmd->w,
+                                     cmd->min_v, cmd->max_v, &cmd->value)) {
+                    if (cmd->value != prev) {
+                        orbit_send_ui_event_slider(shell, cmd->id, cmd->value);
+                    }
+                }
+            }
+        }
+
+        shell->ui.mouse_pressed = 0u;
+        shell->ui.mouse_released = 0u;
+        return;
+    }
 
     uint32_t text_x = body_x + 4u;
     uint32_t text_y = body_y + 4u;
