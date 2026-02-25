@@ -7,8 +7,8 @@
 #define SL_OS_DISPLAY_CONFIG_FILE SL_OS_CONFIG_DIR "/display.cfg"
 
 #define SL_RESOURCE_CURSOR SL_RESOURCE_ROOT "/cursor.png"
-#define SL_RESOURCE_BACKGROUND SL_RESOURCE_ROOT "/background.png"
+#define SL_RESOURCE_BACKGROUND SL_RESOURCE_ROOT "/backgrounds/starlight.png"
 #define SL_RESOURCE_CURSOR_ALT SL_RESOURCE_ROOT "/cursor_2.png"
-#define SL_RESOURCE_BACKGROUND_ALT SL_RESOURCE_ROOT "/fih.png"
+#define SL_RESOURCE_BACKGROUND_ALT SL_RESOURCE_ROOT "/backgrounds/fih.jpg"
 #define SL_RESOURCE_START_WAV SL_RESOURCE_ROOT "/start.wav"
 #define SL_RESOURCE_APP_PLACEHOLDER SL_RESOURCE_ROOT "/app_placeholder.png"
