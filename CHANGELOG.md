@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.1.4] - 2026-02-25
+- resources: migrate default backgrounds to /backgrounds and update fallback paths
+
 ## [0.1.3] - 2026-02-25
 - UI renderer: clip rect and SLUI protocol extensions for scroll clipping and new widgets
 
