@@ -137,6 +137,37 @@ void sl_fill_rect(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
     }
 }
 
+void sl_fill_rect_a(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                    uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    if (!ctx || !ctx->frame) return;
+    if (a == 0u) return;
+    if (a == 255u) {
+        sl_fill_rect(ctx, x, y, w, h, r, g, b);
+        return;
+    }
+
+    uint32_t draw_x = x;
+    uint32_t draw_y = y;
+    uint32_t draw_w = w;
+    uint32_t draw_h = h;
+    if (!sl_clip_rect_to_ctx(ctx, &draw_x, &draw_y, &draw_w, &draw_h)) return;
+    if (draw_w == 0u || draw_h == 0u) return;
+
+    if (ctx->bytespp != 3u && ctx->bytespp != 4u) return;
+
+    for (uint32_t j = 0u; j < draw_h; j++) {
+        uint8_t *dst = ctx->frame + ((size_t)(draw_y + j) * ctx->row_stride) +
+                       ((size_t)draw_x * (size_t)ctx->bytespp);
+        for (uint32_t i = 0u; i < draw_w; i++) {
+            dst[0] = sl_blend_chan(b, dst[0], a);
+            dst[1] = sl_blend_chan(g, dst[1], a);
+            dst[2] = sl_blend_chan(r, dst[2], a);
+            if (ctx->bytespp == 4u) dst[3] = 0xFFu;
+            dst += ctx->bytespp;
+        }
+    }
+}
+
 // Blend an RGBA image into the framebuffer at (dst_x, dst_y).
 // Source format is 8-bit RGBA; destination framebuffer is BGR/BGRA.
 void sl_blit_rgba(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y,

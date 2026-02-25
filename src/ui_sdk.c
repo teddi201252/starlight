@@ -538,6 +538,18 @@ void sl_ui_image_rgba(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint3
     sl_blit_rgba_stretch(ui->ctx, x, y, w, h, rgba, src_w, src_h, src_stride);
 }
 
+void sl_ui_rect(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                uint8_t r, uint8_t g, uint8_t b) {
+    if (!ui || !ui->ctx || w == 0u || h == 0u) return;
+    sl_fill_rect(ui->ctx, x, y, w, h, r, g, b);
+}
+
+void sl_ui_rect_a(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                  uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    if (!ui || !ui->ctx || w == 0u || h == 0u) return;
+    sl_fill_rect_a(ui->ctx, x, y, w, h, r, g, b, a);
+}
+
 void sl_ui_separator(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w) {
     if (!ui || !ui->ctx || w == 0u) return;
     sl_fill_rect(ui->ctx, x, y, w, 1u, 72u, 72u, 72u);

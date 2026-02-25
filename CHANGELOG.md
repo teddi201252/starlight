@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.3.1] - 2026-02-25
+- UI renderer: clip confinement and alpha rect rendering support
+
 ## [0.3.0] - 2026-02-25
 - Host SLUI: supporto comandi state-aware, separator/list item e rendering SDK aggiornato
 
