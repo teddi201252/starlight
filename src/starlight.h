@@ -17,6 +17,7 @@ typedef struct {
     uint8_t fb_direct;
     uint8_t hw_cursor;
     uint8_t cursor_saved_valid;
+    uint8_t clip_enabled;
     uint8_t cursor_saved[36]; // 3x3 cursor * max 4 bytes/pixel
     int input_raw;
     uint32_t cursor_x;
@@ -26,6 +27,10 @@ typedef struct {
     uint32_t cursor_saved_w;
     uint32_t cursor_saved_h;
     uint32_t hw_cursor_scale_pct;
+    uint32_t clip_x;
+    uint32_t clip_y;
+    uint32_t clip_w;
+    uint32_t clip_h;
     char cursor_path[160];
     char background_path[160];
     uint32_t display_width;

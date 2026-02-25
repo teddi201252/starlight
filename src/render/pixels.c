@@ -7,10 +7,83 @@ static inline uint8_t sl_blend_chan(uint8_t src, uint8_t dst, uint8_t a) {
     return (uint8_t)(out / 255u);
 }
 
+static int sl_point_in_clip(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || !ctx->clip_enabled) return 1;
+    if (ctx->clip_w == 0u || ctx->clip_h == 0u) return 0;
+    uint32_t cx1 = ctx->clip_x + ctx->clip_w;
+    uint32_t cy1 = ctx->clip_y + ctx->clip_h;
+    if (cx1 < ctx->clip_x) cx1 = 0xFFFFFFFFu;
+    if (cy1 < ctx->clip_y) cy1 = 0xFFFFFFFFu;
+    if (x < ctx->clip_x || y < ctx->clip_y) return 0;
+    if (x >= cx1 || y >= cy1) return 0;
+    return 1;
+}
+
+static int sl_clip_rect_to_ctx(const sl_ctx_t *ctx,
+                               uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!ctx || !x || !y || !w || !h) return 0;
+    if (*w == 0u || *h == 0u) return 0;
+    if (*x >= ctx->fb.width || *y >= ctx->fb.height) return 0;
+
+    uint32_t x0 = *x;
+    uint32_t y0 = *y;
+    uint32_t x1 = x0 + *w;
+    uint32_t y1 = y0 + *h;
+    if (x1 < x0) x1 = 0xFFFFFFFFu;
+    if (y1 < y0) y1 = 0xFFFFFFFFu;
+
+    uint32_t fb_x1 = ctx->fb.width;
+    uint32_t fb_y1 = ctx->fb.height;
+    if (x1 > fb_x1) x1 = fb_x1;
+    if (y1 > fb_y1) y1 = fb_y1;
+    if (x1 <= x0 || y1 <= y0) return 0;
+
+    if (ctx->clip_enabled) {
+        if (ctx->clip_w == 0u || ctx->clip_h == 0u) return 0;
+        uint32_t cx0 = ctx->clip_x;
+        uint32_t cy0 = ctx->clip_y;
+        uint32_t cx1 = cx0 + ctx->clip_w;
+        uint32_t cy1 = cy0 + ctx->clip_h;
+        if (cx1 < cx0) cx1 = 0xFFFFFFFFu;
+        if (cy1 < cy0) cy1 = 0xFFFFFFFFu;
+
+        if (x0 < cx0) x0 = cx0;
+        if (y0 < cy0) y0 = cy0;
+        if (x1 > cx1) x1 = cx1;
+        if (y1 > cy1) y1 = cy1;
+        if (x1 <= x0 || y1 <= y0) return 0;
+    }
+
+    *x = x0;
+    *y = y0;
+    *w = x1 - x0;
+    *h = y1 - y0;
+    return 1;
+}
+
+void sl_clip_set(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (!ctx) return;
+    ctx->clip_enabled = 1u;
+    ctx->clip_x = x;
+    ctx->clip_y = y;
+    ctx->clip_w = w;
+    ctx->clip_h = h;
+}
+
+void sl_clip_clear(sl_ctx_t *ctx) {
+    if (!ctx) return;
+    ctx->clip_enabled = 0u;
+    ctx->clip_x = 0u;
+    ctx->clip_y = 0u;
+    ctx->clip_w = 0u;
+    ctx->clip_h = 0u;
+}
+
 // Write a single pixel in RGB order with bounds checking.
 void sl_put_pixel(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint8_t r, uint8_t g, uint8_t b) {
     if (!ctx || !ctx->frame) return;
     if (x >= ctx->fb.width || y >= ctx->fb.height) return;
+    if (!sl_point_in_clip(ctx, x, y)) return;
 
     size_t off = ((size_t)y * ctx->row_stride) + ((size_t)x * (size_t)ctx->bytespp);
     ctx->frame[off + 0] = b;
@@ -23,19 +96,15 @@ void sl_put_pixel(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint8_t r, uint8_t g, u
 void sl_fill_rect(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                   uint8_t r, uint8_t g, uint8_t b) {
     if (!ctx || !ctx->frame) return;
-    if (w == 0u || h == 0u) return;
-    if (x >= ctx->fb.width || y >= ctx->fb.height) return;
-
-    uint32_t x_end = x + w;
-    uint32_t y_end = y + h;
-    if (x_end > ctx->fb.width) x_end = ctx->fb.width;
-    if (y_end > ctx->fb.height) y_end = ctx->fb.height;
-
-    uint32_t draw_w = x_end - x;
-    uint32_t draw_h = y_end - y;
+    uint32_t draw_x = x;
+    uint32_t draw_y = y;
+    uint32_t draw_w = w;
+    uint32_t draw_h = h;
+    if (!sl_clip_rect_to_ctx(ctx, &draw_x, &draw_y, &draw_w, &draw_h)) return;
     if (draw_w == 0u || draw_h == 0u) return;
 
-    uint8_t *row = ctx->frame + ((size_t)y * ctx->row_stride) + ((size_t)x * (size_t)ctx->bytespp);
+    uint8_t *row = ctx->frame + ((size_t)draw_y * ctx->row_stride) +
+                   ((size_t)draw_x * (size_t)ctx->bytespp);
 
     if (ctx->bytespp == 4u) {
         uint32_t px = ((uint32_t)0xFFu << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
@@ -76,20 +145,22 @@ void sl_blit_rgba(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y,
     if (src_w == 0 || src_h == 0) return;
     if (ctx->bytespp != 3 && ctx->bytespp != 4) return;
     if (src_stride < src_w * 4u) return;
-    if (dst_x >= ctx->fb.width || dst_y >= ctx->fb.height) return;
+    uint32_t draw_x = dst_x;
+    uint32_t draw_y = dst_y;
+    uint32_t draw_w = src_w;
+    uint32_t draw_h = src_h;
+    if (!sl_clip_rect_to_ctx(ctx, &draw_x, &draw_y, &draw_w, &draw_h)) return;
 
-    uint32_t copy_w = src_w;
-    uint32_t copy_h = src_h;
-    if (dst_x + copy_w > ctx->fb.width) copy_w = ctx->fb.width - dst_x;
-    if (dst_y + copy_h > ctx->fb.height) copy_h = ctx->fb.height - dst_y;
+    uint32_t src_x0 = draw_x - dst_x;
+    uint32_t src_y0 = draw_y - dst_y;
 
-    for (uint32_t y = 0; y < copy_h; y++) {
-        const uint8_t *srow = src_rgba + ((size_t)y * (size_t)src_stride);
-        uint8_t *drow = ctx->frame + ((size_t)(dst_y + y) * ctx->row_stride) +
-                        ((size_t)dst_x * (size_t)ctx->bytespp);
+    for (uint32_t y = 0; y < draw_h; y++) {
+        const uint8_t *srow = src_rgba + ((size_t)(src_y0 + y) * (size_t)src_stride);
+        uint8_t *drow = ctx->frame + ((size_t)(draw_y + y) * ctx->row_stride) +
+                        ((size_t)draw_x * (size_t)ctx->bytespp);
 
-        for (uint32_t x = 0; x < copy_w; x++) {
-            const uint8_t *s = srow + ((size_t)x * 4u);
+        for (uint32_t x = 0; x < draw_w; x++) {
+            const uint8_t *s = srow + ((size_t)(src_x0 + x) * 4u);
             uint8_t sr = s[0];
             uint8_t sg = s[1];
             uint8_t sb = s[2];
@@ -118,27 +189,30 @@ void sl_blit_rgba_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_
     if (dst_w == 0 || dst_h == 0) return;
     if (ctx->bytespp != 3 && ctx->bytespp != 4) return;
     if (src_stride < src_w * 4u) return;
-    if (dst_x >= ctx->fb.width || dst_y >= ctx->fb.height) return;
-
-    uint32_t copy_w = dst_w;
-    uint32_t copy_h = dst_h;
-    uint32_t rem_w = ctx->fb.width - dst_x;
-    uint32_t rem_h = ctx->fb.height - dst_y;
-    if (copy_w > rem_w) copy_w = rem_w;
-    if (copy_h > rem_h) copy_h = rem_h;
-    if (copy_w == 0 || copy_h == 0) return;
+    uint32_t draw_x = dst_x;
+    uint32_t draw_y = dst_y;
+    uint32_t draw_w = dst_w;
+    uint32_t draw_h = dst_h;
+    if (!sl_clip_rect_to_ctx(ctx, &draw_x, &draw_y, &draw_w, &draw_h)) return;
+    if (draw_w == 0u || draw_h == 0u) return;
 
     float src_x_step = (float)src_w / (float)dst_w;
     float src_y_step = (float)src_h / (float)dst_h;
+    uint32_t off_x = draw_x - dst_x;
+    uint32_t off_y = draw_y - dst_y;
 
-    for (uint32_t y = 0; y < copy_h; y++) {
-        int src_y = (int)(y * src_y_step);
+    for (uint32_t y = 0; y < draw_h; y++) {
+        int src_y = (int)((off_y + y) * src_y_step);
+        if (src_y < 0) src_y = 0;
+        if ((uint32_t)src_y >= src_h) src_y = (int)(src_h - 1u);
         const uint8_t *srow = src_rgba + ((size_t)src_y * (size_t)src_stride);
-        uint8_t *drow = ctx->frame + ((size_t)(dst_y + y) * ctx->row_stride) +
-                        ((size_t)dst_x * (size_t)ctx->bytespp);
+        uint8_t *drow = ctx->frame + ((size_t)(draw_y + y) * ctx->row_stride) +
+                        ((size_t)draw_x * (size_t)ctx->bytespp);
 
-        for (uint32_t x = 0; x < copy_w; x++) {
-            int src_x = (int)(x * src_x_step);
+        for (uint32_t x = 0; x < draw_w; x++) {
+            int src_x = (int)((off_x + x) * src_x_step);
+            if (src_x < 0) src_x = 0;
+            if ((uint32_t)src_x >= src_w) src_x = (int)(src_w - 1u);
             const uint8_t *s = srow + ((size_t)src_x * 4u);
             uint8_t sr = s[0];
             uint8_t sg = s[1];
@@ -177,7 +251,7 @@ void sl_draw_char(sl_ctx_t *ctx, uint32_t x, uint32_t y, char c, uint8_t r, uint
         for (uint32_t i = 0; i < 8; i++) {
             uint32_t xx = x + i;
             if (xx >= ctx->fb.width) break;
-            if ((bits & (uint8_t)(1u << i)) != 0u) {
+            if ((bits & (uint8_t)(1u << i)) != 0u && sl_point_in_clip(ctx, xx, yy)) {
                 dst[0] = b;
                 dst[1] = g;
                 dst[2] = r;

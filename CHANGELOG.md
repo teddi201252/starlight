@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.1.3] - 2026-02-25
+- UI renderer: clip rect and SLUI protocol extensions for scroll clipping and new widgets
+
 ## [0.1.2] - 2026-02-24
 - Launcher: aggiunto placeholder icon per app senza icona
 - Launcher: nome app mostrato in hover fuori dal pannello, allineato al bottone
