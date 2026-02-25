@@ -14,6 +14,8 @@ typedef struct {
     uint8_t key_event_count;
     int32_t mouse_dx;
     int32_t mouse_dy;
+    int32_t mouse_wheel_x;
+    int32_t mouse_wheel_y;
     peos_input_event_t key_events[16];
 } sl_input_frame_t;
 

@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.2.0] - 2026-02-25
+- Added mouse wheel handling in Starlight UI, including scroll-view hover scrolling.
+
 ## [0.1.4] - 2026-02-25
 - resources: migrate default backgrounds to /backgrounds and update fallback paths
 

@@ -10,7 +10,8 @@ static int sl_ui_point_in_rect(uint32_t px, uint32_t py,
 
 void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
                  uint32_t cursor_x, uint32_t cursor_y,
-                 uint8_t mouse_down, uint8_t mouse_pressed, uint8_t mouse_released) {
+                 uint8_t mouse_down, uint8_t mouse_pressed, uint8_t mouse_released,
+                 int32_t wheel_x, int32_t wheel_y) {
     if (!ui) return;
     ui->ctx = ctx;
     ui->win = win;
@@ -19,6 +20,9 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
     ui->mouse_down = mouse_down;
     ui->mouse_pressed = mouse_pressed;
     ui->mouse_released = mouse_released;
+    ui->wheel_x = wheel_x;
+    ui->wheel_y = wheel_y;
+    ui->wheel_consumed = 0u;
 }
 
 void sl_ui_label(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text,
@@ -351,7 +355,8 @@ uint8_t sl_ui_text_input(sl_ui_ctx_t *ui, uint32_t id,
 
 uint8_t sl_ui_scroll_v(sl_ui_ctx_t *ui, uint32_t id,
                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                       uint32_t content_h, uint32_t *offset) {
+                       uint32_t content_h, uint32_t *offset,
+                       uint32_t hit_x, uint32_t hit_y, uint32_t hit_w, uint32_t hit_h) {
     if (!ui || !ui->ctx || !offset || w < 8u || h < 20u) return 0u;
 
     uint32_t max_off = 0u;
@@ -376,7 +381,14 @@ uint8_t sl_ui_scroll_v(sl_ui_ctx_t *ui, uint32_t id,
         knob_y = track_y + (uint32_t)(((uint64_t)(*offset) * (uint64_t)travel) / (uint64_t)max_off);
     }
 
-    int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
+    if (hit_w == 0u || hit_h == 0u) {
+        hit_x = x;
+        hit_y = y;
+        hit_w = w;
+        hit_h = h;
+    }
+
+    int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, hit_x, hit_y, hit_w, hit_h);
     int knob_hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, track_x, knob_y, track_w, knob_h);
     if (hovered && ui->mouse_pressed) {
         ui->active_id = id;
@@ -391,6 +403,24 @@ uint8_t sl_ui_scroll_v(sl_ui_ctx_t *ui, uint32_t id,
     }
 
     uint8_t changed = 0u;
+    if (hovered && !ui->wheel_consumed && max_off > 0u) {
+        int32_t wheel = (ui->wheel_y != 0) ? ui->wheel_y : ui->wheel_x;
+        if (wheel != 0) {
+            int32_t step = (int32_t)(h / 5u);
+            if (step < 12) step = 12;
+            if (step > 64) step = 64;
+
+            int64_t nv = (int64_t)(*offset) - ((int64_t)wheel * (int64_t)step);
+            if (nv < 0) nv = 0;
+            if (nv > (int64_t)max_off) nv = (int64_t)max_off;
+            if ((uint32_t)nv != *offset) {
+                *offset = (uint32_t)nv;
+                changed = 1u;
+            }
+            ui->wheel_consumed = 1u;
+        }
+    }
+
     if (ui->active_id == id && ui->mouse_down && travel > 0u && max_off > 0u) {
         uint32_t cy = ui->cursor_y;
         if (cy < track_y) cy = track_y;

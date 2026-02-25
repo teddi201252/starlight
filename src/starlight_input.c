@@ -31,6 +31,8 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
         out->mouse_updated = 1u;
         out->mouse_dx = mev.dx;
         out->mouse_dy = mev.dy;
+        out->mouse_wheel_x = (int32_t)mev.wheel_x;
+        out->mouse_wheel_y = (int32_t)mev.wheel_y;
 
         uint32_t old_x = ctx->cursor_x;
         uint32_t old_y = ctx->cursor_y;

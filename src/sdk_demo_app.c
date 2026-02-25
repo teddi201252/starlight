@@ -7,6 +7,8 @@ typedef struct {
     uint8_t mouse_down;
     uint8_t mouse_pressed;
     uint8_t mouse_released;
+    int32_t mouse_wheel_x;
+    int32_t mouse_wheel_y;
     uint32_t slider;
     uint32_t clicks;
     uint8_t image_rgba[32u * 32u * 4u];
@@ -54,6 +56,8 @@ static void sdk_demo_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         s->mouse_down = (frame->mouse_buttons & 0x01u) ? 1u : 0u;
         s->mouse_pressed = frame->mouse_left_pressed;
         s->mouse_released = frame->mouse_left_released;
+        s->mouse_wheel_x = frame->mouse_wheel_x;
+        s->mouse_wheel_y = frame->mouse_wheel_y;
 
         if (frame->mouse_left_released) {
             uint32_t body_x = 0u;
@@ -112,7 +116,8 @@ static void sdk_demo_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *user
 
     sl_ui_begin(&s->ui, ctx, win,
                 ctx->cursor_x, ctx->cursor_y,
-                s->mouse_down, s->mouse_pressed, s->mouse_released);
+                s->mouse_down, s->mouse_pressed, s->mouse_released,
+                s->mouse_wheel_x, s->mouse_wheel_y);
 
     uint32_t x = body_x + 10u;
     uint32_t y = body_y + 10u;
@@ -143,6 +148,8 @@ static void sdk_demo_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *user
 
     s->mouse_pressed = 0u;
     s->mouse_released = 0u;
+    s->mouse_wheel_x = 0;
+    s->mouse_wheel_y = 0;
 }
 
 app_instance_t *sl_sdk_demo_app_instance(void) {
