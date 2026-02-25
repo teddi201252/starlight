@@ -34,6 +34,9 @@
 #define ORBIT_SLUI_CAP_EVENT_TEXT_INPUT (1u << 12)
 #define ORBIT_SLUI_CAP_EVENT_SCROLL_V   (1u << 13)
 #define ORBIT_SLUI_CAP_CLIP             (1u << 14)
+#define ORBIT_SLUI_CAP_SEPARATOR        (1u << 15)
+#define ORBIT_SLUI_CAP_LIST_ITEM        (1u << 16)
+#define ORBIT_SLUI_CAP_DISABLED_STATE   (1u << 17)
 
 #define ORBIT_SLUI_ERR_MALFORMED   100u
 #define ORBIT_SLUI_ERR_HELLO       101u
@@ -46,6 +49,8 @@
 #define ORBIT_SLUI_ERR_TEXT_INPUT  116u
 #define ORBIT_SLUI_ERR_SCROLL_V    117u
 #define ORBIT_SLUI_ERR_CLIP        118u
+#define ORBIT_SLUI_ERR_SEPARATOR   119u
+#define ORBIT_SLUI_ERR_LIST_ITEM   120u
 #define ORBIT_SLUI_ERR_UNKNOWN_CMD 199u
 #define ORBIT_SLUI_ERR_CMD_LIMIT   200u
 
@@ -61,6 +66,8 @@ typedef enum {
     ORBIT_UI_CMD_SCROLL_V = 8,
     ORBIT_UI_CMD_CLIP_PUSH = 9,
     ORBIT_UI_CMD_CLIP_POP = 10,
+    ORBIT_UI_CMD_SEPARATOR = 11,
+    ORBIT_UI_CMD_LIST_ITEM = 12,
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -80,6 +87,7 @@ typedef struct {
     sl_image_t image;
     uint8_t image_loaded;
     uint8_t image_failed;
+    uint8_t enabled;
 } orbit_ui_cmd_t;
 
 typedef struct {
@@ -209,6 +217,9 @@ static uint32_t orbit_parse_cap_token(const char *tok, size_t tok_len) {
     if (orbit_token_is(tok, tok_len, "EVENT_TEXT_INPUT")) return ORBIT_SLUI_CAP_EVENT_TEXT_INPUT;
     if (orbit_token_is(tok, tok_len, "EVENT_SCROLL_V")) return ORBIT_SLUI_CAP_EVENT_SCROLL_V;
     if (orbit_token_is(tok, tok_len, "CLIP")) return ORBIT_SLUI_CAP_CLIP;
+    if (orbit_token_is(tok, tok_len, "SEPARATOR")) return ORBIT_SLUI_CAP_SEPARATOR;
+    if (orbit_token_is(tok, tok_len, "LIST_ITEM")) return ORBIT_SLUI_CAP_LIST_ITEM;
+    if (orbit_token_is(tok, tok_len, "DISABLED_STATE")) return ORBIT_SLUI_CAP_DISABLED_STATE;
     return 0u;
 }
 
@@ -250,7 +261,7 @@ static void orbit_send_ui_error(orbit_shell_t *shell, uint32_t code, const char 
 static void orbit_send_host_hello(orbit_shell_t *shell) {
     if (!shell || shell->child_stdin_fd < 0) return;
     const char *msg =
-        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT SCROLL_V CLIP EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_SCROLL_V\n";
+        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_SCROLL_V\n";
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, peos_strlen(msg));
     shell->ui.host_hello_sent = 1u;
 }
@@ -288,6 +299,7 @@ static orbit_ui_cmd_t *orbit_ui_next_cmd(orbit_shell_t *shell, uint8_t type) {
     orbit_ui_cmd_t *cmd = &shell->ui.staged_cmds[shell->ui.staged_count++];
     peos_memset(cmd, 0, sizeof(*cmd));
     cmd->type = type;
+    cmd->enabled = 1u;
     return cmd;
 }
 
@@ -574,23 +586,33 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         return 1;
     }
 
-    if (orbit_token_is(cmd_tok, cmd_len, "BUTTON")) {
+    if (orbit_token_is(cmd_tok, cmd_len, "BUTTON") || orbit_token_is(cmd_tok, cmd_len, "BUTTONX")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_BUTTON);
         if (!cmd) return 1;
+        uint8_t with_state = orbit_token_is(cmd_tok, cmd_len, "BUTTONX") ? 1u : 0u;
         if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
             !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
             !orbit_parse_u32(&p, &cmd->h)) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_BUTTON, "button_invalid_args");
             return 1;
         }
+        if (with_state) {
+            uint32_t enabled = 1u;
+            if (!orbit_parse_u32(&p, &enabled)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_BUTTON, "button_invalid_enabled");
+                return 1;
+            }
+            cmd->enabled = enabled ? 1u : 0u;
+        }
         p = orbit_skip_spaces(p);
         orbit_copy_str(cmd->text, sizeof(cmd->text), p);
         return 1;
     }
 
-    if (orbit_token_is(cmd_tok, cmd_len, "SLIDER")) {
+    if (orbit_token_is(cmd_tok, cmd_len, "SLIDER") || orbit_token_is(cmd_tok, cmd_len, "SLIDERX")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_SLIDER);
         if (!cmd) return 1;
+        uint8_t with_state = orbit_token_is(cmd_tok, cmd_len, "SLIDERX") ? 1u : 0u;
         if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
             !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
             !orbit_parse_u32(&p, &cmd->min_v) || !orbit_parse_u32(&p, &cmd->max_v) ||
@@ -598,12 +620,21 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_SLIDER, "slider_invalid_args");
             return 1;
         }
+        if (with_state) {
+            uint32_t enabled = 1u;
+            if (!orbit_parse_u32(&p, &enabled)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_SLIDER, "slider_invalid_enabled");
+                return 1;
+            }
+            cmd->enabled = enabled ? 1u : 0u;
+        }
         return 1;
     }
 
-    if (orbit_token_is(cmd_tok, cmd_len, "TOGGLE")) {
+    if (orbit_token_is(cmd_tok, cmd_len, "TOGGLE") || orbit_token_is(cmd_tok, cmd_len, "TOGGLEX")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TOGGLE);
         if (!cmd) return 1;
+        uint8_t with_state = orbit_token_is(cmd_tok, cmd_len, "TOGGLEX") ? 1u : 0u;
         if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
             !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
             !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->value)) {
@@ -611,14 +642,23 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             return 1;
         }
         cmd->value = cmd->value ? 1u : 0u;
+        if (with_state) {
+            uint32_t enabled = 1u;
+            if (!orbit_parse_u32(&p, &enabled)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_TOGGLE, "toggle_invalid_enabled");
+                return 1;
+            }
+            cmd->enabled = enabled ? 1u : 0u;
+        }
         p = orbit_skip_spaces(p);
         orbit_copy_str(cmd->text, sizeof(cmd->text), p);
         return 1;
     }
 
-    if (orbit_token_is(cmd_tok, cmd_len, "SELECT")) {
+    if (orbit_token_is(cmd_tok, cmd_len, "SELECT") || orbit_token_is(cmd_tok, cmd_len, "SELECTX")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_SELECT);
         if (!cmd) return 1;
+        uint8_t with_state = orbit_token_is(cmd_tok, cmd_len, "SELECTX") ? 1u : 0u;
         if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
             !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
             !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->min_v) ||
@@ -631,6 +671,14 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             return 1;
         }
         if (cmd->value >= cmd->min_v) cmd->value = 0u;
+        if (with_state) {
+            uint32_t enabled = 1u;
+            if (!orbit_parse_u32(&p, &enabled)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_SELECT, "select_invalid_enabled");
+                return 1;
+            }
+            cmd->enabled = enabled ? 1u : 0u;
+        }
         p = orbit_skip_spaces(p);
         orbit_copy_str(cmd->text, sizeof(cmd->text), p);
         if (cmd->text[0] == '\0') {
@@ -639,14 +687,23 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         return 1;
     }
 
-    if (orbit_token_is(cmd_tok, cmd_len, "TEXT_INPUT")) {
+    if (orbit_token_is(cmd_tok, cmd_len, "TEXT_INPUT") || orbit_token_is(cmd_tok, cmd_len, "TEXT_INPUTX")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TEXT_INPUT);
         if (!cmd) return 1;
+        uint8_t with_state = orbit_token_is(cmd_tok, cmd_len, "TEXT_INPUTX") ? 1u : 0u;
         if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
             !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
             !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->max_v)) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_TEXT_INPUT, "text_input_invalid_args");
             return 1;
+        }
+        if (with_state) {
+            uint32_t enabled = 1u;
+            if (!orbit_parse_u32(&p, &enabled)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_TEXT_INPUT, "text_input_invalid_enabled");
+                return 1;
+            }
+            cmd->enabled = enabled ? 1u : 0u;
         }
         if (cmd->max_v < 1u) cmd->max_v = 1u;
         if (cmd->max_v >= ORBIT_UI_TEXT_CHARS) cmd->max_v = ORBIT_UI_TEXT_CHARS - 1u;
@@ -656,9 +713,10 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         return 1;
     }
 
-    if (orbit_token_is(cmd_tok, cmd_len, "SCROLL_V")) {
+    if (orbit_token_is(cmd_tok, cmd_len, "SCROLL_V") || orbit_token_is(cmd_tok, cmd_len, "SCROLL_VX")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_SCROLL_V);
         if (!cmd) return 1;
+        uint8_t with_state = orbit_token_is(cmd_tok, cmd_len, "SCROLL_VX") ? 1u : 0u;
         if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
             !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
             !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->max_v) ||
@@ -666,8 +724,43 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_SCROLL_V, "scroll_v_invalid_args");
             return 1;
         }
+        if (with_state) {
+            uint32_t enabled = 1u;
+            if (!orbit_parse_u32(&p, &enabled)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_SCROLL_V, "scroll_v_invalid_enabled");
+                return 1;
+            }
+            cmd->enabled = enabled ? 1u : 0u;
+        }
         if (cmd->max_v < cmd->h) cmd->value = 0u;
         else if (cmd->value > (cmd->max_v - cmd->h)) cmd->value = cmd->max_v - cmd->h;
+        return 1;
+    }
+
+    if (orbit_token_is(cmd_tok, cmd_len, "SEPARATOR")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_SEPARATOR);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->x) || !orbit_parse_u32(&p, &cmd->y) ||
+            !orbit_parse_u32(&p, &cmd->w)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_SEPARATOR, "separator_invalid_args");
+            return 1;
+        }
+        return 1;
+    }
+
+    if (orbit_token_is(cmd_tok, cmd_len, "LIST_ITEM")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_LIST_ITEM);
+        if (!cmd) return 1;
+        uint32_t enabled = 1u;
+        if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
+            !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
+            !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &enabled)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LIST_ITEM, "list_item_invalid_args");
+            return 1;
+        }
+        cmd->enabled = enabled ? 1u : 0u;
+        p = orbit_skip_spaces(p);
+        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
         return 1;
     }
 
@@ -873,6 +966,15 @@ static void orbit_close_fds(orbit_shell_t *shell) {
     }
 }
 
+static void orbit_request_child_exit(orbit_shell_t *shell) {
+    static const char quit_line[] = "@SLUI HOST QUIT\n";
+    if (!shell || shell->child_stdin_fd < 0) return;
+    // Legacy text apps may handle this.
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "exit\n", 5u);
+    // SLUI apps handle this explicit host shutdown message.
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, quit_line, sizeof(quit_line) - 1u);
+}
+
 static int orbit_spawn_process(orbit_shell_t *shell) {
     if (!shell) return 0;
     if (!shell->enabled || shell->exec_path[0] == '\0') return 0;
@@ -917,9 +1019,7 @@ static int orbit_spawn_process(orbit_shell_t *shell) {
 
 static void orbit_stop_process(orbit_shell_t *shell) {
     if (!shell) return;
-    if (shell->child_stdin_fd >= 0) {
-        (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "exit\n", 5u);
-    }
+    orbit_request_child_exit(shell);
     orbit_close_fds(shell);
     shell->child_pid = -1;
 }
@@ -929,9 +1029,7 @@ static void orbit_on_close(void *userdata) {
     if (!shell) return;
 
     int64_t pid = shell->child_pid;
-    if (shell->child_stdin_fd >= 0) {
-        (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "exit\n", 5u);
-    }
+    orbit_request_child_exit(shell);
     orbit_close_fds(shell);
 
     if (pid > 0) {
@@ -1155,6 +1253,29 @@ static void orbit_select_option_text(const char *options_pipe, uint32_t selected
     orbit_copy_str(out, out_cap, options_pipe);
 }
 
+static void orbit_split_list_item_text(const char *in, char *title, size_t title_cap,
+                                       char *subtitle, size_t subtitle_cap) {
+    if (title && title_cap > 0u) title[0] = '\0';
+    if (subtitle && subtitle_cap > 0u) subtitle[0] = '\0';
+    if (!in) return;
+
+    const char *sep = in;
+    while (*sep && *sep != '|') sep++;
+
+    if (title && title_cap > 0u) {
+        size_t n = 0u;
+        while (in[n] && (in + n) < sep && n + 1u < title_cap) {
+            title[n] = in[n];
+            n++;
+        }
+        title[n] = '\0';
+    }
+
+    if (*sep == '|' && subtitle && subtitle_cap > 0u) {
+        orbit_copy_str(subtitle, subtitle_cap, sep + 1);
+    }
+}
+
 static uint8_t orbit_clip_intersect(uint32_t ax, uint32_t ay, uint32_t aw, uint32_t ah,
                                     uint32_t bx, uint32_t by, uint32_t bw, uint32_t bh,
                                     uint32_t *ox, uint32_t *oy, uint32_t *ow, uint32_t *oh) {
@@ -1251,20 +1372,20 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             } else if (cmd->type == ORBIT_UI_CMD_LABEL) {
                 sl_ui_label(&shell->ui.ui, x, y, cmd->text, cmd->r, cmd->g, cmd->b);
             } else if (cmd->type == ORBIT_UI_CMD_BUTTON) {
-                if (sl_ui_button(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text)) {
+                if (sl_ui_button_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, cmd->enabled)) {
                     orbit_send_ui_event_button(shell, cmd->id);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_SLIDER) {
                 uint32_t prev = cmd->value;
-                if (sl_ui_slider_u32(&shell->ui.ui, cmd->id, x, y, cmd->w,
-                                     cmd->min_v, cmd->max_v, &cmd->value)) {
+                if (sl_ui_slider_u32_state(&shell->ui.ui, cmd->id, x, y, cmd->w,
+                                           cmd->min_v, cmd->max_v, &cmd->value, cmd->enabled)) {
                     if (cmd->value != prev) {
                         orbit_send_ui_event_slider(shell, cmd->id, cmd->value);
                     }
                 }
             } else if (cmd->type == ORBIT_UI_CMD_TOGGLE) {
                 uint8_t v = cmd->value ? 1u : 0u;
-                if (sl_ui_toggle(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, &v, cmd->text)) {
+                if (sl_ui_toggle_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, &v, cmd->text, cmd->enabled)) {
                     cmd->value = v;
                     orbit_send_ui_event_toggle(shell, cmd->id, cmd->value);
                 } else {
@@ -1273,8 +1394,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             } else if (cmd->type == ORBIT_UI_CMD_SELECT) {
                 char current[ORBIT_UI_TEXT_CHARS];
                 orbit_select_option_text(cmd->text, cmd->value, current, sizeof(current));
-                if (sl_ui_select_cycle(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
-                                       cmd->min_v, &cmd->value, current)) {
+                if (sl_ui_select_cycle_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
+                                             cmd->min_v, &cmd->value, current, cmd->enabled)) {
                     orbit_send_ui_event_select(shell, cmd->id, cmd->value);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_TEXT_INPUT) {
@@ -1282,9 +1403,10 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 if (max_chars < 1u) max_chars = 1u;
                 if (max_chars >= ORBIT_UI_TEXT_CHARS) max_chars = ORBIT_UI_TEXT_CHARS - 1u;
                 cmd->text[max_chars] = '\0';
-                if (sl_ui_text_input(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
-                                     cmd->text, max_chars + 1u,
-                                     shell->ui.key_events, shell->ui.key_event_count)) {
+                if (sl_ui_text_input_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
+                                           cmd->text, max_chars + 1u,
+                                           shell->ui.key_events, shell->ui.key_event_count,
+                                           cmd->enabled)) {
                     orbit_send_ui_event_text_input(shell, cmd->id, cmd->text);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_SCROLL_V) {
@@ -1295,7 +1417,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 uint32_t hit_h = cmd->h;
 
                 // If SCROLL_V is followed by CLIP_PUSH generated by slui_scroll_view_begin,
-                // treat the whole view (content + bar) as wheel hit area.
+                // use the content clip as wheel hit area (drag stays on scrollbar only).
                 if ((i + 1u) < shell->ui.cmd_count) {
                     orbit_ui_cmd_t *next = &shell->ui.cmds[i + 1u];
                     if (next->type == ORBIT_UI_CMD_CLIP_PUSH &&
@@ -1306,29 +1428,29 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                         uint32_t cw = next->w;
                         uint32_t ch = next->h;
                         if (cw > 0u && ch > 0u) {
-                            uint32_t x0 = (cx < x) ? cx : x;
-                            uint32_t y0 = (cy < y) ? cy : y;
-                            uint32_t x1a = x + cmd->w;
-                            uint32_t x1b = cx + cw;
-                            uint32_t y1a = y + cmd->h;
-                            uint32_t y1b = cy + ch;
-                            uint32_t x1 = (x1a > x1b) ? x1a : x1b;
-                            uint32_t y1 = (y1a > y1b) ? y1a : y1b;
-                            if (x1 > x0 && y1 > y0) {
-                                hit_x = x0;
-                                hit_y = y0;
-                                hit_w = x1 - x0;
-                                hit_h = y1 - y0;
-                            }
+                            hit_x = cx;
+                            hit_y = cy;
+                            hit_w = cw;
+                            hit_h = ch;
                         }
                     }
                 }
 
-                if (sl_ui_scroll_v(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->max_v, &cmd->value,
-                                   hit_x, hit_y, hit_w, hit_h)) {
+                if (sl_ui_scroll_v_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->max_v, &cmd->value,
+                                         hit_x, hit_y, hit_w, hit_h, cmd->enabled)) {
                     if (cmd->value != prev) {
                         orbit_send_ui_event_scroll_v(shell, cmd->id, cmd->value);
                     }
+                }
+            } else if (cmd->type == ORBIT_UI_CMD_SEPARATOR) {
+                sl_ui_separator(&shell->ui.ui, x, y, cmd->w);
+            } else if (cmd->type == ORBIT_UI_CMD_LIST_ITEM) {
+                char title[ORBIT_UI_TEXT_CHARS];
+                char subtitle[ORBIT_UI_TEXT_CHARS];
+                orbit_split_list_item_text(cmd->text, title, sizeof(title), subtitle, sizeof(subtitle));
+                if (sl_ui_list_item(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
+                                    title, subtitle, cmd->enabled)) {
+                    orbit_send_ui_event_button(shell, cmd->id);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_IMAGE_FILE) {
                 if (!cmd->image_loaded && !cmd->image_failed) {

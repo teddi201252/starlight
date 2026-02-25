@@ -57,32 +57,60 @@ void sl_ui_label(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text,
 uint8_t sl_ui_button(sl_ui_ctx_t *ui, uint32_t id,
                      uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                      const char *text);
+uint8_t sl_ui_button_state(sl_ui_ctx_t *ui, uint32_t id,
+                           uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                           const char *text, uint8_t enabled);
 
 uint8_t sl_ui_slider_u32(sl_ui_ctx_t *ui, uint32_t id,
                          uint32_t x, uint32_t y, uint32_t w,
                          uint32_t min_v, uint32_t max_v, uint32_t *value);
+uint8_t sl_ui_slider_u32_state(sl_ui_ctx_t *ui, uint32_t id,
+                               uint32_t x, uint32_t y, uint32_t w,
+                               uint32_t min_v, uint32_t max_v, uint32_t *value,
+                               uint8_t enabled);
 
 uint8_t sl_ui_toggle(sl_ui_ctx_t *ui, uint32_t id,
                      uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                      uint8_t *value, const char *text);
+uint8_t sl_ui_toggle_state(sl_ui_ctx_t *ui, uint32_t id,
+                           uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                           uint8_t *value, const char *text, uint8_t enabled);
 
 uint8_t sl_ui_select_cycle(sl_ui_ctx_t *ui, uint32_t id,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                            uint32_t option_count, uint32_t *selected,
                            const char *current_text);
+uint8_t sl_ui_select_cycle_state(sl_ui_ctx_t *ui, uint32_t id,
+                                 uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                 uint32_t option_count, uint32_t *selected,
+                                 const char *current_text, uint8_t enabled);
 
 uint8_t sl_ui_text_input(sl_ui_ctx_t *ui, uint32_t id,
                          uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                          char *text, uint32_t text_cap,
                          const peos_input_event_t *events, uint8_t event_count);
+uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
+                               uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                               char *text, uint32_t text_cap,
+                               const peos_input_event_t *events, uint8_t event_count,
+                               uint8_t enabled);
 
 uint8_t sl_ui_scroll_v(sl_ui_ctx_t *ui, uint32_t id,
                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                        uint32_t content_h, uint32_t *offset,
                        uint32_t hit_x, uint32_t hit_y, uint32_t hit_w, uint32_t hit_h);
+uint8_t sl_ui_scroll_v_state(sl_ui_ctx_t *ui, uint32_t id,
+                             uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                             uint32_t content_h, uint32_t *offset,
+                             uint32_t hit_x, uint32_t hit_y, uint32_t hit_w, uint32_t hit_h,
+                             uint8_t enabled);
 
 void sl_ui_image_rgba(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                       const uint8_t *rgba, uint32_t src_w, uint32_t src_h, uint32_t src_stride);
+void sl_ui_separator(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w);
+uint8_t sl_ui_list_item(sl_ui_ctx_t *ui, uint32_t id,
+                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                        const char *title, const char *subtitle, uint8_t enabled);
 
 void sl_ui_stack_begin(sl_ui_stack_t *stack,
                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,

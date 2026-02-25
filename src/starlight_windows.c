@@ -826,6 +826,9 @@ void sl_windows_render_all(sl_ctx_t *ctx) {
 void sl_windows_destroy_all(void) {
     if (g_windows) {
         for (size_t i = 0; i < g_window_count; i++) {
+            if (g_windows[i].task && g_windows[i].task->on_close) {
+                g_windows[i].task->on_close(g_windows[i].task->userdata);
+            }
             sl_window_shutdown(&g_windows[i]);
         }
         free(g_windows);
