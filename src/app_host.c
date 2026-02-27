@@ -8,6 +8,7 @@
 
 #define ORBIT_MAX_LINES 256u
 #define ORBIT_LINE_CHARS 160u
+#define ORBIT_PENDING_LINE_CHARS 4096u
 #define ORBIT_TITLE_CHARS 64u
 #define ORBIT_EXEC_CHARS 160u
 #define ORBIT_ARGS_CHARS 160u
@@ -16,7 +17,7 @@
 #define ORBIT_MAX_POLL_READS 8u
 #define ORBIT_POLL_INTERVAL_NS 10000000ull
 #define ORBIT_UI_MAX_CMDS 64u
-#define ORBIT_UI_TEXT_CHARS 192u
+#define ORBIT_UI_TEXT_CHARS 4096u
 #define ORBIT_SLUI_PROTO_VERSION 1u
 
 #define ORBIT_SLUI_CAP_LABEL        (1u << 0)
@@ -130,7 +131,7 @@ typedef struct {
     char lines[ORBIT_MAX_LINES][ORBIT_LINE_CHARS];
     size_t line_head;
     size_t line_count;
-    char pending_line[ORBIT_LINE_CHARS];
+    char pending_line[ORBIT_PENDING_LINE_CHARS];
     size_t pending_len;
     uint8_t shift_down;
     uint8_t initialized;
