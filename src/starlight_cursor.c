@@ -7,6 +7,35 @@
 
 #define SL_HW_CURSOR_MAX_SIDE 64u
 
+static uint8_t sl_cursor_scale_fits_hw(uint32_t src_w, uint32_t src_h, uint32_t scale_pct) {
+    if (src_w == 0u || src_h == 0u || scale_pct == 0u) return 0u;
+    uint64_t dst_w64 = (((uint64_t)src_w * (uint64_t)scale_pct) + 50u) / 100u;
+    uint64_t dst_h64 = (((uint64_t)src_h * (uint64_t)scale_pct) + 50u) / 100u;
+    if (dst_w64 == 0u || dst_h64 == 0u) return 0u;
+    if (dst_w64 > SL_HW_CURSOR_MAX_SIDE || dst_h64 > SL_HW_CURSOR_MAX_SIDE) return 0u;
+    return 1u;
+}
+
+static uint32_t sl_cursor_effective_scale_pct(uint32_t src_w, uint32_t src_h, uint32_t requested_pct) {
+    if (src_w == 0u || src_h == 0u) return 0u;
+    if (requested_pct == 0u) requested_pct = 1u;
+
+    if (sl_cursor_scale_fits_hw(src_w, src_h, requested_pct)) return requested_pct;
+
+    uint64_t by_w = ((uint64_t)SL_HW_CURSOR_MAX_SIDE * 100u) / (uint64_t)src_w;
+    uint64_t by_h = ((uint64_t)SL_HW_CURSOR_MAX_SIDE * 100u) / (uint64_t)src_h;
+    uint64_t fit64 = by_w < by_h ? by_w : by_h;
+    if (fit64 == 0u) fit64 = 1u;
+    if (fit64 > requested_pct) fit64 = requested_pct;
+
+    uint32_t fit = (uint32_t)fit64;
+    while (fit > 1u && !sl_cursor_scale_fits_hw(src_w, src_h, fit)) {
+        fit--;
+    }
+    if (!sl_cursor_scale_fits_hw(src_w, src_h, fit)) return 0u;
+    return fit;
+}
+
 static void sl_build_default_cursor_rgba(uint8_t *dst, uint32_t w, uint32_t h) {
     if (!dst || w == 0 || h == 0) return;
     peos_memset(dst, 0, (size_t)w * (size_t)h * 4u);
@@ -104,9 +133,16 @@ static int sl_hw_cursor_set_default(sl_ctx_t *ctx) {
     if (!scaled_rgba) return 0;
 
     sl_build_default_cursor_rgba(base_rgba, SL_DEFAULT_CURSOR_W, SL_DEFAULT_CURSOR_H);
+    uint32_t effective_scale = sl_cursor_effective_scale_pct(SL_DEFAULT_CURSOR_W,
+                                                             SL_DEFAULT_CURSOR_H,
+                                                             ctx->hw_cursor_scale_pct);
+    if (effective_scale == 0u) {
+        free(scaled_rgba);
+        return 0;
+    }
     if (!sl_cursor_scale_rgba_nn(base_rgba,
                                  SL_DEFAULT_CURSOR_W, SL_DEFAULT_CURSOR_H, SL_DEFAULT_CURSOR_W * 4u,
-                                 ctx->hw_cursor_scale_pct,
+                                 effective_scale,
                                  scaled_rgba,
                                  &out_w, &out_h)) {
         free(scaled_rgba);
@@ -135,9 +171,16 @@ static int sl_hw_cursor_load_resource(sl_ctx_t *ctx, const char *path) {
         img.channels == 4u &&
         img.width > 0u && img.height > 0u &&
         img.stride >= (img.width * 4u)) {
+        uint32_t effective_scale = sl_cursor_effective_scale_pct(img.width, img.height,
+                                                                 ctx->hw_cursor_scale_pct);
+        if (effective_scale == 0u) {
+            free(scaled_rgba);
+            sl_image_free(&img);
+            return 0;
+        }
         if (sl_cursor_scale_rgba_nn(img.data,
                                     img.width, img.height, img.stride,
-                                    ctx->hw_cursor_scale_pct,
+                                    effective_scale,
                                     scaled_rgba,
                                     &out_w, &out_h)) {
             ok = sl_hw_cursor_apply(ctx, scaled_rgba, out_w, out_h, 0u, 0u);

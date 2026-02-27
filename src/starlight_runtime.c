@@ -359,7 +359,9 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     sl_copy_text(ctx->cursor_path, sizeof(ctx->cursor_path), val);
                 } else if (strcmp(key, "cursor_scale") == 0) {
                     uint32_t n = 0;
-                    if (sl_parse_u32(val, &n) && n >= 25u && n <= 400u) {
+                    // Backward-compatible: accept legacy tiny scales (eg. "2")
+                    // in addition to the newer UI range.
+                    if (sl_parse_u32(val, &n) && n >= 1u && n <= 400u) {
                         ctx->hw_cursor_scale_pct = n;
                     }
                 }
