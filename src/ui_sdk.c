@@ -365,6 +365,18 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             ui->shift_down = events[i].pressed ? 1u : 0u;
             continue;
         }
+        if (code == PEOS_KEY_LCTRL) {
+            ui->ctrl_down = events[i].pressed ? 1u : 0u;
+            continue;
+        }
+        if (code == 0x0038u) {
+            ui->alt_down = events[i].pressed ? 1u : 0u;
+            continue;
+        }
+        if (code == 0x005Bu || code == 0x005Cu) {
+            ui->super_down = events[i].pressed ? 1u : 0u;
+            continue;
+        }
         if (!enabled || !focused || !events[i].pressed) continue;
         if (code == 0x000Eu) {
             if (len > 0u) {
@@ -382,6 +394,9 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         if (code == PEOS_KEY_ENTER) {
             ui->focused_id = 0u;
             focused = 0;
+            continue;
+        }
+        if (ui->ctrl_down || ui->alt_down || ui->super_down) {
             continue;
         }
 
@@ -522,6 +537,18 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             ui->shift_down = events[i].pressed ? 1u : 0u;
             continue;
         }
+        if (code == PEOS_KEY_LCTRL) {
+            ui->ctrl_down = events[i].pressed ? 1u : 0u;
+            continue;
+        }
+        if (code == 0x0038u) {
+            ui->alt_down = events[i].pressed ? 1u : 0u;
+            continue;
+        }
+        if (code == 0x005Bu || code == 0x005Cu) {
+            ui->super_down = events[i].pressed ? 1u : 0u;
+            continue;
+        }
         if (!enabled || !focused || !events[i].pressed) continue;
 
         if (code == 0x000Eu) { // backspace
@@ -574,6 +601,9 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             uint32_t old_len = len;
             sl_ui_text_insert_char(text, &len, text_cap, &ui->text_caret_pos, '\t');
             if (len != old_len) changed = 1u;
+            continue;
+        }
+        if (ui->ctrl_down || ui->alt_down || ui->super_down) {
             continue;
         }
 

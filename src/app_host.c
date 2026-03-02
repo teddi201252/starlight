@@ -42,6 +42,7 @@
 #define ORBIT_SLUI_CAP_RECT_ALPHA       (1u << 19)
 #define ORBIT_SLUI_CAP_TEXT_AREA        (1u << 20)
 #define ORBIT_SLUI_CAP_EVENT_TEXT_AREA  (1u << 21)
+#define ORBIT_SLUI_CAP_EVENT_KEYBOARD   (1u << 22)
 
 #define ORBIT_SLUI_ERR_MALFORMED   100u
 #define ORBIT_SLUI_ERR_HELLO       101u
@@ -122,6 +123,7 @@ typedef struct {
     uint8_t host_hello_sent;
     uint8_t client_proto_ver;
     uint32_t client_caps_mask;
+    uint8_t key_down[256];
 } orbit_ui_state_t;
 
 typedef struct {
@@ -138,6 +140,9 @@ typedef struct {
     char pending_line[ORBIT_PENDING_LINE_CHARS];
     size_t pending_len;
     uint8_t shift_down;
+    uint8_t ctrl_down;
+    uint8_t alt_down;
+    uint8_t super_down;
     uint8_t initialized;
     int64_t child_pid;
     int64_t child_stdin_fd;
@@ -237,6 +242,7 @@ static uint32_t orbit_parse_cap_token(const char *tok, size_t tok_len) {
     if (orbit_token_is(tok, tok_len, "RECT_ALPHA")) return ORBIT_SLUI_CAP_RECT_ALPHA;
     if (orbit_token_is(tok, tok_len, "TEXT_AREA")) return ORBIT_SLUI_CAP_TEXT_AREA;
     if (orbit_token_is(tok, tok_len, "EVENT_TEXT_AREA")) return ORBIT_SLUI_CAP_EVENT_TEXT_AREA;
+    if (orbit_token_is(tok, tok_len, "EVENT_KEYBOARD")) return ORBIT_SLUI_CAP_EVENT_KEYBOARD;
     return 0u;
 }
 
@@ -278,7 +284,7 @@ static void orbit_send_ui_error(orbit_shell_t *shell, uint32_t code, const char 
 static void orbit_send_host_hello(orbit_shell_t *shell) {
     if (!shell || shell->child_stdin_fd < 0) return;
     const char *msg =
-        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V\n";
+        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD\n";
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, peos_strlen(msg));
     shell->ui.host_hello_sent = 1u;
 }
@@ -543,6 +549,50 @@ static void orbit_send_ui_event_text_area(orbit_shell_t *shell, uint32_t id, con
         else if (c == '\t') { msg[n++] = '\\'; msg[n++] = 't'; }
         else msg[n++] = c;
     }
+    if (n + 1u < sizeof(msg)) msg[n++] = '\n';
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
+}
+
+static uint32_t orbit_mod_mask(const orbit_shell_t *shell) {
+    uint32_t mods = 0u;
+    if (!shell) return 0u;
+    if (shell->shift_down) mods |= 1u;       // SLUI_MOD_SHIFT
+    if (shell->ctrl_down) mods |= (1u << 1); // SLUI_MOD_CTRL
+    if (shell->alt_down) mods |= (1u << 2);  // SLUI_MOD_ALT
+    if (shell->super_down) mods |= (1u << 3);// SLUI_MOD_SUPER
+    return mods;
+}
+
+static void orbit_send_ui_event_key(orbit_shell_t *shell, const char *kind, uint16_t code, uint32_t mods) {
+    if (!shell || shell->child_stdin_fd < 0 || !kind || !kind[0]) return;
+    char msg[96];
+    size_t n = 0u;
+    const char *prefix = "@SLUI EVENT ";
+    while (prefix[n] && n + 1u < sizeof(msg)) msg[n] = prefix[n], n++;
+    for (size_t i = 0u; kind[i] && n + 1u < sizeof(msg); i++) msg[n++] = kind[i];
+    if (n + 1u < sizeof(msg)) msg[n++] = ' ';
+
+    char num[16];
+    size_t m = 0u;
+    uint32_t v = (uint32_t)code;
+    if (v == 0u) num[m++] = '0';
+    else {
+        char rev[16]; size_t r = 0u;
+        while (v > 0u && r < sizeof(rev)) { rev[r++] = (char)('0' + (v % 10u)); v /= 10u; }
+        while (r > 0u && m < sizeof(num)) num[m++] = rev[--r];
+    }
+    for (size_t i = 0u; i < m && n + 1u < sizeof(msg); i++) msg[n++] = num[i];
+    if (n + 1u < sizeof(msg)) msg[n++] = ' ';
+
+    m = 0u;
+    v = mods;
+    if (v == 0u) num[m++] = '0';
+    else {
+        char rev[16]; size_t r = 0u;
+        while (v > 0u && r < sizeof(rev)) { rev[r++] = (char)('0' + (v % 10u)); v /= 10u; }
+        while (r > 0u && m < sizeof(num)) num[m++] = rev[--r];
+    }
+    for (size_t i = 0u; i < m && n + 1u < sizeof(msg); i++) msg[n++] = num[i];
     if (n + 1u < sizeof(msg)) msg[n++] = '\n';
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
 }
@@ -1324,19 +1374,39 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
     if (!event) return;
 
     uint16_t code = orbit_norm_keycode(event->code);
+    uint8_t key_ix = (uint8_t)(code & 0xFFu);
 
     if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) {
         shell->shift_down = event->pressed ? 1u : 0u;
-        if (shell->ui.enabled && shell->ui.committed && shell->ui.key_event_count < 16u) {
+    } else if (code == PEOS_KEY_LCTRL || code == 0xE01Du) {
+        shell->ctrl_down = event->pressed ? 1u : 0u;
+    } else if (code == 0x0038u || code == 0xE038u) {
+        shell->alt_down = event->pressed ? 1u : 0u;
+    } else if (code == 0xE05Bu || code == 0xE05Cu) {
+        shell->super_down = event->pressed ? 1u : 0u;
+    }
+
+    if (shell->ui.enabled && shell->ui.committed) {
+        uint8_t was_down = shell->ui.key_down[key_ix];
+        uint32_t mods = orbit_mod_mask(shell);
+        if (event->pressed) {
+            if (was_down) orbit_send_ui_event_key(shell, "KEY_REPEAT", code, mods);
+            else orbit_send_ui_event_key(shell, "KEY_DOWN", code, mods);
+            shell->ui.key_down[key_ix] = 1u;
+        } else {
+            orbit_send_ui_event_key(shell, "KEY_UP", code, mods);
+            shell->ui.key_down[key_ix] = 0u;
+        }
+        if (shell->ui.key_event_count < 16u) {
             shell->ui.key_events[shell->ui.key_event_count++] = *event;
         }
         return;
     }
 
-    if (shell->ui.enabled && shell->ui.committed) {
-        if (shell->ui.key_event_count < 16u) {
-            shell->ui.key_events[shell->ui.key_event_count++] = *event;
-        }
+    if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT ||
+        code == PEOS_KEY_LCTRL || code == 0xE01Du ||
+        code == 0x0038u || code == 0xE038u ||
+        code == 0xE05Bu || code == 0xE05Cu) {
         return;
     }
 

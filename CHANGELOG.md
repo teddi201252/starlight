@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.3.2] - 2026-03-02
+- Add keyboard event pipeline and text-input modifier handling
+
 ## [0.3.1] - 2026-02-25
 - UI renderer: clip confinement and alpha rect rendering support
 
