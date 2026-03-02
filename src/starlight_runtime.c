@@ -486,6 +486,23 @@ void sl_shutdown(sl_ctx_t *ctx) {
     if (ctx->frame) (void)peos_munmap((uint64_t)(uintptr_t)ctx->frame, ctx->map_bytes);
 }
 
+void sl_reload_display(sl_ctx_t *ctx) {
+    if (!ctx) return;
+
+    sl_load_starlight_config(ctx);
+
+    if (ctx->bg_loaded) {
+        sl_image_free(&ctx->bg_image);
+        ctx->bg_loaded = 0;
+    }
+    sl_load_background(ctx, ctx->background_path);
+
+    sl_cursor_init(ctx);
+    if (ctx->hw_cursor) sl_hw_cursor_sync_pos(ctx);
+
+    sl_dirty_mark_full();
+}
+
 int sl_handle_input(sl_ctx_t *ctx) {
     sl_input_frame_t input;
     if (sl_input_poll(ctx, &input) < 0) return 1;

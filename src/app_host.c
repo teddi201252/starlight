@@ -155,6 +155,7 @@ static app_instance_t g_orbit_app[ORBIT_APP_SLOTS];
 static orbit_slot_cfg_t g_orbit_cfg[ORBIT_APP_SLOTS];
 static uint8_t g_orbit_apps_bound = 0u;
 static uint8_t g_orbit_cfg_init = 0u;
+static uint8_t g_reload_display_requested = 0u;
 
 static void orbit_copy_str(char *dst, size_t cap, const char *src) {
     if (!dst || cap == 0u) return;
@@ -576,6 +577,21 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
                         shell->ui.cmd_count * sizeof(shell->ui.cmds[0]));
         }
         shell->ui.committed = 1u;
+        return 1;
+    }
+
+    if (orbit_token_is(cmd_tok, cmd_len, "HOST")) {
+        const char *host_tok = NULL;
+        size_t host_len = 0u;
+        if (!orbit_next_token(&p, &host_tok, &host_len)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "host_missing_command");
+            return 1;
+        }
+        if (orbit_token_is(host_tok, host_len, "RELOAD_DISPLAY")) {
+            g_reload_display_requested = 1u;
+            return 1;
+        }
+        orbit_send_ui_error(shell, ORBIT_SLUI_ERR_UNKNOWN_CMD, "unknown_host_command");
         return 1;
     }
 
@@ -1597,6 +1613,10 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
 void sl_app_host_tick(sl_ctx_t *ctx) {
     if (!ctx) return;
+    if (g_reload_display_requested) {
+        g_reload_display_requested = 0u;
+        sl_reload_display(ctx);
+    }
     uint64_t now = peos_time_ns();
     for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
         orbit_shell_t *shell = &g_orbit[i];
