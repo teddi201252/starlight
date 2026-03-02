@@ -427,6 +427,256 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     return changed;
 }
 
+uint8_t sl_ui_text_area(sl_ui_ctx_t *ui, uint32_t id,
+                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                        char *text, uint32_t text_cap,
+                        const peos_input_event_t *events, uint8_t event_count) {
+    return sl_ui_text_area_state(ui, id, x, y, w, h, text, text_cap, events, event_count, 1u);
+}
+
+static uint32_t sl_ui_text_line_start(const char *text, uint32_t pos) {
+    while (pos > 0u && text[pos - 1u] != '\n') pos--;
+    return pos;
+}
+
+static uint32_t sl_ui_text_line_end(const char *text, uint32_t start) {
+    uint32_t i = start;
+    while (text[i] && text[i] != '\n') i++;
+    return i;
+}
+
+static uint32_t sl_ui_text_total_lines(const char *text) {
+    uint32_t lines = 1u;
+    for (uint32_t i = 0u; text[i]; i++) {
+        if (text[i] == '\n') lines++;
+    }
+    return lines;
+}
+
+static uint32_t sl_ui_text_line_col_at(const char *text, uint32_t pos, uint32_t *col_out) {
+    uint32_t line = 0u;
+    uint32_t col = 0u;
+    for (uint32_t i = 0u; i < pos && text[i]; i++) {
+        if (text[i] == '\n') {
+            line++;
+            col = 0u;
+        } else {
+            col++;
+        }
+    }
+    if (col_out) *col_out = col;
+    return line;
+}
+
+static void sl_ui_text_insert_char(char *text, uint32_t *len, uint32_t cap, uint32_t *caret, char c) {
+    if (!text || !len || !caret || *len + 1u >= cap) return;
+    for (uint32_t i = *len + 1u; i > *caret; i--) {
+        text[i] = text[i - 1u];
+    }
+    text[*caret] = c;
+    (*len)++;
+    (*caret)++;
+}
+
+static void sl_ui_text_backspace(char *text, uint32_t *len, uint32_t *caret) {
+    if (!text || !len || !caret || *caret == 0u || *len == 0u) return;
+    for (uint32_t i = *caret - 1u; i < *len; i++) {
+        text[i] = text[i + 1u];
+    }
+    (*caret)--;
+    (*len)--;
+}
+
+uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
+                              uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                              char *text, uint32_t text_cap,
+                              const peos_input_event_t *events, uint8_t event_count,
+                              uint8_t enabled) {
+    if (!ui || !ui->ctx || !text || text_cap < 2u || w < 24u || h < 24u) return 0u;
+
+    int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
+    if (enabled && ui->mouse_pressed) {
+        if (hovered) ui->focused_id = id;
+        else if (ui->focused_id == id) ui->focused_id = 0u;
+    }
+    if (!enabled && ui->focused_id == id) ui->focused_id = 0u;
+    int focused = (ui->focused_id == id);
+
+    uint32_t len = sl_ui_strlen(text);
+    if (len >= text_cap) {
+        len = text_cap - 1u;
+        text[len] = '\0';
+    }
+
+    if (ui->text_caret_id != id) {
+        ui->text_caret_id = id;
+        ui->text_caret_pos = len;
+        ui->text_area_scroll_line = 0u;
+    }
+    if (ui->text_caret_pos > len) ui->text_caret_pos = len;
+
+    uint8_t changed = 0u;
+    for (uint8_t i = 0u; i < event_count; i++) {
+        uint16_t code = sl_ui_norm_keycode(events[i].code);
+        if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) {
+            ui->shift_down = events[i].pressed ? 1u : 0u;
+            continue;
+        }
+        if (!enabled || !focused || !events[i].pressed) continue;
+
+        if (code == 0x000Eu) { // backspace
+            uint32_t old_len = len;
+            sl_ui_text_backspace(text, &len, &ui->text_caret_pos);
+            if (len != old_len) changed = 1u;
+            continue;
+        }
+        if (code == PEOS_KEY_ESC) {
+            ui->focused_id = 0u;
+            focused = 0;
+            continue;
+        }
+        if (code == PEOS_KEY_ENTER) {
+            uint32_t old_len = len;
+            sl_ui_text_insert_char(text, &len, text_cap, &ui->text_caret_pos, '\n');
+            if (len != old_len) changed = 1u;
+            continue;
+        }
+        if (code == 0x004Bu) { // left
+            if (ui->text_caret_pos > 0u) ui->text_caret_pos--;
+            continue;
+        }
+        if (code == 0x004Du) { // right
+            if (ui->text_caret_pos < len) ui->text_caret_pos++;
+            continue;
+        }
+        if (code == 0x0048u || code == 0x0050u) { // up/down
+            uint32_t line_start = sl_ui_text_line_start(text, ui->text_caret_pos);
+            uint32_t col = ui->text_caret_pos - line_start;
+            if (code == 0x0048u) {
+                if (line_start > 0u) {
+                    uint32_t prev_end = line_start - 1u;
+                    uint32_t prev_start = sl_ui_text_line_start(text, prev_end);
+                    uint32_t prev_len = prev_end - prev_start;
+                    ui->text_caret_pos = prev_start + ((col < prev_len) ? col : prev_len);
+                }
+            } else {
+                uint32_t line_end = sl_ui_text_line_end(text, line_start);
+                if (text[line_end] == '\n') {
+                    uint32_t next_start = line_end + 1u;
+                    uint32_t next_end = sl_ui_text_line_end(text, next_start);
+                    uint32_t next_len = next_end - next_start;
+                    ui->text_caret_pos = next_start + ((col < next_len) ? col : next_len);
+                }
+            }
+            continue;
+        }
+        if (code == 0x000Fu) { // tab
+            uint32_t old_len = len;
+            sl_ui_text_insert_char(text, &len, text_cap, &ui->text_caret_pos, '\t');
+            if (len != old_len) changed = 1u;
+            continue;
+        }
+
+        char c = sl_ui_key_to_char(code, ui->shift_down);
+        if (c) {
+            uint32_t old_len = len;
+            sl_ui_text_insert_char(text, &len, text_cap, &ui->text_caret_pos, c);
+            if (len != old_len) changed = 1u;
+        }
+    }
+
+    uint8_t bg = focused ? 38u : 24u;
+    if (!enabled) bg = 22u;
+    sl_fill_rect(ui->ctx, x, y, w, h, bg, bg, bg);
+    if (focused && enabled) {
+        sl_fill_rect(ui->ctx, x, y, w, 1u, 120u, 200u, 255u);
+        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 120u, 200u, 255u);
+        sl_fill_rect(ui->ctx, x, y, 1u, h, 120u, 200u, 255u);
+        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 120u, 200u, 255u);
+    } else {
+        sl_fill_rect(ui->ctx, x, y, w, 1u, 120u, 120u, 120u);
+        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 30u, 30u, 30u);
+        sl_fill_rect(ui->ctx, x, y, 1u, h, 120u, 120u, 120u);
+        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 30u, 30u, 30u);
+    }
+
+    uint32_t content_x = x + 6u;
+    uint32_t content_y = y + 6u;
+    uint32_t content_w = (w > 12u) ? (w - 12u) : 0u;
+    uint32_t content_h = (h > 12u) ? (h - 12u) : 0u;
+    uint32_t vis_cols = content_w / 8u;
+    uint32_t vis_lines = content_h / 8u;
+    if (vis_cols == 0u || vis_lines == 0u) return changed;
+
+    uint32_t total_lines = sl_ui_text_total_lines(text);
+    uint32_t max_scroll = (total_lines > vis_lines) ? (total_lines - vis_lines) : 0u;
+    if (ui->text_area_scroll_line > max_scroll) ui->text_area_scroll_line = max_scroll;
+
+    if (enabled && hovered && !ui->wheel_consumed && max_scroll > 0u) {
+        int32_t wheel = (ui->wheel_y != 0) ? ui->wheel_y : ui->wheel_x;
+        if (wheel != 0) {
+            int64_t nv = (int64_t)ui->text_area_scroll_line - (int64_t)wheel;
+            if (nv < 0) nv = 0;
+            if (nv > (int64_t)max_scroll) nv = (int64_t)max_scroll;
+            ui->text_area_scroll_line = (uint32_t)nv;
+            ui->wheel_consumed = 1u;
+        }
+    }
+
+    uint32_t caret_col = 0u;
+    uint32_t caret_line = sl_ui_text_line_col_at(text, ui->text_caret_pos, &caret_col);
+    if (caret_line < ui->text_area_scroll_line) ui->text_area_scroll_line = caret_line;
+    if (caret_line >= ui->text_area_scroll_line + vis_lines) {
+        ui->text_area_scroll_line = caret_line - vis_lines + 1u;
+    }
+
+    uint32_t line_idx = 0u;
+    uint32_t start = 0u;
+    while (line_idx < ui->text_area_scroll_line && text[start]) {
+        if (text[start] == '\n') line_idx++;
+        start++;
+    }
+
+    for (uint32_t row = 0u; row < vis_lines; row++) {
+        uint32_t ly = content_y + (row * 8u);
+        if (!text[start] && !(line_idx == caret_line && caret_col == 0u)) {
+            line_idx++;
+            continue;
+        }
+
+        uint32_t end = sl_ui_text_line_end(text, start);
+        char draw_buf[256];
+        uint32_t dn = 0u;
+        uint32_t i = start;
+        while (i < end && dn + 1u < (uint32_t)sizeof(draw_buf) && dn < vis_cols) {
+            char c = text[i++];
+            if (c == '\t') c = ' ';
+            draw_buf[dn++] = c;
+        }
+
+        if (enabled && focused && line_idx == caret_line &&
+            ((peos_time_ns() / 500000000ull) & 1ull) != 0ull) {
+            uint32_t caret_x = (caret_col > vis_cols) ? vis_cols : caret_col;
+            if (caret_x >= dn && caret_x < vis_cols && dn + 1u < (uint32_t)sizeof(draw_buf)) {
+                while (dn < caret_x && dn + 1u < (uint32_t)sizeof(draw_buf)) draw_buf[dn++] = ' ';
+                draw_buf[dn++] = '_';
+            } else if (caret_x < dn) {
+                draw_buf[caret_x] = '_';
+            }
+        }
+        draw_buf[dn] = '\0';
+
+        sl_draw_text(ui->ctx, content_x, ly, draw_buf,
+                     enabled ? 240u : 150u, enabled ? 240u : 150u, enabled ? 240u : 150u);
+
+        if (text[end] == '\n') start = end + 1u;
+        else start = end;
+        line_idx++;
+    }
+
+    return changed;
+}
+
 uint8_t sl_ui_scroll_v(sl_ui_ctx_t *ui, uint32_t id,
                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                        uint32_t content_h, uint32_t *offset,

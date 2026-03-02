@@ -17,6 +17,9 @@ typedef struct {
     uint32_t active_id;
     uint32_t focused_id;
     uint8_t shift_down;
+    uint32_t text_caret_id;
+    uint32_t text_caret_pos;
+    uint32_t text_area_scroll_line;
 } sl_ui_ctx_t;
 
 typedef enum {
@@ -94,6 +97,15 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
                                char *text, uint32_t text_cap,
                                const peos_input_event_t *events, uint8_t event_count,
                                uint8_t enabled);
+uint8_t sl_ui_text_area(sl_ui_ctx_t *ui, uint32_t id,
+                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                        char *text, uint32_t text_cap,
+                        const peos_input_event_t *events, uint8_t event_count);
+uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
+                              uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                              char *text, uint32_t text_cap,
+                              const peos_input_event_t *events, uint8_t event_count,
+                              uint8_t enabled);
 
 uint8_t sl_ui_scroll_v(sl_ui_ctx_t *ui, uint32_t id,
                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
