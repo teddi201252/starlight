@@ -346,7 +346,10 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
 
     int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
     if (enabled && ui->mouse_pressed) {
-        if (hovered) ui->focused_id = id;
+        if (hovered) {
+            ui->focused_id = id;
+            ui->text_caret_id = id;
+        }
         else if (ui->focused_id == id) ui->focused_id = 0u;
     }
     if (!enabled && ui->focused_id == id) ui->focused_id = 0u;
@@ -357,6 +360,11 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         len = text_cap - 1u;
         text[len] = '\0';
     }
+    if (ui->text_caret_id != id) {
+        ui->text_caret_id = id;
+        ui->text_caret_pos = len;
+    }
+    if (ui->text_caret_pos > len) ui->text_caret_pos = len;
 
     uint8_t changed = 0u;
     for (uint8_t i = 0u; i < event_count; i++) {
@@ -369,21 +377,40 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             ui->ctrl_down = events[i].pressed ? 1u : 0u;
             continue;
         }
-        if (code == 0x0038u) {
+        if (code == PEOS_KEY_LALT || code == PEOS_KEY_RALT_NORM) {
             ui->alt_down = events[i].pressed ? 1u : 0u;
             continue;
         }
-        if (code == 0x005Bu || code == 0x005Cu) {
+        if (code == PEOS_KEY_LSUPER_NORM || code == PEOS_KEY_RSUPER_NORM) {
             ui->super_down = events[i].pressed ? 1u : 0u;
             continue;
         }
         if (!enabled || !focused || !events[i].pressed) continue;
-        if (code == 0x000Eu) {
-            if (len > 0u) {
+        if (code == PEOS_KEY_BACKSPACE) {
+            if (ui->text_caret_pos > 0u && len > 0u) {
+                for (uint32_t j = ui->text_caret_pos - 1u; j < len; j++) {
+                    text[j] = text[j + 1u];
+                }
+                ui->text_caret_pos--;
                 len--;
-                text[len] = '\0';
                 changed = 1u;
             }
+            continue;
+        }
+        if (code == PEOS_KEY_LEFT_NORM) {
+            if (ui->text_caret_pos > 0u) ui->text_caret_pos--;
+            continue;
+        }
+        if (code == PEOS_KEY_RIGHT_NORM) {
+            if (ui->text_caret_pos < len) ui->text_caret_pos++;
+            continue;
+        }
+        if (code == PEOS_KEY_HOME_NORM) {
+            ui->text_caret_pos = 0u;
+            continue;
+        }
+        if (code == PEOS_KEY_END_NORM) {
+            ui->text_caret_pos = len;
             continue;
         }
         if (code == PEOS_KEY_ESC) {
@@ -402,8 +429,12 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
 
         char c = sl_ui_key_to_char(code, ui->shift_down);
         if (c && (len + 1u < text_cap)) {
-            text[len++] = c;
-            text[len] = '\0';
+            for (uint32_t j = len + 1u; j > ui->text_caret_pos; j--) {
+                text[j] = text[j - 1u];
+            }
+            text[ui->text_caret_pos] = c;
+            ui->text_caret_pos++;
+            len++;
             changed = 1u;
         }
     }
@@ -425,15 +456,26 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
 
     uint32_t vis_chars = (w > 12u) ? ((w - 12u) / 8u) : 0u;
     if (vis_chars > 0u) {
-        uint32_t start = (len > vis_chars) ? (len - vis_chars) : 0u;
+        uint32_t start = 0u;
+        if (ui->text_caret_pos > vis_chars) {
+            start = ui->text_caret_pos - vis_chars;
+        }
+        if (start > len) start = len;
         char draw_buf[192];
         uint32_t n = 0u;
         while (text[start + n] && n + 2u < (uint32_t)sizeof(draw_buf)) {
             draw_buf[n] = text[start + n];
             n++;
         }
+        uint32_t caret_draw = (ui->text_caret_pos >= start) ? (ui->text_caret_pos - start) : 0u;
+        if (caret_draw > vis_chars) caret_draw = vis_chars;
         if (enabled && focused && ((peos_time_ns() / 500000000ull) & 1ull) && n + 2u < (uint32_t)sizeof(draw_buf)) {
-            draw_buf[n++] = '_';
+            if (caret_draw < n) {
+                draw_buf[caret_draw] = '_';
+            } else {
+                while (n < caret_draw && n + 2u < (uint32_t)sizeof(draw_buf)) draw_buf[n++] = ' ';
+                if (n + 2u < (uint32_t)sizeof(draw_buf)) draw_buf[n++] = '_';
+            }
         }
         draw_buf[n] = '\0';
         sl_draw_text(ui->ctx, x + 6u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), draw_buf,
@@ -541,17 +583,17 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             ui->ctrl_down = events[i].pressed ? 1u : 0u;
             continue;
         }
-        if (code == 0x0038u) {
+        if (code == PEOS_KEY_LALT || code == PEOS_KEY_RALT_NORM) {
             ui->alt_down = events[i].pressed ? 1u : 0u;
             continue;
         }
-        if (code == 0x005Bu || code == 0x005Cu) {
+        if (code == PEOS_KEY_LSUPER_NORM || code == PEOS_KEY_RSUPER_NORM) {
             ui->super_down = events[i].pressed ? 1u : 0u;
             continue;
         }
         if (!enabled || !focused || !events[i].pressed) continue;
 
-        if (code == 0x000Eu) { // backspace
+        if (code == PEOS_KEY_BACKSPACE) {
             uint32_t old_len = len;
             sl_ui_text_backspace(text, &len, &ui->text_caret_pos);
             if (len != old_len) changed = 1u;
@@ -568,18 +610,18 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             if (len != old_len) changed = 1u;
             continue;
         }
-        if (code == 0x004Bu) { // left
+        if (code == PEOS_KEY_LEFT_NORM) {
             if (ui->text_caret_pos > 0u) ui->text_caret_pos--;
             continue;
         }
-        if (code == 0x004Du) { // right
+        if (code == PEOS_KEY_RIGHT_NORM) {
             if (ui->text_caret_pos < len) ui->text_caret_pos++;
             continue;
         }
-        if (code == 0x0048u || code == 0x0050u) { // up/down
+        if (code == PEOS_KEY_UP_NORM || code == PEOS_KEY_DOWN_NORM) {
             uint32_t line_start = sl_ui_text_line_start(text, ui->text_caret_pos);
             uint32_t col = ui->text_caret_pos - line_start;
-            if (code == 0x0048u) {
+            if (code == PEOS_KEY_UP_NORM) {
                 if (line_start > 0u) {
                     uint32_t prev_end = line_start - 1u;
                     uint32_t prev_start = sl_ui_text_line_start(text, prev_end);
@@ -597,7 +639,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             }
             continue;
         }
-        if (code == 0x000Fu) { // tab
+        if (code == PEOS_KEY_TAB) {
             uint32_t old_len = len;
             sl_ui_text_insert_char(text, &len, text_cap, &ui->text_caret_pos, '\t');
             if (len != old_len) changed = 1u;

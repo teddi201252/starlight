@@ -12,7 +12,7 @@
 #define ORBIT_TITLE_CHARS 64u
 #define ORBIT_EXEC_CHARS 160u
 #define ORBIT_ARGS_CHARS 160u
-#define ORBIT_KEY_BACKSPACE 0x000Eu
+#define ORBIT_KEY_BACKSPACE PEOS_KEY_BACKSPACE
 #define ORBIT_APP_SLOTS 8u
 #define ORBIT_MAX_POLL_READS 8u
 #define ORBIT_POLL_INTERVAL_NS 10000000ull
@@ -1378,11 +1378,11 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
 
     if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) {
         shell->shift_down = event->pressed ? 1u : 0u;
-    } else if (code == PEOS_KEY_LCTRL || code == 0xE01Du) {
+    } else if (code == PEOS_KEY_LCTRL || code == PEOS_KEY_RCTRL_NORM) {
         shell->ctrl_down = event->pressed ? 1u : 0u;
-    } else if (code == 0x0038u || code == 0xE038u) {
+    } else if (code == PEOS_KEY_LALT || code == PEOS_KEY_RALT_NORM) {
         shell->alt_down = event->pressed ? 1u : 0u;
-    } else if (code == 0xE05Bu || code == 0xE05Cu) {
+    } else if (code == PEOS_KEY_LSUPER_NORM || code == PEOS_KEY_RSUPER_NORM) {
         shell->super_down = event->pressed ? 1u : 0u;
     }
 
@@ -1404,9 +1404,9 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
     }
 
     if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT ||
-        code == PEOS_KEY_LCTRL || code == 0xE01Du ||
-        code == 0x0038u || code == 0xE038u ||
-        code == 0xE05Bu || code == 0xE05Cu) {
+        code == PEOS_KEY_LCTRL || code == PEOS_KEY_RCTRL_NORM ||
+        code == PEOS_KEY_LALT || code == PEOS_KEY_RALT_NORM ||
+        code == PEOS_KEY_LSUPER_NORM || code == PEOS_KEY_RSUPER_NORM) {
         return;
     }
 
