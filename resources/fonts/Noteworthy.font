@@ -1,0 +1,19 @@
+# Starlight font manifest
+# backend: builtin | atlas
+backend=atlas
+
+# For backend=atlas:
+image=/starlight/fonts/Noteworthy.png
+map=/starlight/fonts/charset.map
+# first=32
+count=256
+cols=16
+glyph_w=32
+glyph_h=32
+render_w=24
+render_h=24
+render_off_x=-8
+render_off_y=-6
+advance=8
+line_h=22
+fallback_char=63
