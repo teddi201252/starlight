@@ -188,18 +188,21 @@ static uint8_t orbit_u8_clamp(uint32_t v) {
     return (uint8_t)((v > 255u) ? 255u : v);
 }
 
-static void orbit_theme_override_set_accent(orbit_shell_t *shell, uint8_t r, uint8_t g, uint8_t b) {
+static void orbit_theme_override_set_accent(orbit_shell_t *shell, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     if (!shell) return;
     sl_ui_theme_runtime_get(&shell->ui.theme_override);
     shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT].r = r;
     shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT].g = g;
     shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT].b = b;
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT].a = a;
     shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_HOVER].r = orbit_u8_clamp((uint32_t)r + 28u);
     shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_HOVER].g = orbit_u8_clamp((uint32_t)g + 28u);
     shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_HOVER].b = orbit_u8_clamp((uint32_t)b + 28u);
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_HOVER].a = a;
     shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_ACTIVE].r = (uint8_t)((r > 24u) ? (r - 24u) : 0u);
     shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_ACTIVE].g = (uint8_t)((g > 24u) ? (g - 24u) : 0u);
     shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_ACTIVE].b = (uint8_t)((b > 24u) ? (b - 24u) : 0u);
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_ACTIVE].a = a;
     shell->ui.theme_override_enabled = 1u;
     shell->ui.ui.theme_initialized = 0u;
 }
@@ -738,7 +741,16 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
                 orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "theme_accent_invalid_args");
                 return 1;
             }
-            orbit_theme_override_set_accent(shell, orbit_u8_clamp(rv), orbit_u8_clamp(gv), orbit_u8_clamp(bv));
+            orbit_theme_override_set_accent(shell, orbit_u8_clamp(rv), orbit_u8_clamp(gv), orbit_u8_clamp(bv), 255u);
+            return 1;
+        }
+        if (orbit_token_is(host_tok, host_len, "THEME_ACCENTA")) {
+            uint32_t rv = 0u, gv = 0u, bv = 0u, av = 0u;
+            if (!orbit_parse_u32(&p, &rv) || !orbit_parse_u32(&p, &gv) || !orbit_parse_u32(&p, &bv) || !orbit_parse_u32(&p, &av)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "theme_accenta_invalid_args");
+                return 1;
+            }
+            orbit_theme_override_set_accent(shell, orbit_u8_clamp(rv), orbit_u8_clamp(gv), orbit_u8_clamp(bv), orbit_u8_clamp(av));
             return 1;
         }
         if (orbit_token_is(host_tok, host_len, "THEME_RESET")) {
@@ -1635,13 +1647,22 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     sl_draw_text(ctx, win->x + 6u, win->y + 6u, title, 20u, 20u, 20u);
 
     if (shell->ui.enabled && shell->ui.committed) {
-        sl_fill_rect(ctx, body_x, body_y, body_w, body_h, 20u, 22u, 30u);
         sl_ui_begin(&shell->ui.ui, ctx, win,
                     ctx->cursor_x, ctx->cursor_y,
                     shell->ui.mouse_down, shell->ui.mouse_pressed, shell->ui.mouse_released,
                     shell->ui.mouse_wheel_x, shell->ui.mouse_wheel_y);
         if (shell->ui.theme_override_enabled) {
             sl_ui_theme_apply(&shell->ui.ui, &shell->ui.theme_override);
+        }
+        {
+            const sl_ui_color_t *canvas = sl_ui_theme_color(&shell->ui.ui, SL_UI_COLOR_BG_CANVAS);
+            if (canvas && canvas->a < 255u) {
+                sl_fill_rect_a(ctx, body_x, body_y, body_w, body_h,
+                               canvas->r, canvas->g, canvas->b, canvas->a);
+            } else if (canvas) {
+                sl_fill_rect(ctx, body_x, body_y, body_w, body_h,
+                             canvas->r, canvas->g, canvas->b);
+            }
         }
 
         uint32_t clip_x[8];
