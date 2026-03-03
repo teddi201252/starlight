@@ -246,7 +246,7 @@ uint8_t sl_ui_slider_u32_state(sl_ui_ctx_t *ui, uint32_t id,
 
     sl_ui_control_state_t state = enabled ? SL_UI_STATE_NORMAL : SL_UI_STATE_DISABLED;
     if (enabled && ui->active_id == id && ui->mouse_down) state = SL_UI_STATE_ACTIVE;
-    sl_ui_fill_tok(ui, x, y + 6u, w, 4u, (state == SL_UI_STATE_DISABLED) ? SL_UI_COLOR_BG_CANVAS : SL_UI_COLOR_BG_PANEL);
+    sl_ui_fill_tok(ui, x, y + 6u, w, 4u, (state == SL_UI_STATE_DISABLED) ? SL_UI_COLOR_BG_CANVAS : SL_UI_COLOR_BG_CONTROL);
 
     uint32_t knob_x = track_x;
     if (max_v > min_v) {
