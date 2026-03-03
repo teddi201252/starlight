@@ -1,5 +1,5 @@
 #include "pixels.h"
-#include "font8x8.h"
+#include "font.h"
 
 static inline uint8_t sl_blend_chan(uint8_t src, uint8_t dst, uint8_t a) {
     uint32_t inv = 255u - (uint32_t)a;
@@ -267,35 +267,21 @@ void sl_blit_rgba_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_
 }
 
 void sl_draw_char(sl_ctx_t *ctx, uint32_t x, uint32_t y, char c, uint8_t r, uint8_t g, uint8_t b) {
-    if (!ctx || !ctx->frame) return;
-    if (x >= ctx->fb.width || y >= ctx->fb.height) return;
-    if (ctx->bytespp != 3u && ctx->bytespp != 4u) return;
-
-    const uint8_t *glyph = peos_font8x8_glyph(c);
-    for (uint32_t j = 0; j < 8; j++) {
-        uint32_t yy = y + j;
-        if (yy >= ctx->fb.height) break;
-        uint8_t bits = glyph[j];
-        if (!bits) continue;
-
-        uint8_t *dst = ctx->frame + ((size_t)yy * ctx->row_stride) + ((size_t)x * (size_t)ctx->bytespp);
-        for (uint32_t i = 0; i < 8; i++) {
-            uint32_t xx = x + i;
-            if (xx >= ctx->fb.width) break;
-            if ((bits & (uint8_t)(1u << i)) != 0u && sl_point_in_clip(ctx, xx, yy)) {
-                dst[0] = b;
-                dst[1] = g;
-                dst[2] = r;
-                if (ctx->bytespp == 4u) dst[3] = 0xFFu;
-            }
-            dst += ctx->bytespp;
-        }
-    }
+    sl_font_draw_char(ctx, x, y, c, r, g, b);
 }
 
 void sl_draw_text(sl_ctx_t *ctx, uint32_t x, uint32_t y, const char *text, uint8_t r, uint8_t g, uint8_t b) {
-    if (!ctx || !ctx->frame) return;
-    for (uint32_t i = 0; text[i]; i++) {
-        sl_draw_char(ctx, x + i * 8, y, text[i], r, g, b);
-    }
+    sl_font_draw_text(ctx, x, y, text, r, g, b);
+}
+
+uint32_t sl_text_cell_w(void) {
+    return sl_font_advance_x();
+}
+
+uint32_t sl_text_cell_h(void) {
+    return sl_font_line_height();
+}
+
+uint32_t sl_text_measure_width(const char *text) {
+    return sl_font_measure_text(text);
 }

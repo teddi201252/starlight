@@ -1977,10 +1977,14 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     uint32_t text_y = body_y + 4u;
     uint32_t text_w = (body_w > 8u) ? (body_w - 8u) : 0u;
     uint32_t text_h = (body_h > 8u) ? (body_h - 8u) : 0u;
-    if (text_w < 8u || text_h < 8u) return;
+    uint32_t cell_w = sl_text_cell_w();
+    uint32_t cell_h = sl_text_cell_h();
+    if (cell_w == 0u) cell_w = 8u;
+    if (cell_h == 0u) cell_h = 8u;
+    if (text_w < cell_w || text_h < cell_h) return;
 
-    uint32_t cols = text_w / 8u;
-    uint32_t rows = text_h / 8u;
+    uint32_t cols = text_w / cell_w;
+    uint32_t rows = text_h / cell_h;
     if (cols < 8u || rows < 1u) return;
 
     uint32_t history_rows = rows;
@@ -2014,9 +2018,9 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             const char *tail = src + (n - cols);
             char clipped[ORBIT_LINE_CHARS];
             orbit_copy_str(clipped, sizeof(clipped), tail);
-            sl_draw_text(ctx, text_x, text_y + (r * 8u), clipped, 200u, 230u, 200u);
+            sl_draw_text(ctx, text_x, text_y + (r * cell_h), clipped, 200u, 230u, 200u);
         } else {
-            sl_draw_text(ctx, text_x, text_y + (r * 8u), src, 200u, 230u, 200u);
+            sl_draw_text(ctx, text_x, text_y + (r * cell_h), src, 200u, 230u, 200u);
         }
     }
 
@@ -2026,7 +2030,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         if (n > cols) {
             hint += (n - cols);
         }
-        sl_draw_text(ctx, text_x, text_y + ((history_rows - 1u) * 8u), hint, 170u, 170u, 170u);
+        sl_draw_text(ctx, text_x, text_y + ((history_rows - 1u) * cell_h), hint, 170u, 170u, 170u);
     } else {
         size_t idx = (size_t)(shell - &g_orbit[0]);
         if (idx < ORBIT_APP_SLOTS) {

@@ -27,7 +27,7 @@ Phase 5 SLUI contract + integration checks are documented in:
 Starlight loads persistent configuration from:
 
 - `/system/config/display.cfg` (global OS config: `width`, `height`)
-- `/starlight/config/settings.cfg` (DE config: `background`, `cursor`, `cursor_scale`)
+- `/starlight/config/settings.cfg` (DE config: `background`, `cursor`, `cursor_scale`, `font`)
 
 Default DE config source:
 

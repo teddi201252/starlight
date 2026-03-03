@@ -99,6 +99,21 @@ static void sl_ui_text_tok(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *
     sl_draw_text(ui->ctx, x, y, text, c->r, c->g, c->b);
 }
 
+static uint32_t sl_ui_font_w(void) {
+    uint32_t w = sl_text_cell_w();
+    return w ? w : 8u;
+}
+
+static uint32_t sl_ui_font_h(void) {
+    uint32_t h = sl_text_cell_h();
+    return h ? h : 8u;
+}
+
+static uint32_t sl_ui_text_center_y(uint32_t y, uint32_t h) {
+    uint32_t fh = sl_ui_font_h();
+    return y + ((h > fh) ? ((h - fh) / 2u) : 0u);
+}
+
 static sl_ui_color_token_t sl_ui_state_fill_token(sl_ui_control_state_t state) {
     switch (state) {
         case SL_UI_STATE_HOVER: return SL_UI_COLOR_BG_CONTROL_HOVER;
@@ -191,7 +206,7 @@ uint8_t sl_ui_button_state(sl_ui_ctx_t *ui, uint32_t id,
     sl_ui_fill_tok(ui, x, y + h - 1u, w, 1u, SL_UI_COLOR_BG_CANVAS);
     sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
     sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, SL_UI_COLOR_BG_CANVAS);
-    sl_ui_text_tok(ui, x + 6u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), text, sl_ui_state_text_token(state));
+    sl_ui_text_tok(ui, x + 6u, sl_ui_text_center_y(y, h), text, sl_ui_state_text_token(state));
     if (!enabled && active) ui->active_id = 0u;
 
     if (enabled && ui->mouse_released && active) {
@@ -385,8 +400,8 @@ uint8_t sl_ui_toggle_state(sl_ui_ctx_t *ui, uint32_t id,
 
     if (text[0]) {
         uint32_t text_x = x + 6u;
-        uint32_t text_y = y + ((h > 12u) ? ((h - 8u) / 2u) : 0u);
-        if (text_x + 8u < sw_x) {
+        uint32_t text_y = sl_ui_text_center_y(y, h);
+        if (text_x + sl_ui_font_w() < sw_x) {
             sl_ui_text_tok(ui, text_x, text_y, text,
                            enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
         }
@@ -433,7 +448,7 @@ uint8_t sl_ui_select_cycle_state(sl_ui_ctx_t *ui, uint32_t id,
     sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
     sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, SL_UI_COLOR_BG_CANVAS);
 
-    uint32_t text_y = y + ((h > 12u) ? ((h - 8u) / 2u) : 0u);
+    uint32_t text_y = sl_ui_text_center_y(y, h);
     sl_ui_text_tok(ui, x + 6u, text_y, current_text,
                    enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
     sl_ui_text_tok(ui, x + w - 10u, text_y, ">",
@@ -460,7 +475,6 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     if (enabled && ui->mouse_pressed) {
         if (hovered) {
             ui->focused_id = id;
-            ui->text_caret_id = id;
         }
         else if (ui->focused_id == id) ui->focused_id = 0u;
     }
@@ -472,11 +486,11 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         len = text_cap - 1u;
         text[len] = '\0';
     }
-    if (ui->text_caret_id != id) {
+    if (focused && ui->text_caret_id != id) {
         ui->text_caret_id = id;
         ui->text_caret_pos = len;
     }
-    if (ui->text_caret_pos > len) ui->text_caret_pos = len;
+    if (ui->text_caret_id == id && ui->text_caret_pos > len) ui->text_caret_pos = len;
 
     uint8_t changed = 0u;
     for (uint8_t i = 0u; i < event_count; i++) {
@@ -561,8 +575,12 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
     sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, (state == SL_UI_STATE_FOCUSED) ? SL_UI_COLOR_BORDER_FOCUS : SL_UI_COLOR_BG_CANVAS);
 
-    uint32_t vis_chars = (w > 12u) ? ((w - 12u) / 8u) : 0u;
+    uint32_t fw = sl_ui_font_w();
+    uint32_t fh = sl_ui_font_h();
+    uint32_t vis_chars = (w > 12u) ? ((w - 12u) / fw) : 0u;
     if (vis_chars > 0u) {
+        uint8_t caret_visible = (enabled && focused &&
+                                 ((peos_time_ns() / 500000000ull) & 1ull)) ? 1u : 0u;
         uint32_t start = 0u;
         if (ui->text_caret_pos > vis_chars) {
             start = ui->text_caret_pos - vis_chars;
@@ -576,17 +594,17 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         }
         uint32_t caret_draw = (ui->text_caret_pos >= start) ? (ui->text_caret_pos - start) : 0u;
         if (caret_draw > vis_chars) caret_draw = vis_chars;
-        if (enabled && focused && ((peos_time_ns() / 500000000ull) & 1ull) && n + 2u < (uint32_t)sizeof(draw_buf)) {
-            if (caret_draw < n) {
-                draw_buf[caret_draw] = '_';
-            } else {
-                while (n < caret_draw && n + 2u < (uint32_t)sizeof(draw_buf)) draw_buf[n++] = ' ';
-                if (n + 2u < (uint32_t)sizeof(draw_buf)) draw_buf[n++] = '_';
-            }
-        }
         draw_buf[n] = '\0';
-        sl_ui_text_tok(ui, x + 6u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), draw_buf,
+        uint32_t text_x = x + 6u;
+        uint32_t text_y = sl_ui_text_center_y(y, h);
+        sl_ui_text_tok(ui, text_x, text_y, draw_buf,
                        enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
+        if (caret_visible) {
+            uint32_t caret_px = text_x + (caret_draw * fw);
+            uint32_t caret_max = text_x + (vis_chars * fw);
+            if (caret_px >= caret_max) caret_px = caret_max - 1u;
+            sl_ui_fill_tok(ui, caret_px, text_y, 1u, fh, SL_UI_COLOR_BORDER_FOCUS);
+        }
     }
     return changed;
 }
@@ -672,12 +690,12 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         text[len] = '\0';
     }
 
-    if (ui->text_caret_id != id) {
+    if (focused && ui->text_caret_id != id) {
         ui->text_caret_id = id;
         ui->text_caret_pos = len;
         ui->text_area_scroll_line = 0u;
     }
-    if (ui->text_caret_pos > len) ui->text_caret_pos = len;
+    if (ui->text_caret_id == id && ui->text_caret_pos > len) ui->text_caret_pos = len;
 
     uint8_t changed = 0u;
     for (uint8_t i = 0u; i < event_count; i++) {
@@ -778,8 +796,10 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t content_y = y + 6u;
     uint32_t content_w = (w > 12u) ? (w - 12u) : 0u;
     uint32_t content_h = (h > 12u) ? (h - 12u) : 0u;
-    uint32_t vis_cols = content_w / 8u;
-    uint32_t vis_lines = content_h / 8u;
+    uint32_t fw = sl_ui_font_w();
+    uint32_t fh = sl_ui_font_h();
+    uint32_t vis_cols = content_w / fw;
+    uint32_t vis_lines = content_h / fh;
     if (vis_cols == 0u || vis_lines == 0u) return changed;
 
     uint32_t total_lines = sl_ui_text_total_lines(text);
@@ -799,6 +819,8 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
 
     uint32_t caret_col = 0u;
     uint32_t caret_line = sl_ui_text_line_col_at(text, ui->text_caret_pos, &caret_col);
+    uint8_t caret_visible = (enabled && focused &&
+                             (((peos_time_ns() / 500000000ull) & 1ull) != 0ull)) ? 1u : 0u;
     if (caret_line < ui->text_area_scroll_line) ui->text_area_scroll_line = caret_line;
     if (caret_line >= ui->text_area_scroll_line + vis_lines) {
         ui->text_area_scroll_line = caret_line - vis_lines + 1u;
@@ -812,7 +834,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     }
 
     for (uint32_t row = 0u; row < vis_lines; row++) {
-        uint32_t ly = content_y + (row * 8u);
+        uint32_t ly = content_y + (row * fh);
         if (!text[start] && !(line_idx == caret_line && caret_col == 0u)) {
             line_idx++;
             continue;
@@ -828,20 +850,17 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             draw_buf[dn++] = c;
         }
 
-        if (enabled && focused && line_idx == caret_line &&
-            ((peos_time_ns() / 500000000ull) & 1ull) != 0ull) {
-            uint32_t caret_x = (caret_col > vis_cols) ? vis_cols : caret_col;
-            if (caret_x >= dn && caret_x < vis_cols && dn + 1u < (uint32_t)sizeof(draw_buf)) {
-                while (dn < caret_x && dn + 1u < (uint32_t)sizeof(draw_buf)) draw_buf[dn++] = ' ';
-                draw_buf[dn++] = '_';
-            } else if (caret_x < dn) {
-                draw_buf[caret_x] = '_';
-            }
-        }
         draw_buf[dn] = '\0';
 
         sl_ui_text_tok(ui, content_x, ly, draw_buf,
                        enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
+        if (caret_visible && line_idx == caret_line) {
+            uint32_t caret_x = (caret_col > vis_cols) ? vis_cols : caret_col;
+            uint32_t caret_px = content_x + (caret_x * fw);
+            uint32_t caret_max = content_x + (vis_cols * fw);
+            if (caret_px >= caret_max) caret_px = caret_max - 1u;
+            sl_ui_fill_tok(ui, caret_px, ly, 1u, fh, SL_UI_COLOR_BORDER_FOCUS);
+        }
 
         if (text[end] == '\n') start = end + 1u;
         else start = end;
@@ -1032,7 +1051,7 @@ uint8_t sl_ui_list_item(sl_ui_ctx_t *ui, uint32_t id,
         sl_ui_text_tok(ui, x + 8u, sub_y, subtitle,
                        enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
     }
-    sl_ui_text_tok(ui, x + w - 10u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), ">",
+    sl_ui_text_tok(ui, x + w - 10u, sl_ui_text_center_y(y, h), ">",
                    enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
 
     if (!enabled && active) ui->active_id = 0u;
