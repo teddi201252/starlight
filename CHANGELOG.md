@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.4.4] - 2026-03-03
+- Maintenance update.
+
 ## [0.4.3] - 2026-03-03
 - Font atlas rendering tuning and offset controls.
 
