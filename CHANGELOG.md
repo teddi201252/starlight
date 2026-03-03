@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.4.0] - 2026-03-03
+- UI SDK themed controls, runtime theme config/load, themed SLUI protocol
+
 ## [0.3.2] - 2026-03-02
 - Add keyboard event pipeline and text-input modifier handling
 

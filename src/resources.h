@@ -3,6 +3,7 @@
 #define SL_RESOURCE_ROOT "/starlight"
 #define SL_RESOURCE_CONFIG_DIR SL_RESOURCE_ROOT "/config"
 #define SL_RESOURCE_CONFIG_FILE SL_RESOURCE_CONFIG_DIR "/settings.cfg"
+#define SL_RESOURCE_THEME_FILE SL_RESOURCE_CONFIG_DIR "/theme.cfg"
 #define SL_OS_CONFIG_DIR "/system/config"
 #define SL_OS_DISPLAY_CONFIG_FILE SL_OS_CONFIG_DIR "/display.cfg"
 

@@ -43,6 +43,7 @@
 #define ORBIT_SLUI_CAP_TEXT_AREA        (1u << 20)
 #define ORBIT_SLUI_CAP_EVENT_TEXT_AREA  (1u << 21)
 #define ORBIT_SLUI_CAP_EVENT_KEYBOARD   (1u << 22)
+#define ORBIT_SLUI_CAP_THEME_TOKENS     (1u << 23)
 
 #define ORBIT_SLUI_ERR_MALFORMED   100u
 #define ORBIT_SLUI_ERR_HELLO       101u
@@ -80,6 +81,9 @@ typedef enum {
     ORBIT_UI_CMD_RECT = 13,
     ORBIT_UI_CMD_RECTA = 14,
     ORBIT_UI_CMD_TEXT_AREA = 15,
+    ORBIT_UI_CMD_LABEL_THEME = 16,
+    ORBIT_UI_CMD_RECT_THEME = 17,
+    ORBIT_UI_CMD_RECTA_THEME = 18,
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -124,6 +128,8 @@ typedef struct {
     uint8_t client_proto_ver;
     uint32_t client_caps_mask;
     uint8_t key_down[256];
+    uint8_t theme_override_enabled;
+    sl_ui_theme_t theme_override;
 } orbit_ui_state_t;
 
 typedef struct {
@@ -165,6 +171,7 @@ static orbit_slot_cfg_t g_orbit_cfg[ORBIT_APP_SLOTS];
 static uint8_t g_orbit_apps_bound = 0u;
 static uint8_t g_orbit_cfg_init = 0u;
 static uint8_t g_reload_display_requested = 0u;
+static uint8_t g_reload_theme_requested = 0u;
 
 static void orbit_copy_str(char *dst, size_t cap, const char *src) {
     if (!dst || cap == 0u) return;
@@ -175,6 +182,26 @@ static void orbit_copy_str(char *dst, size_t cap, const char *src) {
         i++;
     }
     dst[i] = '\0';
+}
+
+static uint8_t orbit_u8_clamp(uint32_t v) {
+    return (uint8_t)((v > 255u) ? 255u : v);
+}
+
+static void orbit_theme_override_set_accent(orbit_shell_t *shell, uint8_t r, uint8_t g, uint8_t b) {
+    if (!shell) return;
+    sl_ui_theme_runtime_get(&shell->ui.theme_override);
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT].r = r;
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT].g = g;
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT].b = b;
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_HOVER].r = orbit_u8_clamp((uint32_t)r + 28u);
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_HOVER].g = orbit_u8_clamp((uint32_t)g + 28u);
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_HOVER].b = orbit_u8_clamp((uint32_t)b + 28u);
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_ACTIVE].r = (uint8_t)((r > 24u) ? (r - 24u) : 0u);
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_ACTIVE].g = (uint8_t)((g > 24u) ? (g - 24u) : 0u);
+    shell->ui.theme_override.colors[SL_UI_COLOR_ACCENT_ACTIVE].b = (uint8_t)((b > 24u) ? (b - 24u) : 0u);
+    shell->ui.theme_override_enabled = 1u;
+    shell->ui.ui.theme_initialized = 0u;
 }
 
 static const char *orbit_skip_spaces(const char *s) {
@@ -243,6 +270,7 @@ static uint32_t orbit_parse_cap_token(const char *tok, size_t tok_len) {
     if (orbit_token_is(tok, tok_len, "TEXT_AREA")) return ORBIT_SLUI_CAP_TEXT_AREA;
     if (orbit_token_is(tok, tok_len, "EVENT_TEXT_AREA")) return ORBIT_SLUI_CAP_EVENT_TEXT_AREA;
     if (orbit_token_is(tok, tok_len, "EVENT_KEYBOARD")) return ORBIT_SLUI_CAP_EVENT_KEYBOARD;
+    if (orbit_token_is(tok, tok_len, "THEME_TOKENS")) return ORBIT_SLUI_CAP_THEME_TOKENS;
     return 0u;
 }
 
@@ -284,7 +312,7 @@ static void orbit_send_ui_error(orbit_shell_t *shell, uint32_t code, const char 
 static void orbit_send_host_hello(orbit_shell_t *shell) {
     if (!shell || shell->child_stdin_fd < 0) return;
     const char *msg =
-        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD\n";
+        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS\n";
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, peos_strlen(msg));
     shell->ui.host_hello_sent = 1u;
 }
@@ -700,6 +728,24 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             g_reload_display_requested = 1u;
             return 1;
         }
+        if (orbit_token_is(host_tok, host_len, "RELOAD_THEME")) {
+            g_reload_theme_requested = 1u;
+            return 1;
+        }
+        if (orbit_token_is(host_tok, host_len, "THEME_ACCENT")) {
+            uint32_t rv = 0u, gv = 0u, bv = 0u;
+            if (!orbit_parse_u32(&p, &rv) || !orbit_parse_u32(&p, &gv) || !orbit_parse_u32(&p, &bv)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "theme_accent_invalid_args");
+                return 1;
+            }
+            orbit_theme_override_set_accent(shell, orbit_u8_clamp(rv), orbit_u8_clamp(gv), orbit_u8_clamp(bv));
+            return 1;
+        }
+        if (orbit_token_is(host_tok, host_len, "THEME_RESET")) {
+            shell->ui.theme_override_enabled = 0u;
+            shell->ui.ui.theme_initialized = 0u;
+            return 1;
+        }
         orbit_send_ui_error(shell, ORBIT_SLUI_ERR_UNKNOWN_CMD, "unknown_host_command");
         return 1;
     }
@@ -716,6 +762,23 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         cmd->r = (uint8_t)(rv & 0xFFu);
         cmd->g = (uint8_t)(gv & 0xFFu);
         cmd->b = (uint8_t)(bv & 0xFFu);
+        p = orbit_skip_spaces(p);
+        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        return 1;
+    }
+
+    if (orbit_token_is(cmd_tok, cmd_len, "LABELT")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_LABEL_THEME);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->x) || !orbit_parse_u32(&p, &cmd->y) ||
+            !orbit_parse_u32(&p, &cmd->value)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "labelt_invalid_args");
+            return 1;
+        }
+        if (cmd->value >= SL_UI_COLOR_COUNT) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "labelt_invalid_token");
+            return 1;
+        }
         p = orbit_skip_spaces(p);
         orbit_copy_str(cmd->text, sizeof(cmd->text), p);
         return 1;
@@ -941,6 +1004,22 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         return 1;
     }
 
+    if (orbit_token_is(cmd_tok, cmd_len, "RECTT")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_RECT_THEME);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->x) || !orbit_parse_u32(&p, &cmd->y) ||
+            !orbit_parse_u32(&p, &cmd->w) || !orbit_parse_u32(&p, &cmd->h) ||
+            !orbit_parse_u32(&p, &cmd->value)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_RECT, "rectt_invalid_args");
+            return 1;
+        }
+        if (cmd->value >= SL_UI_COLOR_COUNT) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_RECT, "rectt_invalid_token");
+            return 1;
+        }
+        return 1;
+    }
+
     if (orbit_token_is(cmd_tok, cmd_len, "RECTA")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_RECTA);
         if (!cmd) return 1;
@@ -956,6 +1035,23 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         cmd->g = (uint8_t)(gv & 0xFFu);
         cmd->b = (uint8_t)(bv & 0xFFu);
         cmd->a = (uint8_t)(av & 0xFFu);
+        return 1;
+    }
+
+    if (orbit_token_is(cmd_tok, cmd_len, "RECTAT")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_RECTA_THEME);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->x) || !orbit_parse_u32(&p, &cmd->y) ||
+            !orbit_parse_u32(&p, &cmd->w) || !orbit_parse_u32(&p, &cmd->h) ||
+            !orbit_parse_u32(&p, &cmd->value) || !orbit_parse_u32(&p, &cmd->min_v)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_RECTA, "rectat_invalid_args");
+            return 1;
+        }
+        if (cmd->value >= SL_UI_COLOR_COUNT) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_RECTA, "rectat_invalid_token");
+            return 1;
+        }
+        cmd->a = (uint8_t)(cmd->min_v & 0xFFu);
         return 1;
     }
 
@@ -1544,6 +1640,9 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     ctx->cursor_x, ctx->cursor_y,
                     shell->ui.mouse_down, shell->ui.mouse_pressed, shell->ui.mouse_released,
                     shell->ui.mouse_wheel_x, shell->ui.mouse_wheel_y);
+        if (shell->ui.theme_override_enabled) {
+            sl_ui_theme_apply(&shell->ui.ui, &shell->ui.theme_override);
+        }
 
         uint32_t clip_x[8];
         uint32_t clip_y[8];
@@ -1588,7 +1687,9 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 }
                 continue;
             } else if (cmd->type == ORBIT_UI_CMD_LABEL) {
-                sl_ui_label(&shell->ui.ui, x, y, cmd->text, cmd->r, cmd->g, cmd->b);
+                sl_ui_label_rgb(&shell->ui.ui, x, y, cmd->text, cmd->r, cmd->g, cmd->b);
+            } else if (cmd->type == ORBIT_UI_CMD_LABEL_THEME) {
+                sl_ui_label(&shell->ui.ui, x, y, cmd->text, (sl_ui_color_token_t)cmd->value);
             } else if (cmd->type == ORBIT_UI_CMD_BUTTON) {
                 if (sl_ui_button_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, cmd->enabled)) {
                     orbit_send_ui_event_button(shell, cmd->id);
@@ -1682,9 +1783,13 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     orbit_send_ui_event_button(shell, cmd->id);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_RECT) {
-                sl_ui_rect(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->r, cmd->g, cmd->b);
+                sl_ui_rect_rgb(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->r, cmd->g, cmd->b);
             } else if (cmd->type == ORBIT_UI_CMD_RECTA) {
-                sl_ui_rect_a(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->r, cmd->g, cmd->b, cmd->a);
+                sl_ui_rect_a_rgb(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->r, cmd->g, cmd->b, cmd->a);
+            } else if (cmd->type == ORBIT_UI_CMD_RECT_THEME) {
+                sl_ui_rect(&shell->ui.ui, x, y, cmd->w, cmd->h, (sl_ui_color_token_t)cmd->value);
+            } else if (cmd->type == ORBIT_UI_CMD_RECTA_THEME) {
+                sl_ui_rect_a(&shell->ui.ui, x, y, cmd->w, cmd->h, (sl_ui_color_token_t)cmd->value, cmd->a);
             } else if (cmd->type == ORBIT_UI_CMD_IMAGE_FILE) {
                 if (!cmd->image_loaded && !cmd->image_failed) {
                     if (sl_decode_image_file(cmd->text, &cmd->image)) {
@@ -1782,6 +1887,10 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
     if (g_reload_display_requested) {
         g_reload_display_requested = 0u;
         sl_reload_display(ctx);
+    }
+    if (g_reload_theme_requested) {
+        g_reload_theme_requested = 0u;
+        sl_reload_theme(ctx);
     }
     uint64_t now = peos_time_ns();
     for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
