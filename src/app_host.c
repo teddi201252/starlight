@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #define ORBIT_MAX_LINES 256u
 #define ORBIT_LINE_CHARS 160u
@@ -15,8 +16,11 @@
 #define ORBIT_KEY_BACKSPACE PEOS_KEY_BACKSPACE
 #define ORBIT_APP_SLOTS 8u
 #define ORBIT_MAX_POLL_READS 8u
-#define ORBIT_POLL_INTERVAL_NS 10000000ull
-#define ORBIT_UI_MAX_CMDS 64u
+#define ORBIT_POLL_INTERVAL_ACTIVE_NS 2000000ull
+#define ORBIT_POLL_INTERVAL_BUSY_NS   4000000ull
+#define ORBIT_POLL_INTERVAL_IDLE_NS  16000000ull
+#define ORBIT_UI_CMD_SOFT_CHUNK 64u
+#define ORBIT_UI_CMD_HARD_MAX 1024u
 #define ORBIT_UI_TEXT_CHARS 4096u
 #define ORBIT_SLUI_PROTO_VERSION 1u
 
@@ -125,11 +129,14 @@ typedef struct {
     uint8_t committed;
     sl_ui_ctx_t ui;
     peos_input_event_t key_events[16];
-    orbit_ui_cmd_t cmds[ORBIT_UI_MAX_CMDS];
+    orbit_ui_cmd_t *cmds;
     size_t cmd_count;
-    orbit_ui_cmd_t staged_cmds[ORBIT_UI_MAX_CMDS];
+    size_t cmd_cap;
+    orbit_ui_cmd_t *staged_cmds;
     size_t staged_count;
+    size_t staged_cap;
     uint8_t staged_enabled;
+    uint8_t cmd_limit_reached;
     uint8_t hello_seen;
     uint8_t host_hello_sent;
     uint8_t client_proto_ver;
@@ -346,18 +353,67 @@ static void orbit_ui_cmd_release_array(orbit_ui_cmd_t *cmds, size_t count) {
     }
 }
 
+static int orbit_ui_cmd_reserve(orbit_ui_cmd_t **arr, size_t *cap, size_t need) {
+    if (!arr || !cap) return 0;
+    if (need <= *cap) return 1;
+    if (need > ORBIT_UI_CMD_HARD_MAX) return 0;
+
+    size_t new_cap = *cap;
+    if (new_cap == 0u) new_cap = ORBIT_UI_CMD_SOFT_CHUNK;
+    while (new_cap < need && new_cap < ORBIT_UI_CMD_HARD_MAX) {
+        if (new_cap > ORBIT_UI_CMD_HARD_MAX - ORBIT_UI_CMD_SOFT_CHUNK) {
+            new_cap = ORBIT_UI_CMD_HARD_MAX;
+        } else {
+            new_cap += ORBIT_UI_CMD_SOFT_CHUNK;
+        }
+    }
+    if (new_cap < need) return 0;
+
+    orbit_ui_cmd_t *grown = (orbit_ui_cmd_t *)realloc(*arr, new_cap * sizeof(orbit_ui_cmd_t));
+    if (!grown) return 0;
+    *arr = grown;
+    *cap = new_cap;
+    return 1;
+}
+
+static void orbit_ui_storage_free(orbit_ui_state_t *ui) {
+    if (!ui) return;
+    orbit_ui_cmd_release_array(ui->cmds, ui->cmd_count);
+    orbit_ui_cmd_release_array(ui->staged_cmds, ui->staged_count);
+    if (ui->cmds) free(ui->cmds);
+    if (ui->staged_cmds) free(ui->staged_cmds);
+    ui->cmds = NULL;
+    ui->cmd_count = 0u;
+    ui->cmd_cap = 0u;
+    ui->staged_cmds = NULL;
+    ui->staged_count = 0u;
+    ui->staged_cap = 0u;
+    ui->cmd_limit_reached = 0u;
+}
+
 static void orbit_ui_clear(orbit_shell_t *shell) {
     if (!shell) return;
     orbit_ui_cmd_release_array(shell->ui.staged_cmds, shell->ui.staged_count);
     shell->ui.staged_enabled = 1u;
     shell->ui.staged_count = 0u;
+    shell->ui.cmd_limit_reached = 0u;
 }
 
 static orbit_ui_cmd_t *orbit_ui_next_cmd(orbit_shell_t *shell, uint8_t type) {
     if (!shell) return NULL;
     shell->ui.staged_enabled = 1u;
-    if (shell->ui.staged_count >= ORBIT_UI_MAX_CMDS) {
-        orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "command_limit_reached");
+    if (shell->ui.staged_count >= ORBIT_UI_CMD_HARD_MAX) {
+        if (!shell->ui.cmd_limit_reached) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "command_limit_reached");
+            shell->ui.cmd_limit_reached = 1u;
+        }
+        return NULL;
+    }
+    if (!orbit_ui_cmd_reserve(&shell->ui.staged_cmds, &shell->ui.staged_cap, shell->ui.staged_count + 1u)) {
+        if (!shell->ui.cmd_limit_reached) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "command_buffer_alloc_failed");
+            shell->ui.cmd_limit_reached = 1u;
+        }
         return NULL;
     }
     orbit_ui_cmd_t *cmd = &shell->ui.staged_cmds[shell->ui.staged_count++];
@@ -746,11 +802,21 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
     if (orbit_token_is(cmd_tok, cmd_len, "COMMIT")) {
         orbit_ui_cmd_release_array(shell->ui.cmds, shell->ui.cmd_count);
         shell->ui.enabled = shell->ui.staged_enabled;
+        if (!orbit_ui_cmd_reserve(&shell->ui.cmds, &shell->ui.cmd_cap, shell->ui.staged_count)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "command_buffer_alloc_failed");
+            shell->ui.cmd_count = 0u;
+            shell->ui.staged_count = 0u;
+            shell->ui.cmd_limit_reached = 0u;
+            shell->ui.committed = 1u;
+            return 1;
+        }
         shell->ui.cmd_count = shell->ui.staged_count;
-        if (shell->ui.cmd_count > 0u) {
+        if (shell->ui.cmd_count > 0u && shell->ui.cmds && shell->ui.staged_cmds) {
             peos_memcpy(shell->ui.cmds, shell->ui.staged_cmds,
                         shell->ui.cmd_count * sizeof(shell->ui.cmds[0]));
         }
+        shell->ui.staged_count = 0u;
+        shell->ui.cmd_limit_reached = 0u;
         shell->ui.committed = 1u;
         return 1;
     }
@@ -1268,14 +1334,17 @@ static int orbit_feed_ansi(orbit_shell_t *shell, char c) {
 
 static void orbit_reset_buffer(orbit_shell_t *shell) {
     if (!shell) return;
-    orbit_ui_cmd_release_array(shell->ui.cmds, shell->ui.cmd_count);
-    orbit_ui_cmd_release_array(shell->ui.staged_cmds, shell->ui.staged_count);
+    orbit_ui_storage_free(&shell->ui);
     orbit_clear_text_buffer(shell);
     shell->esc_active = 0u;
     shell->csi_active = 0u;
     shell->csi_len = 0u;
     shell->csi_buf[0] = '\0';
-    peos_memset(&shell->ui, 0, sizeof(shell->ui));
+    peos_memset(shell->ui.key_down, 0, sizeof(shell->ui.key_down));
+    shell->ui.staged_enabled = 1u;
+    shell->ui.active_panel_id = 0u;
+    shell->ui.theme_override_enabled = 0u;
+    shell->ui.ui.theme_initialized = 0u;
 }
 
 static void orbit_feed_char(orbit_shell_t *shell, char c) {
@@ -1417,8 +1486,7 @@ static void orbit_mark_child_exited(orbit_shell_t *shell) {
     if (!shell) return;
     orbit_close_fds(shell);
     shell->child_pid = -1;
-    orbit_ui_cmd_release_array(shell->ui.cmds, shell->ui.cmd_count);
-    orbit_ui_cmd_release_array(shell->ui.staged_cmds, shell->ui.staged_count);
+    orbit_ui_storage_free(&shell->ui);
     peos_memset(&shell->ui, 0, sizeof(shell->ui));
     orbit_push_line(shell, "[app exited] Press Enter to restart.");
 }
@@ -1430,7 +1498,7 @@ static uint8_t orbit_poll_output(orbit_shell_t *shell) {
 
     char buf[256];
     for (uint32_t i = 0u; i < ORBIT_MAX_POLL_READS; i++) {
-        uint64_t n = peos_fread((uint64_t)shell->child_stdout_fd, buf, sizeof(buf));
+        uint64_t n = peos_fread_nb((uint64_t)shell->child_stdout_fd, buf, sizeof(buf));
         if ((int64_t)n < 0) {
             break;
         }
@@ -1454,6 +1522,13 @@ static uint8_t orbit_poll_output(orbit_shell_t *shell) {
     }
 
     return changed;
+}
+
+static uint64_t orbit_poll_interval_ns(const orbit_shell_t *shell, uint8_t changed) {
+    if (!shell) return ORBIT_POLL_INTERVAL_IDLE_NS;
+    if (changed) return ORBIT_POLL_INTERVAL_ACTIVE_NS;
+    if (shell->child_pid > 0) return ORBIT_POLL_INTERVAL_BUSY_NS;
+    return ORBIT_POLL_INTERVAL_IDLE_NS;
 }
 
 static void orbit_send_input(orbit_shell_t *shell, const char *buf, size_t len) {
@@ -2054,9 +2129,10 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
         orbit_shell_t *shell = &g_orbit[i];
         if (!shell->initialized) continue;
         if (shell->next_poll_ns > now) continue;
-        shell->next_poll_ns = now + ORBIT_POLL_INTERVAL_NS;
+        uint8_t changed = orbit_poll_output(shell);
+        shell->next_poll_ns = now + orbit_poll_interval_ns(shell, changed);
 
-        if (orbit_poll_output(shell)) {
+        if (changed) {
             sl_windows_mark_app_dirty(ctx, shell);
         }
 
@@ -2127,6 +2203,7 @@ void sl_app_host_reset(void) {
     orbit_bind_apps();
     for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
         orbit_stop_process(&g_orbit[i]);
+        orbit_ui_storage_free(&g_orbit[i].ui);
         peos_memset(&g_orbit[i], 0, sizeof(g_orbit[i]));
         orbit_cfg_apply_to_shell(i);
         g_orbit[i].child_pid = -1;
@@ -2160,6 +2237,7 @@ app_instance_t *sl_app_host_instance_at(size_t index) {
     if (index >= ORBIT_APP_SLOTS) return NULL;
     if (!g_orbit_cfg[index].enabled) return NULL;
     if (!g_orbit[index].initialized) {
+        orbit_ui_storage_free(&g_orbit[index].ui);
         peos_memset(&g_orbit[index], 0, sizeof(g_orbit[index]));
         orbit_cfg_apply_to_shell(index);
         g_orbit[index].child_pid = -1;

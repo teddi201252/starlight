@@ -22,7 +22,8 @@
 #define SL_HW_CURSOR_SCALE_DEFAULT 100u
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
-#define SL_DIRTY_MAX_RECTS 128u
+#define SL_DIRTY_MAX_RECTS 256u
+#define SL_DIRTY_FULL_AREA_THRESHOLD_PCT 65u
 #define SL_DRAG_DIRTY_PADDING 8u
 
 typedef struct {
@@ -55,6 +56,19 @@ static int sl_rects_overlap_or_touch(const sl_rect_t *a, const sl_rect_t *b) {
     uint64_t bx2 = (uint64_t)b->x + (uint64_t)b->w;
     uint64_t by2 = (uint64_t)b->y + (uint64_t)b->h;
     return !((ax2 < b->x) || (bx2 < a->x) || (ay2 < b->y) || (by2 < a->y));
+}
+
+static uint64_t sl_rect_area(const sl_rect_t *r) {
+    if (!r) return 0ull;
+    return (uint64_t)r->w * (uint64_t)r->h;
+}
+
+static uint64_t sl_dirty_total_area(void) {
+    uint64_t total = 0ull;
+    for (size_t i = 0; i < g_dirty.count; i++) {
+        total += sl_rect_area(&g_dirty.rects[i]);
+    }
+    return total;
 }
 
 int sl_dirty_intersects_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
@@ -117,6 +131,47 @@ static sl_rect_t sl_rect_union(const sl_rect_t *a, const sl_rect_t *b) {
     return r;
 }
 
+static int sl_dirty_should_mark_full(const sl_ctx_t *ctx) {
+    if (!ctx) return 0;
+    if (ctx->fb.width == 0u || ctx->fb.height == 0u) return 0;
+    if (g_dirty.count == 0u) return 0;
+
+    uint64_t fb_area = (uint64_t)ctx->fb.width * (uint64_t)ctx->fb.height;
+    if (fb_area == 0ull) return 0;
+
+    uint64_t dirty_area = sl_dirty_total_area();
+    return (dirty_area * 100ull) >= (fb_area * (uint64_t)SL_DIRTY_FULL_AREA_THRESHOLD_PCT);
+}
+
+static int sl_dirty_coalesce_best_pair(void) {
+    if (g_dirty.count < 2u) return 0;
+
+    size_t best_i = 0u;
+    size_t best_j = 1u;
+    uint64_t best_penalty = UINT64_MAX;
+
+    for (size_t i = 0; i + 1u < g_dirty.count; i++) {
+        for (size_t j = i + 1u; j < g_dirty.count; j++) {
+            sl_rect_t u = sl_rect_union(&g_dirty.rects[i], &g_dirty.rects[j]);
+            uint64_t ua = sl_rect_area(&u);
+            uint64_t a = sl_rect_area(&g_dirty.rects[i]);
+            uint64_t b = sl_rect_area(&g_dirty.rects[j]);
+            uint64_t ab = a + b;
+            uint64_t penalty = (ua > ab) ? (ua - ab) : 0ull;
+            if (penalty < best_penalty) {
+                best_penalty = penalty;
+                best_i = i;
+                best_j = j;
+            }
+        }
+    }
+
+    g_dirty.rects[best_i] = sl_rect_union(&g_dirty.rects[best_i], &g_dirty.rects[best_j]);
+    g_dirty.rects[best_j] = g_dirty.rects[g_dirty.count - 1u];
+    g_dirty.count--;
+    return 1;
+}
+
 void sl_dirty_mark_full(void) {
     g_dirty.full = 1u;
     g_dirty.count = 0;
@@ -152,15 +207,26 @@ void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint3
                 }
                 j++;
             }
+            if (sl_dirty_should_mark_full(ctx)) {
+                sl_dirty_mark_full();
+            }
             return;
         }
     }
 
     if (g_dirty.count >= SL_DIRTY_MAX_RECTS) {
-        sl_dirty_mark_full();
-        return;
+        while (g_dirty.count >= SL_DIRTY_MAX_RECTS && g_dirty.count > 1u) {
+            if (!sl_dirty_coalesce_best_pair()) break;
+        }
+        if (g_dirty.count >= SL_DIRTY_MAX_RECTS) {
+            sl_dirty_mark_full();
+            return;
+        }
     }
     g_dirty.rects[g_dirty.count++] = in;
+    if (sl_dirty_should_mark_full(ctx)) {
+        sl_dirty_mark_full();
+    }
 }
 
 static void sl_dirty_add_padded(const sl_ctx_t *ctx, uint32_t x, uint32_t y,
