@@ -122,27 +122,27 @@ static void sdk_demo_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *user
     uint32_t x = body_x + 10u;
     uint32_t y = body_y + 10u;
 
-    sl_ui_label(&s->ui, x, y, "PeOS Starlight UI SDK (MVP)", 230u, 230u, 230u);
+    sl_ui_label(&s->ui, x, y, "PeOS Starlight UI SDK (MVP)", SL_UI_COLOR_TEXT_PRIMARY);
     y += 18u;
 
     (void)sl_ui_button(&s->ui, 1u, x + SDK_DEMO_BTN_X - 10u, y, SDK_DEMO_BTN_W, SDK_DEMO_BTN_H, "Click me");
 
     char clicks_str[16];
     sdk_demo_u32_to_str(s->clicks, clicks_str, sizeof(clicks_str));
-    sl_ui_label(&s->ui, x + 132u, y + 8u, "clicks:", 180u, 180u, 180u);
-    sl_ui_label(&s->ui, x + 188u, y + 8u, clicks_str, 255u, 255u, 255u);
+    sl_ui_label(&s->ui, x + 132u, y + 8u, "clicks:", SL_UI_COLOR_TEXT_SECONDARY);
+    sl_ui_label(&s->ui, x + 188u, y + 8u, clicks_str, SL_UI_COLOR_TEXT_PRIMARY);
 
     y += 36u;
-    sl_ui_label(&s->ui, x, y, "Slider:", 190u, 190u, 190u);
+    sl_ui_label(&s->ui, x, y, "Slider:", SL_UI_COLOR_TEXT_SECONDARY);
     y += 14u;
     (void)sl_ui_slider_u32(&s->ui, 2u, x, y, 220u, 0u, 100u, &s->slider);
 
     char slider_str[16];
     sdk_demo_u32_to_str(s->slider, slider_str, sizeof(slider_str));
-    sl_ui_label(&s->ui, x + 230u, y + 4u, slider_str, 255u, 255u, 255u);
+    sl_ui_label(&s->ui, x + 230u, y + 4u, slider_str, SL_UI_COLOR_TEXT_PRIMARY);
 
     y += 28u;
-    sl_ui_label(&s->ui, x, y, "Image:", 190u, 190u, 190u);
+    sl_ui_label(&s->ui, x, y, "Image:", SL_UI_COLOR_TEXT_SECONDARY);
     y += 14u;
     sl_ui_image_rgba(&s->ui, x, y, 96u, 96u, s->image_rgba, 32u, 32u, 32u * 4u);
 

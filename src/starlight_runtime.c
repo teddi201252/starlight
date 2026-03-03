@@ -1,5 +1,6 @@
 #include "starlight_internal.h"
 #include "starlight_input.h"
+#include "ui_sdk.h"
 #include "render/pixels.h"
 
 #include <stdio.h>
@@ -219,6 +220,102 @@ static int sl_parse_u32(const char *s, uint32_t *out) {
     return 1;
 }
 
+static int sl_hex_nibble(char c, uint8_t *out) {
+    if (!out) return 0;
+    if (c >= '0' && c <= '9') {
+        *out = (uint8_t)(c - '0');
+        return 1;
+    }
+    if (c >= 'a' && c <= 'f') {
+        *out = (uint8_t)(10 + (c - 'a'));
+        return 1;
+    }
+    if (c >= 'A' && c <= 'F') {
+        *out = (uint8_t)(10 + (c - 'A'));
+        return 1;
+    }
+    return 0;
+}
+
+static int sl_parse_hex_byte(const char *s, uint8_t *out) {
+    if (!s || !out) return 0;
+    uint8_t hi = 0u;
+    uint8_t lo = 0u;
+    if (!sl_hex_nibble(s[0], &hi) || !sl_hex_nibble(s[1], &lo)) return 0;
+    *out = (uint8_t)((hi << 4u) | lo);
+    return 1;
+}
+
+static int sl_parse_color_hex(const char *s, sl_ui_color_t *out) {
+    if (!s || !out) return 0;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '#') s++;
+    if (strlen(s) != 6u) return 0;
+    uint8_t r = 0u, g = 0u, b = 0u;
+    if (!sl_parse_hex_byte(s, &r) ||
+        !sl_parse_hex_byte(s + 2, &g) ||
+        !sl_parse_hex_byte(s + 4, &b)) return 0;
+    out->r = r;
+    out->g = g;
+    out->b = b;
+    return 1;
+}
+
+static int sl_parse_color_rgb_triplet(const char *s, sl_ui_color_t *out) {
+    if (!s || !out) return 0;
+    char tmp[48];
+    sl_copy_text(tmp, sizeof(tmp), s);
+
+    char *a = sl_trim(tmp);
+    char *comma1 = strchr(a, ',');
+    if (!comma1) return 0;
+    *comma1 = '\0';
+    char *b = sl_trim(comma1 + 1);
+    char *comma2 = strchr(b, ',');
+    if (!comma2) return 0;
+    *comma2 = '\0';
+    char *c = sl_trim(comma2 + 1);
+
+    uint32_t rv = 0u, gv = 0u, bv = 0u;
+    if (!sl_parse_u32(sl_trim(a), &rv) ||
+        !sl_parse_u32(sl_trim(b), &gv) ||
+        !sl_parse_u32(sl_trim(c), &bv)) return 0;
+    if (rv > 255u || gv > 255u || bv > 255u) return 0;
+
+    out->r = (uint8_t)rv;
+    out->g = (uint8_t)gv;
+    out->b = (uint8_t)bv;
+    return 1;
+}
+
+static int sl_parse_theme_color(const char *s, sl_ui_color_t *out) {
+    if (!s || !out) return 0;
+    if (strchr(s, ',')) return sl_parse_color_rgb_triplet(s, out);
+    return sl_parse_color_hex(s, out);
+}
+
+static int sl_theme_token_from_key(const char *key, sl_ui_color_token_t *out) {
+    if (!key || !out) return 0;
+    if (strcmp(key, "bg_canvas") == 0) *out = SL_UI_COLOR_BG_CANVAS;
+    else if (strcmp(key, "bg_panel") == 0) *out = SL_UI_COLOR_BG_PANEL;
+    else if (strcmp(key, "bg_control") == 0) *out = SL_UI_COLOR_BG_CONTROL;
+    else if (strcmp(key, "bg_control_hover") == 0) *out = SL_UI_COLOR_BG_CONTROL_HOVER;
+    else if (strcmp(key, "bg_control_active") == 0) *out = SL_UI_COLOR_BG_CONTROL_ACTIVE;
+    else if (strcmp(key, "border") == 0) *out = SL_UI_COLOR_BORDER;
+    else if (strcmp(key, "border_focus") == 0) *out = SL_UI_COLOR_BORDER_FOCUS;
+    else if (strcmp(key, "text_primary") == 0) *out = SL_UI_COLOR_TEXT_PRIMARY;
+    else if (strcmp(key, "text_secondary") == 0) *out = SL_UI_COLOR_TEXT_SECONDARY;
+    else if (strcmp(key, "text_disabled") == 0) *out = SL_UI_COLOR_TEXT_DISABLED;
+    else if (strcmp(key, "accent") == 0) *out = SL_UI_COLOR_ACCENT;
+    else if (strcmp(key, "accent_hover") == 0) *out = SL_UI_COLOR_ACCENT_HOVER;
+    else if (strcmp(key, "accent_active") == 0) *out = SL_UI_COLOR_ACCENT_ACTIVE;
+    else if (strcmp(key, "danger") == 0) *out = SL_UI_COLOR_DANGER;
+    else if (strcmp(key, "success") == 0) *out = SL_UI_COLOR_SUCCESS;
+    else if (strcmp(key, "warning") == 0) *out = SL_UI_COLOR_WARNING;
+    else return 0;
+    return 1;
+}
+
 static void sl_ensure_config_dirs(void) {
     (void)mkdir("/system", 0755);
     (void)mkdir(SL_OS_CONFIG_DIR, 0755);
@@ -278,6 +375,30 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "background=%s\n", SL_RESOURCE_BACKGROUND_ALT);
     (void)fprintf(f, "cursor=%s\n", SL_RESOURCE_CURSOR);
     (void)fprintf(f, "cursor_scale=100\n");
+    (void)fclose(f);
+}
+
+static void sl_write_default_theme_config(void) {
+    FILE *f = fopen(SL_RESOURCE_THEME_FILE, "w");
+    if (!f) return;
+    (void)fprintf(f, "# Starlight UI theme\n");
+    (void)fprintf(f, "# Accepted value formats: #RRGGBB, RRGGBB, or R,G,B\n");
+    (void)fprintf(f, "bg_canvas=1A1A1A\n");
+    (void)fprintf(f, "bg_panel=262626\n");
+    (void)fprintf(f, "bg_control=646464\n");
+    (void)fprintf(f, "bg_control_hover=787878\n");
+    (void)fprintf(f, "bg_control_active=505050\n");
+    (void)fprintf(f, "border=828282\n");
+    (void)fprintf(f, "border_focus=78C8FF\n");
+    (void)fprintf(f, "text_primary=F0F0F0\n");
+    (void)fprintf(f, "text_secondary=B8B8B8\n");
+    (void)fprintf(f, "text_disabled=969696\n");
+    (void)fprintf(f, "accent=469650\n");
+    (void)fprintf(f, "accent_hover=5AAA64\n");
+    (void)fprintf(f, "accent_active=368440\n");
+    (void)fprintf(f, "danger=B43E3E\n");
+    (void)fprintf(f, "success=58A860\n");
+    (void)fprintf(f, "warning=BE9442\n");
     (void)fclose(f);
 }
 
@@ -372,6 +493,49 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     free(cfg);
 }
 
+static void sl_load_theme_config(void) {
+    sl_ui_theme_t theme;
+    sl_ui_theme_set_default(&theme);
+
+    char *cfg = sl_load_text_file(SL_RESOURCE_THEME_FILE, SL_CFG_FILE_MAX);
+    if (!cfg) {
+        sl_write_default_theme_config();
+        sl_ui_theme_runtime_set(&theme);
+        return;
+    }
+
+    char line[SL_CFG_LINE_MAX];
+    size_t li = 0;
+    for (size_t i = 0;; i++) {
+        char c = cfg[i];
+        if (c != '\0' && c != '\n') {
+            if (li + 1u < sizeof(line)) line[li++] = c;
+            continue;
+        }
+        line[li] = '\0';
+        li = 0;
+
+        char *p = sl_trim(line);
+        if (p[0] != '\0' && p[0] != '#' && p[0] != ';') {
+            char *eq = strchr(p, '=');
+            if (eq) {
+                *eq = '\0';
+                char *key = sl_trim(p);
+                char *val = sl_trim(eq + 1);
+                sl_ui_color_token_t token;
+                sl_ui_color_t color;
+                if (sl_theme_token_from_key(key, &token) && sl_parse_theme_color(val, &color)) {
+                    theme.colors[token] = color;
+                }
+            }
+        }
+        if (c == '\0') break;
+    }
+    free(cfg);
+
+    sl_ui_theme_runtime_set(&theme);
+}
+
 char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap) {
     if (!out || out_cap == 0) return NULL;
 
@@ -453,6 +617,7 @@ int sl_init(sl_ctx_t *ctx) {
     sl_ensure_config_dirs();
     sl_load_display_config(ctx);
     sl_load_starlight_config(ctx);
+    sl_load_theme_config();
 
     if ((ctx->display_width == 0u && ctx->display_height == 0u) ||
         (ctx->display_width > 0u && ctx->display_height > 0u)) {
@@ -490,6 +655,7 @@ void sl_reload_display(sl_ctx_t *ctx) {
     if (!ctx) return;
 
     sl_load_starlight_config(ctx);
+    sl_load_theme_config();
 
     if (ctx->bg_loaded) {
         sl_image_free(&ctx->bg_image);
@@ -500,6 +666,12 @@ void sl_reload_display(sl_ctx_t *ctx) {
     sl_cursor_init(ctx);
     if (ctx->hw_cursor) sl_hw_cursor_sync_pos(ctx);
 
+    sl_dirty_mark_full();
+}
+
+void sl_reload_theme(sl_ctx_t *ctx) {
+    (void)ctx;
+    sl_load_theme_config();
     sl_dirty_mark_full();
 }
 

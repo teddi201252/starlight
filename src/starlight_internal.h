@@ -15,6 +15,7 @@ void sl_audio_shutdown(void);
 int sl_init(sl_ctx_t *ctx);
 void sl_shutdown(sl_ctx_t *ctx);
 void sl_reload_display(sl_ctx_t *ctx);
+void sl_reload_theme(sl_ctx_t *ctx);
 int sl_handle_input(sl_ctx_t *ctx);
 void sl_render_full(sl_ctx_t *ctx);
 void sl_render_dirty_background(sl_ctx_t *ctx);

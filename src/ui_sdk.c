@@ -1,5 +1,117 @@
 #include "ui_sdk.h"
 
+static sl_ui_theme_t g_runtime_theme;
+static uint32_t g_runtime_theme_version = 1u;
+static uint8_t g_runtime_theme_initialized = 0u;
+
+static sl_ui_color_t sl_ui_rgb(uint8_t r, uint8_t g, uint8_t b) {
+    sl_ui_color_t c;
+    c.r = r;
+    c.g = g;
+    c.b = b;
+    return c;
+}
+
+void sl_ui_theme_set_default(sl_ui_theme_t *theme) {
+    if (!theme) return;
+    theme->colors[SL_UI_COLOR_BG_CANVAS] = sl_ui_rgb(26u, 26u, 26u);
+    theme->colors[SL_UI_COLOR_BG_PANEL] = sl_ui_rgb(38u, 38u, 38u);
+    theme->colors[SL_UI_COLOR_BG_CONTROL] = sl_ui_rgb(100u, 100u, 100u);
+    theme->colors[SL_UI_COLOR_BG_CONTROL_HOVER] = sl_ui_rgb(120u, 120u, 120u);
+    theme->colors[SL_UI_COLOR_BG_CONTROL_ACTIVE] = sl_ui_rgb(80u, 80u, 80u);
+    theme->colors[SL_UI_COLOR_BORDER] = sl_ui_rgb(130u, 130u, 130u);
+    theme->colors[SL_UI_COLOR_BORDER_FOCUS] = sl_ui_rgb(120u, 200u, 255u);
+    theme->colors[SL_UI_COLOR_TEXT_PRIMARY] = sl_ui_rgb(240u, 240u, 240u);
+    theme->colors[SL_UI_COLOR_TEXT_SECONDARY] = sl_ui_rgb(184u, 184u, 184u);
+    theme->colors[SL_UI_COLOR_TEXT_DISABLED] = sl_ui_rgb(150u, 150u, 150u);
+    theme->colors[SL_UI_COLOR_ACCENT] = sl_ui_rgb(70u, 150u, 80u);
+    theme->colors[SL_UI_COLOR_ACCENT_HOVER] = sl_ui_rgb(90u, 170u, 100u);
+    theme->colors[SL_UI_COLOR_ACCENT_ACTIVE] = sl_ui_rgb(54u, 132u, 64u);
+    theme->colors[SL_UI_COLOR_DANGER] = sl_ui_rgb(180u, 62u, 62u);
+    theme->colors[SL_UI_COLOR_SUCCESS] = sl_ui_rgb(88u, 168u, 96u);
+    theme->colors[SL_UI_COLOR_WARNING] = sl_ui_rgb(190u, 148u, 66u);
+}
+
+void sl_ui_theme_apply(sl_ui_ctx_t *ui, const sl_ui_theme_t *theme) {
+    if (!ui || !theme) return;
+    ui->theme = *theme;
+    ui->theme_initialized = 1u;
+    ui->theme_version = g_runtime_theme_version;
+}
+
+void sl_ui_theme_reset(sl_ui_ctx_t *ui) {
+    if (!ui) return;
+    sl_ui_theme_set_default(&ui->theme);
+    ui->theme_initialized = 1u;
+    ui->theme_version = g_runtime_theme_version;
+}
+
+void sl_ui_theme_set_accent(sl_ui_ctx_t *ui, uint8_t r, uint8_t g, uint8_t b) {
+    if (!ui) return;
+    if (!ui->theme_initialized) sl_ui_theme_reset(ui);
+    ui->theme.colors[SL_UI_COLOR_ACCENT] = sl_ui_rgb(r, g, b);
+    ui->theme.colors[SL_UI_COLOR_ACCENT_HOVER] = sl_ui_rgb(
+        (uint8_t)((r + 28u > 255u) ? 255u : r + 28u),
+        (uint8_t)((g + 28u > 255u) ? 255u : g + 28u),
+        (uint8_t)((b + 28u > 255u) ? 255u : b + 28u));
+    ui->theme.colors[SL_UI_COLOR_ACCENT_ACTIVE] = sl_ui_rgb(
+        (uint8_t)((r > 24u) ? (r - 24u) : 0u),
+        (uint8_t)((g > 24u) ? (g - 24u) : 0u),
+        (uint8_t)((b > 24u) ? (b - 24u) : 0u));
+}
+
+const sl_ui_color_t *sl_ui_theme_color(const sl_ui_ctx_t *ui, sl_ui_color_token_t token) {
+    static const sl_ui_color_t fallback = {255u, 0u, 255u};
+    if (!ui || token >= SL_UI_COLOR_COUNT) return &fallback;
+    return &ui->theme.colors[token];
+}
+
+void sl_ui_theme_runtime_set(const sl_ui_theme_t *theme) {
+    if (!theme) return;
+    g_runtime_theme = *theme;
+    g_runtime_theme_initialized = 1u;
+    g_runtime_theme_version++;
+    if (g_runtime_theme_version == 0u) g_runtime_theme_version = 1u;
+}
+
+void sl_ui_theme_runtime_get(sl_ui_theme_t *out) {
+    if (!out) return;
+    if (!g_runtime_theme_initialized) {
+        sl_ui_theme_set_default(&g_runtime_theme);
+        g_runtime_theme_initialized = 1u;
+    }
+    *out = g_runtime_theme;
+}
+
+static void sl_ui_fill_tok(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h, sl_ui_color_token_t token) {
+    const sl_ui_color_t *c = sl_ui_theme_color(ui, token);
+    sl_fill_rect(ui->ctx, x, y, w, h, c->r, c->g, c->b);
+}
+
+static void sl_ui_text_tok(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text, sl_ui_color_token_t token) {
+    const sl_ui_color_t *c = sl_ui_theme_color(ui, token);
+    sl_draw_text(ui->ctx, x, y, text, c->r, c->g, c->b);
+}
+
+static sl_ui_color_token_t sl_ui_state_fill_token(sl_ui_control_state_t state) {
+    switch (state) {
+        case SL_UI_STATE_HOVER: return SL_UI_COLOR_BG_CONTROL_HOVER;
+        case SL_UI_STATE_ACTIVE: return SL_UI_COLOR_BG_CONTROL_ACTIVE;
+        case SL_UI_STATE_DISABLED: return SL_UI_COLOR_BG_PANEL;
+        case SL_UI_STATE_FOCUSED: return SL_UI_COLOR_BG_PANEL;
+        case SL_UI_STATE_NORMAL:
+        default: return SL_UI_COLOR_BG_CONTROL;
+    }
+}
+
+static sl_ui_color_token_t sl_ui_state_text_token(sl_ui_control_state_t state) {
+    return (state == SL_UI_STATE_DISABLED) ? SL_UI_COLOR_TEXT_DISABLED : SL_UI_COLOR_TEXT_PRIMARY;
+}
+
+static sl_ui_color_token_t sl_ui_state_border_token(sl_ui_control_state_t state) {
+    return (state == SL_UI_STATE_FOCUSED) ? SL_UI_COLOR_BORDER_FOCUS : SL_UI_COLOR_BORDER;
+}
+
 static int sl_ui_point_in_rect(uint32_t px, uint32_t py,
                                uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (w == 0u || h == 0u) return 0;
@@ -23,10 +135,25 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
     ui->wheel_x = wheel_x;
     ui->wheel_y = wheel_y;
     ui->wheel_consumed = 0u;
+    if (!g_runtime_theme_initialized) {
+        sl_ui_theme_set_default(&g_runtime_theme);
+        g_runtime_theme_initialized = 1u;
+    }
+    if (!ui->theme_initialized || ui->theme_version != g_runtime_theme_version) {
+        ui->theme = g_runtime_theme;
+        ui->theme_initialized = 1u;
+        ui->theme_version = g_runtime_theme_version;
+    }
 }
 
 void sl_ui_label(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text,
-                 uint8_t r, uint8_t g, uint8_t b) {
+                 sl_ui_color_token_t token) {
+    if (!ui || !ui->ctx || !text) return;
+    sl_ui_text_tok(ui, x, y, text, token);
+}
+
+void sl_ui_label_rgb(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text,
+                     uint8_t r, uint8_t g, uint8_t b) {
     if (!ui || !ui->ctx || !text) return;
     sl_draw_text(ui->ctx, x, y, text, r, g, b);
 }
@@ -48,29 +175,18 @@ uint8_t sl_ui_button_state(sl_ui_ctx_t *ui, uint32_t id,
     }
 
     int active = (ui->active_id == id);
-    uint8_t br = 100u, bg = 100u, bb = 100u;
-    if (!enabled) {
-        br = 58u; bg = 58u; bb = 58u;
-    } else {
-        if (hovered) { br = 120u; bg = 120u; bb = 120u; }
-        if (active && ui->mouse_down) { br = 80u; bg = 80u; bb = 80u; }
-    }
+    sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
+    if (!enabled) state = SL_UI_STATE_DISABLED;
+    else if (active && ui->mouse_down) state = SL_UI_STATE_ACTIVE;
+    else if (hovered) state = SL_UI_STATE_HOVER;
 
-    sl_fill_rect(ui->ctx, x, y, w, h, br, bg, bb);
-    if (enabled) {
-        sl_fill_rect(ui->ctx, x, y, w, 1u, 220u, 220u, 220u);
-        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 40u, 40u, 40u);
-        sl_fill_rect(ui->ctx, x, y, 1u, h, 220u, 220u, 220u);
-        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 40u, 40u, 40u);
-        sl_draw_text(ui->ctx, x + 6u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), text, 255u, 255u, 255u);
-    } else {
-        sl_fill_rect(ui->ctx, x, y, w, 1u, 100u, 100u, 100u);
-        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 28u, 28u, 28u);
-        sl_fill_rect(ui->ctx, x, y, 1u, h, 100u, 100u, 100u);
-        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 28u, 28u, 28u);
-        sl_draw_text(ui->ctx, x + 6u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), text, 170u, 170u, 170u);
-        if (active) ui->active_id = 0u;
-    }
+    sl_ui_fill_tok(ui, x, y, w, h, sl_ui_state_fill_token(state));
+    sl_ui_fill_tok(ui, x, y, w, 1u, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x, y + h - 1u, w, 1u, SL_UI_COLOR_BG_CANVAS);
+    sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, SL_UI_COLOR_BG_CANVAS);
+    sl_ui_text_tok(ui, x + 6u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), text, sl_ui_state_text_token(state));
+    if (!enabled && active) ui->active_id = 0u;
 
     if (enabled && ui->mouse_released && active) {
         ui->active_id = 0u;
@@ -122,7 +238,9 @@ uint8_t sl_ui_slider_u32_state(sl_ui_ctx_t *ui, uint32_t id,
         ui->active_id = 0u;
     }
 
-    sl_fill_rect(ui->ctx, x, y + 6u, w, 4u, enabled ? 70u : 52u, enabled ? 70u : 52u, enabled ? 70u : 52u);
+    sl_ui_control_state_t state = enabled ? SL_UI_STATE_NORMAL : SL_UI_STATE_DISABLED;
+    if (enabled && ui->active_id == id && ui->mouse_down) state = SL_UI_STATE_ACTIVE;
+    sl_ui_fill_tok(ui, x, y + 6u, w, 4u, (state == SL_UI_STATE_DISABLED) ? SL_UI_COLOR_BG_CANVAS : SL_UI_COLOR_BG_PANEL);
 
     uint32_t knob_x = track_x;
     if (max_v > min_v) {
@@ -135,11 +253,8 @@ uint8_t sl_ui_slider_u32_state(sl_ui_ctx_t *ui, uint32_t id,
     }
     if (knob_x + knob_w > x + w) knob_x = (x + w > knob_w) ? (x + w - knob_w) : x;
 
-    if (enabled) {
-        sl_fill_rect(ui->ctx, knob_x, y + 2u, knob_w, 12u, 190u, 190u, 80u);
-    } else {
-        sl_fill_rect(ui->ctx, knob_x, y + 2u, knob_w, 12u, 120u, 120u, 120u);
-    }
+    sl_ui_fill_tok(ui, knob_x, y + 2u, knob_w, 12u,
+                   (state == SL_UI_STATE_DISABLED) ? SL_UI_COLOR_TEXT_DISABLED : SL_UI_COLOR_ACCENT);
     return changed;
 }
 
@@ -236,21 +351,15 @@ uint8_t sl_ui_toggle_state(sl_ui_ctx_t *ui, uint32_t id,
         }
     }
 
-    uint8_t br = hovered ? 88u : 72u;
-    if (active && ui->mouse_down) br = 58u;
-    if (!enabled) br = 56u;
-    sl_fill_rect(ui->ctx, x, y, w, h, br, br, br);
-    if (enabled) {
-        sl_fill_rect(ui->ctx, x, y, w, 1u, 200u, 200u, 200u);
-        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 30u, 30u, 30u);
-        sl_fill_rect(ui->ctx, x, y, 1u, h, 200u, 200u, 200u);
-        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 30u, 30u, 30u);
-    } else {
-        sl_fill_rect(ui->ctx, x, y, w, 1u, 110u, 110u, 110u);
-        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 24u, 24u, 24u);
-        sl_fill_rect(ui->ctx, x, y, 1u, h, 110u, 110u, 110u);
-        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 24u, 24u, 24u);
-    }
+    sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
+    if (!enabled) state = SL_UI_STATE_DISABLED;
+    else if (active && ui->mouse_down) state = SL_UI_STATE_ACTIVE;
+    else if (hovered) state = SL_UI_STATE_HOVER;
+    sl_ui_fill_tok(ui, x, y, w, h, sl_ui_state_fill_token(state));
+    sl_ui_fill_tok(ui, x, y, w, 1u, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x, y + h - 1u, w, 1u, SL_UI_COLOR_BG_CANVAS);
+    sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, SL_UI_COLOR_BG_CANVAS);
 
     uint32_t sw_h = (h > 6u) ? (h - 6u) : 6u;
     uint32_t sw_w = sw_h * 2u;
@@ -259,19 +368,21 @@ uint8_t sl_ui_toggle_state(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t sw_x = x + w - sw_w - 4u;
     uint32_t sw_y = y + ((h > sw_h) ? ((h - sw_h) / 2u) : 0u);
 
-    if (*value) sl_fill_rect(ui->ctx, sw_x, sw_y, sw_w, sw_h, enabled ? 70u : 80u, enabled ? 150u : 80u, enabled ? 80u : 80u);
-    else sl_fill_rect(ui->ctx, sw_x, sw_y, sw_w, sw_h, 90u, 90u, 90u);
+    sl_ui_fill_tok(ui, sw_x, sw_y, sw_w, sw_h,
+                   *value ? (enabled ? SL_UI_COLOR_ACCENT : SL_UI_COLOR_BG_PANEL)
+                          : SL_UI_COLOR_BG_CANVAS);
 
     uint32_t knob_w = (sw_w > 4u) ? (sw_w / 2u - 1u) : sw_w;
     uint32_t knob_x = *value ? (sw_x + sw_w - knob_w - 1u) : (sw_x + 1u);
-    sl_fill_rect(ui->ctx, knob_x, sw_y + 1u, knob_w, (sw_h > 2u) ? (sw_h - 2u) : sw_h,
-                 enabled ? 230u : 170u, enabled ? 230u : 170u, enabled ? 230u : 170u);
+    sl_ui_fill_tok(ui, knob_x, sw_y + 1u, knob_w, (sw_h > 2u) ? (sw_h - 2u) : sw_h,
+                   enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
 
     if (text[0]) {
         uint32_t text_x = x + 6u;
         uint32_t text_y = y + ((h > 12u) ? ((h - 8u) / 2u) : 0u);
         if (text_x + 8u < sw_x) {
-            sl_draw_text(ui->ctx, text_x, text_y, text, enabled ? 245u : 170u, enabled ? 245u : 170u, enabled ? 245u : 170u);
+            sl_ui_text_tok(ui, text_x, text_y, text,
+                           enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
         }
     }
     if (!enabled && active) ui->active_id = 0u;
@@ -306,26 +417,21 @@ uint8_t sl_ui_select_cycle_state(sl_ui_ctx_t *ui, uint32_t id,
         }
     }
 
-    uint8_t br = hovered ? 92u : 74u;
-    if (active && ui->mouse_down) br = 60u;
-    if (!enabled) br = 56u;
-    sl_fill_rect(ui->ctx, x, y, w, h, br, br, br);
-    if (enabled) {
-        sl_fill_rect(ui->ctx, x, y, w, 1u, 210u, 210u, 210u);
-        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 30u, 30u, 30u);
-        sl_fill_rect(ui->ctx, x, y, 1u, h, 210u, 210u, 210u);
-        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 30u, 30u, 30u);
-    } else {
-        sl_fill_rect(ui->ctx, x, y, w, 1u, 110u, 110u, 110u);
-        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 24u, 24u, 24u);
-        sl_fill_rect(ui->ctx, x, y, 1u, h, 110u, 110u, 110u);
-        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 24u, 24u, 24u);
-    }
+    sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
+    if (!enabled) state = SL_UI_STATE_DISABLED;
+    else if (active && ui->mouse_down) state = SL_UI_STATE_ACTIVE;
+    else if (hovered) state = SL_UI_STATE_HOVER;
+    sl_ui_fill_tok(ui, x, y, w, h, sl_ui_state_fill_token(state));
+    sl_ui_fill_tok(ui, x, y, w, 1u, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x, y + h - 1u, w, 1u, SL_UI_COLOR_BG_CANVAS);
+    sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, SL_UI_COLOR_BG_CANVAS);
 
     uint32_t text_y = y + ((h > 12u) ? ((h - 8u) / 2u) : 0u);
-    sl_draw_text(ui->ctx, x + 6u, text_y, current_text,
-                 enabled ? 255u : 170u, enabled ? 255u : 170u, enabled ? 255u : 170u);
-    sl_draw_text(ui->ctx, x + w - 10u, text_y, ">", enabled ? 220u : 140u, enabled ? 220u : 140u, enabled ? 220u : 140u);
+    sl_ui_text_tok(ui, x + 6u, text_y, current_text,
+                   enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
+    sl_ui_text_tok(ui, x + w - 10u, text_y, ">",
+                   enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
     if (!enabled && active) ui->active_id = 0u;
     return changed;
 }
@@ -439,20 +545,15 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         }
     }
 
-    uint8_t bg = focused ? 42u : 26u;
-    if (!enabled) bg = 24u;
-    sl_fill_rect(ui->ctx, x, y, w, h, bg, bg, bg);
-    if (focused && enabled) {
-        sl_fill_rect(ui->ctx, x, y, w, 1u, 120u, 200u, 255u);
-        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 120u, 200u, 255u);
-        sl_fill_rect(ui->ctx, x, y, 1u, h, 120u, 200u, 255u);
-        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 120u, 200u, 255u);
-    } else {
-        sl_fill_rect(ui->ctx, x, y, w, 1u, 130u, 130u, 130u);
-        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 30u, 30u, 30u);
-        sl_fill_rect(ui->ctx, x, y, 1u, h, 130u, 130u, 130u);
-        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 30u, 30u, 30u);
-    }
+    sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
+    if (!enabled) state = SL_UI_STATE_DISABLED;
+    else if (focused) state = SL_UI_STATE_FOCUSED;
+    else if (hovered) state = SL_UI_STATE_HOVER;
+    sl_ui_fill_tok(ui, x, y, w, h, (state == SL_UI_STATE_FOCUSED) ? SL_UI_COLOR_BG_PANEL : SL_UI_COLOR_BG_CANVAS);
+    sl_ui_fill_tok(ui, x, y, w, 1u, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x, y + h - 1u, w, 1u, (state == SL_UI_STATE_FOCUSED) ? SL_UI_COLOR_BORDER_FOCUS : SL_UI_COLOR_BG_CANVAS);
+    sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, (state == SL_UI_STATE_FOCUSED) ? SL_UI_COLOR_BORDER_FOCUS : SL_UI_COLOR_BG_CANVAS);
 
     uint32_t vis_chars = (w > 12u) ? ((w - 12u) / 8u) : 0u;
     if (vis_chars > 0u) {
@@ -478,8 +579,8 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             }
         }
         draw_buf[n] = '\0';
-        sl_draw_text(ui->ctx, x + 6u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), draw_buf,
-                     enabled ? 240u : 150u, enabled ? 240u : 150u, enabled ? 240u : 150u);
+        sl_ui_text_tok(ui, x + 6u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), draw_buf,
+                       enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
     }
     return changed;
 }
@@ -657,20 +758,15 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         }
     }
 
-    uint8_t bg = focused ? 38u : 24u;
-    if (!enabled) bg = 22u;
-    sl_fill_rect(ui->ctx, x, y, w, h, bg, bg, bg);
-    if (focused && enabled) {
-        sl_fill_rect(ui->ctx, x, y, w, 1u, 120u, 200u, 255u);
-        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 120u, 200u, 255u);
-        sl_fill_rect(ui->ctx, x, y, 1u, h, 120u, 200u, 255u);
-        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 120u, 200u, 255u);
-    } else {
-        sl_fill_rect(ui->ctx, x, y, w, 1u, 120u, 120u, 120u);
-        sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 30u, 30u, 30u);
-        sl_fill_rect(ui->ctx, x, y, 1u, h, 120u, 120u, 120u);
-        sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 30u, 30u, 30u);
-    }
+    sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
+    if (!enabled) state = SL_UI_STATE_DISABLED;
+    else if (focused) state = SL_UI_STATE_FOCUSED;
+    else if (hovered) state = SL_UI_STATE_HOVER;
+    sl_ui_fill_tok(ui, x, y, w, h, (state == SL_UI_STATE_FOCUSED) ? SL_UI_COLOR_BG_PANEL : SL_UI_COLOR_BG_CANVAS);
+    sl_ui_fill_tok(ui, x, y, w, 1u, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x, y + h - 1u, w, 1u, (state == SL_UI_STATE_FOCUSED) ? SL_UI_COLOR_BORDER_FOCUS : SL_UI_COLOR_BG_CANVAS);
+    sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, (state == SL_UI_STATE_FOCUSED) ? SL_UI_COLOR_BORDER_FOCUS : SL_UI_COLOR_BG_CANVAS);
 
     uint32_t content_x = x + 6u;
     uint32_t content_y = y + 6u;
@@ -738,8 +834,8 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         }
         draw_buf[dn] = '\0';
 
-        sl_draw_text(ui->ctx, content_x, ly, draw_buf,
-                     enabled ? 240u : 150u, enabled ? 240u : 150u, enabled ? 240u : 150u);
+        sl_ui_text_tok(ui, content_x, ly, draw_buf,
+                       enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
 
         if (text[end] == '\n') start = end + 1u;
         else start = end;
@@ -840,16 +936,23 @@ uint8_t sl_ui_scroll_v_state(sl_ui_ctx_t *ui, uint32_t id,
     }
     if (ui->mouse_released && ui->active_id == id) ui->active_id = 0u;
 
-    sl_fill_rect(ui->ctx, x, y, w, h, enabled ? 36u : 30u, enabled ? 36u : 30u, enabled ? 36u : 30u);
-    sl_fill_rect(ui->ctx, x, y, w, 1u, 140u, 140u, 140u);
-    sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 30u, 30u, 30u);
-    sl_fill_rect(ui->ctx, x, y, 1u, h, 140u, 140u, 140u);
-    sl_fill_rect(ui->ctx, x + w - 1u, y, 1u, h, 30u, 30u, 30u);
+    sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
+    if (!enabled) state = SL_UI_STATE_DISABLED;
+    else if (ui->active_id == id && ui->mouse_down) state = SL_UI_STATE_ACTIVE;
+    else if (bar_hovered) state = SL_UI_STATE_HOVER;
+    sl_ui_fill_tok(ui, x, y, w, h, (state == SL_UI_STATE_DISABLED) ? SL_UI_COLOR_BG_CANVAS : SL_UI_COLOR_BG_PANEL);
+    sl_ui_fill_tok(ui, x, y, w, 1u, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x, y + h - 1u, w, 1u, SL_UI_COLOR_BG_CANVAS);
+    sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
+    sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, SL_UI_COLOR_BG_CANVAS);
 
-    sl_fill_rect(ui->ctx, track_x, track_y, track_w, track_h, enabled ? 54u : 44u, enabled ? 54u : 44u, enabled ? 54u : 44u);
-    uint8_t kb = (ui->active_id == id && ui->mouse_down) ? 170u : (knob_hovered ? 155u : 140u);
-    if (!enabled) kb = 112u;
-    sl_fill_rect(ui->ctx, track_x, knob_y, track_w, knob_h, kb, kb, kb);
+    sl_ui_fill_tok(ui, track_x, track_y, track_w, track_h,
+                   enabled ? SL_UI_COLOR_BG_CONTROL_ACTIVE : SL_UI_COLOR_BG_CANVAS);
+    sl_ui_color_token_t knob_t = SL_UI_COLOR_BG_CONTROL;
+    if (!enabled) knob_t = SL_UI_COLOR_TEXT_DISABLED;
+    else if (ui->active_id == id && ui->mouse_down) knob_t = SL_UI_COLOR_ACCENT_ACTIVE;
+    else if (knob_hovered) knob_t = SL_UI_COLOR_ACCENT_HOVER;
+    sl_ui_fill_tok(ui, track_x, knob_y, track_w, knob_h, knob_t);
     if (!enabled && ui->active_id == id) ui->active_id = 0u;
     return changed;
 }
@@ -861,21 +964,34 @@ void sl_ui_image_rgba(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint3
 }
 
 void sl_ui_rect(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                uint8_t r, uint8_t g, uint8_t b) {
+                sl_ui_color_token_t token) {
+    if (!ui || !ui->ctx || w == 0u || h == 0u) return;
+    sl_ui_fill_tok(ui, x, y, w, h, token);
+}
+
+void sl_ui_rect_a(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                  sl_ui_color_token_t token, uint8_t a) {
+    if (!ui || !ui->ctx || w == 0u || h == 0u) return;
+    const sl_ui_color_t *c = sl_ui_theme_color(ui, token);
+    sl_fill_rect_a(ui->ctx, x, y, w, h, c->r, c->g, c->b, a);
+}
+
+void sl_ui_rect_rgb(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                    uint8_t r, uint8_t g, uint8_t b) {
     if (!ui || !ui->ctx || w == 0u || h == 0u) return;
     sl_fill_rect(ui->ctx, x, y, w, h, r, g, b);
 }
 
-void sl_ui_rect_a(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                  uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+void sl_ui_rect_a_rgb(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                      uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     if (!ui || !ui->ctx || w == 0u || h == 0u) return;
     sl_fill_rect_a(ui->ctx, x, y, w, h, r, g, b, a);
 }
 
 void sl_ui_separator(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w) {
     if (!ui || !ui->ctx || w == 0u) return;
-    sl_fill_rect(ui->ctx, x, y, w, 1u, 72u, 72u, 72u);
-    sl_fill_rect(ui->ctx, x, y + 1u, w, 1u, 28u, 28u, 28u);
+    sl_ui_fill_tok(ui, x, y, w, 1u, SL_UI_COLOR_BORDER);
+    sl_ui_fill_tok(ui, x, y + 1u, w, 1u, SL_UI_COLOR_BG_CANVAS);
 }
 
 uint8_t sl_ui_list_item(sl_ui_ctx_t *ui, uint32_t id,
@@ -895,21 +1011,22 @@ uint8_t sl_ui_list_item(sl_ui_ctx_t *ui, uint32_t id,
         if (hovered) changed = 1u;
     }
 
-    uint8_t bg = hovered ? 56u : 46u;
-    if (active && ui->mouse_down) bg = 40u;
-    if (!enabled) bg = 36u;
-    sl_fill_rect(ui->ctx, x, y, w, h, bg, bg, bg);
-    sl_fill_rect(ui->ctx, x, y + h - 1u, w, 1u, 28u, 28u, 28u);
+    sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
+    if (!enabled) state = SL_UI_STATE_DISABLED;
+    else if (active && ui->mouse_down) state = SL_UI_STATE_ACTIVE;
+    else if (hovered) state = SL_UI_STATE_HOVER;
+    sl_ui_fill_tok(ui, x, y, w, h, sl_ui_state_fill_token(state));
+    sl_ui_fill_tok(ui, x, y + h - 1u, w, 1u, SL_UI_COLOR_BG_CANVAS);
 
-    sl_draw_text(ui->ctx, x + 8u, y + 4u, title,
-                 enabled ? 242u : 160u, enabled ? 242u : 160u, enabled ? 242u : 160u);
+    sl_ui_text_tok(ui, x + 8u, y + 4u, title,
+                   enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
     if (subtitle[0]) {
         uint32_t sub_y = y + ((h > 22u) ? 14u : 12u);
-        sl_draw_text(ui->ctx, x + 8u, sub_y, subtitle,
-                     enabled ? 184u : 128u, enabled ? 184u : 128u, enabled ? 184u : 128u);
+        sl_ui_text_tok(ui, x + 8u, sub_y, subtitle,
+                       enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
     }
-    sl_draw_text(ui->ctx, x + w - 10u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), ">",
-                 enabled ? 180u : 120u, enabled ? 180u : 120u, enabled ? 180u : 120u);
+    sl_ui_text_tok(ui, x + w - 10u, y + ((h > 12u) ? ((h - 8u) / 2u) : 0u), ">",
+                   enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
 
     if (!enabled && active) ui->active_id = 0u;
     return changed;
