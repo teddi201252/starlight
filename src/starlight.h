@@ -33,6 +33,7 @@ typedef struct {
     uint32_t clip_h;
     char cursor_path[160];
     char background_path[160];
+    char font_manifest_path[160];
     uint32_t display_width;
     uint32_t display_height;
 

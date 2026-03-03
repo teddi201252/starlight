@@ -1,6 +1,7 @@
 #include "starlight_internal.h"
 #include "starlight_input.h"
 #include "ui_sdk.h"
+#include "render/font.h"
 #include "render/pixels.h"
 
 #include <stdio.h>
@@ -330,6 +331,7 @@ static void sl_ensure_config_dirs(void) {
     (void)mkdir("/system/apps", 0755);
     (void)mkdir(SL_RESOURCE_ROOT, 0755);
     (void)mkdir(SL_RESOURCE_CONFIG_DIR, 0755);
+    (void)mkdir(SL_RESOURCE_FONT_DIR, 0755);
 }
 
 static char *sl_load_text_file(const char *path, size_t max_bytes) {
@@ -383,6 +385,31 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "background=%s\n", SL_RESOURCE_BACKGROUND_ALT);
     (void)fprintf(f, "cursor=%s\n", SL_RESOURCE_CURSOR);
     (void)fprintf(f, "cursor_scale=100\n");
+    (void)fprintf(f, "font=%s\n", SL_RESOURCE_FONT_DEFAULT);
+    (void)fclose(f);
+}
+
+static void sl_write_default_font_manifest(void) {
+    FILE *f = fopen(SL_RESOURCE_FONT_DEFAULT, "w");
+    if (!f) return;
+    (void)fprintf(f, "# Starlight font manifest\n");
+    (void)fprintf(f, "# backend: builtin | atlas\n");
+    (void)fprintf(f, "backend=builtin\n");
+    (void)fprintf(f, "# For backend=atlas:\n");
+    (void)fprintf(f, "# image=/starlight/fonts/your_font.png\n");
+    (void)fprintf(f, "# map=/starlight/fonts/your_font.map\n");
+    (void)fprintf(f, "# first=32\n");
+    (void)fprintf(f, "# count=96\n");
+    (void)fprintf(f, "# cols=16\n");
+    (void)fprintf(f, "# glyph_w=8\n");
+    (void)fprintf(f, "# glyph_h=8\n");
+    (void)fprintf(f, "# render_w=8\n");
+    (void)fprintf(f, "# render_h=8\n");
+    (void)fprintf(f, "# render_off_x=0\n");
+    (void)fprintf(f, "# render_off_y=0\n");
+    (void)fprintf(f, "# advance=8\n");
+    (void)fprintf(f, "# line_h=8\n");
+    (void)fprintf(f, "# fallback_char=63\n");
     (void)fclose(f);
 }
 
@@ -456,11 +483,13 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     if (!ctx) return;
     sl_copy_text(ctx->background_path, sizeof(ctx->background_path), SL_RESOURCE_BACKGROUND_ALT);
     sl_copy_text(ctx->cursor_path, sizeof(ctx->cursor_path), SL_RESOURCE_CURSOR);
+    sl_copy_text(ctx->font_manifest_path, sizeof(ctx->font_manifest_path), SL_RESOURCE_FONT_DEFAULT);
     ctx->hw_cursor_scale_pct = SL_HW_CURSOR_SCALE_DEFAULT;
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
     if (!cfg) {
         sl_write_default_starlight_config();
+        sl_write_default_font_manifest();
         return;
     }
 
@@ -486,6 +515,8 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     sl_copy_text(ctx->background_path, sizeof(ctx->background_path), val);
                 } else if (strcmp(key, "cursor") == 0 && val[0]) {
                     sl_copy_text(ctx->cursor_path, sizeof(ctx->cursor_path), val);
+                } else if (strcmp(key, "font") == 0 && val[0]) {
+                    sl_copy_text(ctx->font_manifest_path, sizeof(ctx->font_manifest_path), val);
                 } else if (strcmp(key, "cursor_scale") == 0) {
                     uint32_t n = 0;
                     // Backward-compatible: accept legacy tiny scales (eg. "2")
@@ -626,6 +657,10 @@ int sl_init(sl_ctx_t *ctx) {
     sl_load_display_config(ctx);
     sl_load_starlight_config(ctx);
     sl_load_theme_config();
+    sl_font_reset_default();
+    if (ctx->font_manifest_path[0]) {
+        (void)sl_font_load_manifest_default(ctx->font_manifest_path);
+    }
 
     if ((ctx->display_width == 0u && ctx->display_height == 0u) ||
         (ctx->display_width > 0u && ctx->display_height > 0u)) {
@@ -657,6 +692,7 @@ void sl_shutdown(sl_ctx_t *ctx) {
     if (ctx->hw_cursor) (void)peos_cursor_set_visible(0);
     if (ctx->input_raw) (void)peos_input_mode(PEOS_INPUT_MODE_COOKED);
     if (ctx->frame) (void)peos_munmap((uint64_t)(uintptr_t)ctx->frame, ctx->map_bytes);
+    sl_font_shutdown();
 }
 
 void sl_reload_display(sl_ctx_t *ctx) {
@@ -664,6 +700,10 @@ void sl_reload_display(sl_ctx_t *ctx) {
 
     sl_load_starlight_config(ctx);
     sl_load_theme_config();
+    sl_font_reset_default();
+    if (ctx->font_manifest_path[0]) {
+        (void)sl_font_load_manifest_default(ctx->font_manifest_path);
+    }
 
     if (ctx->bg_loaded) {
         sl_image_free(&ctx->bg_image);
