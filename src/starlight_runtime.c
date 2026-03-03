@@ -250,14 +250,16 @@ static int sl_parse_color_hex(const char *s, sl_ui_color_t *out) {
     if (!s || !out) return 0;
     while (*s == ' ' || *s == '\t') s++;
     if (*s == '#') s++;
-    if (strlen(s) != 6u) return 0;
-    uint8_t r = 0u, g = 0u, b = 0u;
+    if (strlen(s) != 6u && strlen(s) != 8u) return 0;
+    uint8_t r = 0u, g = 0u, b = 0u, a = 255u;
     if (!sl_parse_hex_byte(s, &r) ||
         !sl_parse_hex_byte(s + 2, &g) ||
         !sl_parse_hex_byte(s + 4, &b)) return 0;
+    if (strlen(s) == 8u && !sl_parse_hex_byte(s + 6, &a)) return 0;
     out->r = r;
     out->g = g;
     out->b = b;
+    out->a = a;
     return 1;
 }
 
@@ -275,16 +277,22 @@ static int sl_parse_color_rgb_triplet(const char *s, sl_ui_color_t *out) {
     if (!comma2) return 0;
     *comma2 = '\0';
     char *c = sl_trim(comma2 + 1);
+    char *comma3 = strchr(c, ',');
 
-    uint32_t rv = 0u, gv = 0u, bv = 0u;
+    uint32_t rv = 0u, gv = 0u, bv = 0u, av = 255u;
+    if (comma3) {
+        *comma3 = '\0';
+        if (!sl_parse_u32(sl_trim(comma3 + 1), &av)) return 0;
+    }
     if (!sl_parse_u32(sl_trim(a), &rv) ||
         !sl_parse_u32(sl_trim(b), &gv) ||
         !sl_parse_u32(sl_trim(c), &bv)) return 0;
-    if (rv > 255u || gv > 255u || bv > 255u) return 0;
+    if (rv > 255u || gv > 255u || bv > 255u || av > 255u) return 0;
 
     out->r = (uint8_t)rv;
     out->g = (uint8_t)gv;
     out->b = (uint8_t)bv;
+    out->a = (uint8_t)av;
     return 1;
 }
 

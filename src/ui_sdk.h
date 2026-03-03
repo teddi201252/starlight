@@ -7,6 +7,7 @@ typedef struct {
     uint8_t r;
     uint8_t g;
     uint8_t b;
+    uint8_t a;
 } sl_ui_color_t;
 
 typedef enum {
@@ -101,6 +102,7 @@ void sl_ui_theme_set_default(sl_ui_theme_t *theme);
 void sl_ui_theme_apply(sl_ui_ctx_t *ui, const sl_ui_theme_t *theme);
 void sl_ui_theme_reset(sl_ui_ctx_t *ui);
 void sl_ui_theme_set_accent(sl_ui_ctx_t *ui, uint8_t r, uint8_t g, uint8_t b);
+void sl_ui_theme_set_accent_a(sl_ui_ctx_t *ui, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 const sl_ui_color_t *sl_ui_theme_color(const sl_ui_ctx_t *ui, sl_ui_color_token_t token);
 void sl_ui_theme_runtime_set(const sl_ui_theme_t *theme);
 void sl_ui_theme_runtime_get(sl_ui_theme_t *out);

@@ -4,32 +4,33 @@ static sl_ui_theme_t g_runtime_theme;
 static uint32_t g_runtime_theme_version = 1u;
 static uint8_t g_runtime_theme_initialized = 0u;
 
-static sl_ui_color_t sl_ui_rgb(uint8_t r, uint8_t g, uint8_t b) {
+static sl_ui_color_t sl_ui_rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     sl_ui_color_t c;
     c.r = r;
     c.g = g;
     c.b = b;
+    c.a = a;
     return c;
 }
 
 void sl_ui_theme_set_default(sl_ui_theme_t *theme) {
     if (!theme) return;
-    theme->colors[SL_UI_COLOR_BG_CANVAS] = sl_ui_rgb(26u, 26u, 26u);
-    theme->colors[SL_UI_COLOR_BG_PANEL] = sl_ui_rgb(38u, 38u, 38u);
-    theme->colors[SL_UI_COLOR_BG_CONTROL] = sl_ui_rgb(100u, 100u, 100u);
-    theme->colors[SL_UI_COLOR_BG_CONTROL_HOVER] = sl_ui_rgb(120u, 120u, 120u);
-    theme->colors[SL_UI_COLOR_BG_CONTROL_ACTIVE] = sl_ui_rgb(80u, 80u, 80u);
-    theme->colors[SL_UI_COLOR_BORDER] = sl_ui_rgb(130u, 130u, 130u);
-    theme->colors[SL_UI_COLOR_BORDER_FOCUS] = sl_ui_rgb(120u, 200u, 255u);
-    theme->colors[SL_UI_COLOR_TEXT_PRIMARY] = sl_ui_rgb(240u, 240u, 240u);
-    theme->colors[SL_UI_COLOR_TEXT_SECONDARY] = sl_ui_rgb(184u, 184u, 184u);
-    theme->colors[SL_UI_COLOR_TEXT_DISABLED] = sl_ui_rgb(150u, 150u, 150u);
-    theme->colors[SL_UI_COLOR_ACCENT] = sl_ui_rgb(70u, 150u, 80u);
-    theme->colors[SL_UI_COLOR_ACCENT_HOVER] = sl_ui_rgb(90u, 170u, 100u);
-    theme->colors[SL_UI_COLOR_ACCENT_ACTIVE] = sl_ui_rgb(54u, 132u, 64u);
-    theme->colors[SL_UI_COLOR_DANGER] = sl_ui_rgb(180u, 62u, 62u);
-    theme->colors[SL_UI_COLOR_SUCCESS] = sl_ui_rgb(88u, 168u, 96u);
-    theme->colors[SL_UI_COLOR_WARNING] = sl_ui_rgb(190u, 148u, 66u);
+    theme->colors[SL_UI_COLOR_BG_CANVAS] = sl_ui_rgba(26u, 26u, 26u, 255u);
+    theme->colors[SL_UI_COLOR_BG_PANEL] = sl_ui_rgba(38u, 38u, 38u, 255u);
+    theme->colors[SL_UI_COLOR_BG_CONTROL] = sl_ui_rgba(100u, 100u, 100u, 255u);
+    theme->colors[SL_UI_COLOR_BG_CONTROL_HOVER] = sl_ui_rgba(120u, 120u, 120u, 255u);
+    theme->colors[SL_UI_COLOR_BG_CONTROL_ACTIVE] = sl_ui_rgba(80u, 80u, 80u, 255u);
+    theme->colors[SL_UI_COLOR_BORDER] = sl_ui_rgba(130u, 130u, 130u, 255u);
+    theme->colors[SL_UI_COLOR_BORDER_FOCUS] = sl_ui_rgba(120u, 200u, 255u, 255u);
+    theme->colors[SL_UI_COLOR_TEXT_PRIMARY] = sl_ui_rgba(240u, 240u, 240u, 255u);
+    theme->colors[SL_UI_COLOR_TEXT_SECONDARY] = sl_ui_rgba(184u, 184u, 184u, 255u);
+    theme->colors[SL_UI_COLOR_TEXT_DISABLED] = sl_ui_rgba(150u, 150u, 150u, 255u);
+    theme->colors[SL_UI_COLOR_ACCENT] = sl_ui_rgba(70u, 150u, 80u, 255u);
+    theme->colors[SL_UI_COLOR_ACCENT_HOVER] = sl_ui_rgba(90u, 170u, 100u, 255u);
+    theme->colors[SL_UI_COLOR_ACCENT_ACTIVE] = sl_ui_rgba(54u, 132u, 64u, 255u);
+    theme->colors[SL_UI_COLOR_DANGER] = sl_ui_rgba(180u, 62u, 62u, 255u);
+    theme->colors[SL_UI_COLOR_SUCCESS] = sl_ui_rgba(88u, 168u, 96u, 255u);
+    theme->colors[SL_UI_COLOR_WARNING] = sl_ui_rgba(190u, 148u, 66u, 255u);
 }
 
 void sl_ui_theme_apply(sl_ui_ctx_t *ui, const sl_ui_theme_t *theme) {
@@ -47,21 +48,25 @@ void sl_ui_theme_reset(sl_ui_ctx_t *ui) {
 }
 
 void sl_ui_theme_set_accent(sl_ui_ctx_t *ui, uint8_t r, uint8_t g, uint8_t b) {
+    sl_ui_theme_set_accent_a(ui, r, g, b, 255u);
+}
+
+void sl_ui_theme_set_accent_a(sl_ui_ctx_t *ui, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     if (!ui) return;
     if (!ui->theme_initialized) sl_ui_theme_reset(ui);
-    ui->theme.colors[SL_UI_COLOR_ACCENT] = sl_ui_rgb(r, g, b);
-    ui->theme.colors[SL_UI_COLOR_ACCENT_HOVER] = sl_ui_rgb(
+    ui->theme.colors[SL_UI_COLOR_ACCENT] = sl_ui_rgba(r, g, b, a);
+    ui->theme.colors[SL_UI_COLOR_ACCENT_HOVER] = sl_ui_rgba(
         (uint8_t)((r + 28u > 255u) ? 255u : r + 28u),
         (uint8_t)((g + 28u > 255u) ? 255u : g + 28u),
-        (uint8_t)((b + 28u > 255u) ? 255u : b + 28u));
-    ui->theme.colors[SL_UI_COLOR_ACCENT_ACTIVE] = sl_ui_rgb(
+        (uint8_t)((b + 28u > 255u) ? 255u : b + 28u), a);
+    ui->theme.colors[SL_UI_COLOR_ACCENT_ACTIVE] = sl_ui_rgba(
         (uint8_t)((r > 24u) ? (r - 24u) : 0u),
         (uint8_t)((g > 24u) ? (g - 24u) : 0u),
-        (uint8_t)((b > 24u) ? (b - 24u) : 0u));
+        (uint8_t)((b > 24u) ? (b - 24u) : 0u), a);
 }
 
 const sl_ui_color_t *sl_ui_theme_color(const sl_ui_ctx_t *ui, sl_ui_color_token_t token) {
-    static const sl_ui_color_t fallback = {255u, 0u, 255u};
+    static const sl_ui_color_t fallback = {255u, 0u, 255u, 255u};
     if (!ui || token >= SL_UI_COLOR_COUNT) return &fallback;
     return &ui->theme.colors[token];
 }
@@ -85,7 +90,8 @@ void sl_ui_theme_runtime_get(sl_ui_theme_t *out) {
 
 static void sl_ui_fill_tok(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h, sl_ui_color_token_t token) {
     const sl_ui_color_t *c = sl_ui_theme_color(ui, token);
-    sl_fill_rect(ui->ctx, x, y, w, h, c->r, c->g, c->b);
+    if (c->a >= 255u) sl_fill_rect(ui->ctx, x, y, w, h, c->r, c->g, c->b);
+    else sl_fill_rect_a(ui->ctx, x, y, w, h, c->r, c->g, c->b, c->a);
 }
 
 static void sl_ui_text_tok(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text, sl_ui_color_token_t token) {
@@ -973,7 +979,8 @@ void sl_ui_rect_a(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t 
                   sl_ui_color_token_t token, uint8_t a) {
     if (!ui || !ui->ctx || w == 0u || h == 0u) return;
     const sl_ui_color_t *c = sl_ui_theme_color(ui, token);
-    sl_fill_rect_a(ui->ctx, x, y, w, h, c->r, c->g, c->b, a);
+    uint32_t aa = ((uint32_t)c->a * (uint32_t)a) / 255u;
+    sl_fill_rect_a(ui->ctx, x, y, w, h, c->r, c->g, c->b, (uint8_t)aa);
 }
 
 void sl_ui_rect_rgb(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
