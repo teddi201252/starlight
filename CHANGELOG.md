@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.6.0] - 2026-03-04
+- Optimize Starlight UI dirty invalidation for hover/drag/scroll and fix input regressions
+
 ## [0.5.0] - 2026-03-03
 - App host pipe polling and SLUI event path compatibility fixes
 

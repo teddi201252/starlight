@@ -9,7 +9,7 @@
 #include <string.h>
 
 #ifndef SL_TARGET_FPS
-#define SL_TARGET_FPS 60u
+#define SL_TARGET_FPS 144u
 #endif
 
 #if SL_TARGET_FPS == 0
@@ -806,7 +806,17 @@ int sl_handle_input(sl_ctx_t *ctx) {
         (input.mouse_updated || input.mouse_left_pressed || input.mouse_left_released || input.mouse_moved)) {
         focused->task->on_input(ctx, &input, NULL, focused->task->userdata);
         sl_windows_mark_focused_activity();
-        sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
+        if (input.mouse_left_pressed || input.mouse_left_released) {
+            sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
+        } else {
+            uint32_t dx = 0u, dy = 0u, dw = 0u, dh = 0u;
+            if (sl_app_host_input_dirty_rect(focused, &input, focused->task->userdata, &dx, &dy, &dw, &dh)) {
+                sl_dirty_add(ctx, dx, dy, dw, dh);
+            } else if (input.mouse_wheel_x != 0 || input.mouse_wheel_y != 0 ||
+                       (input.mouse_moved && (input.mouse_buttons & 0x01u))) {
+                sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
+            }
+        }
     }
 
     if (focused && focused->task && focused->task->on_input && input.key_event_count) {
@@ -820,6 +830,19 @@ int sl_handle_input(sl_ctx_t *ctx) {
     if (input.quit_requested) return 1;
 
     if (input.mouse_left_pressed) {
+        uint8_t had_prev_focus = 0u;
+        uint32_t prev_focus_x = 0u;
+        uint32_t prev_focus_y = 0u;
+        uint32_t prev_focus_w = 0u;
+        uint32_t prev_focus_h = 0u;
+        if (focused) {
+            had_prev_focus = 1u;
+            prev_focus_x = focused->x;
+            prev_focus_y = focused->y;
+            prev_focus_w = focused->width;
+            prev_focus_h = focused->height;
+        }
+
         if (sl_launcher_handle_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
             g_drag_active = 0u;
             g_drag_window = NULL;
@@ -838,7 +861,12 @@ int sl_handle_input(sl_ctx_t *ctx) {
             focused->task->on_input(ctx, &input, NULL, focused->task->userdata);
         }
         sl_windows_mark_focused_activity();
-        sl_dirty_mark_full();
+        if (had_prev_focus) {
+            sl_dirty_add(ctx, prev_focus_x, prev_focus_y, prev_focus_w, prev_focus_h);
+        }
+        if (focused) {
+            sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
+        }
 
         g_drag_active = 0u;
         g_drag_window = NULL;
