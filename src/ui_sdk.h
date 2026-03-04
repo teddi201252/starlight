@@ -54,6 +54,7 @@ typedef struct {
     uint32_t text_caret_id;
     uint32_t text_caret_pos;
     uint32_t text_area_scroll_line;
+    uint32_t font_px;
     sl_ui_theme_t theme;
     uint8_t theme_initialized;
     uint32_t theme_version;
@@ -106,6 +107,8 @@ void sl_ui_theme_set_accent_a(sl_ui_ctx_t *ui, uint8_t r, uint8_t g, uint8_t b, 
 const sl_ui_color_t *sl_ui_theme_color(const sl_ui_ctx_t *ui, sl_ui_color_token_t token);
 void sl_ui_theme_runtime_set(const sl_ui_theme_t *theme);
 void sl_ui_theme_runtime_get(sl_ui_theme_t *out);
+void sl_ui_set_font_px(sl_ui_ctx_t *ui, uint32_t font_px);
+uint32_t sl_ui_get_font_px(const sl_ui_ctx_t *ui);
 
 void sl_ui_label(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text,
                  sl_ui_color_token_t token);

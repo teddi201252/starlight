@@ -96,22 +96,32 @@ static void sl_ui_fill_tok(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, 
 
 static void sl_ui_text_tok(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text, sl_ui_color_token_t token) {
     const sl_ui_color_t *c = sl_ui_theme_color(ui, token);
-    sl_draw_text(ui->ctx, x, y, text, c->r, c->g, c->b);
+    sl_draw_text_px(ui->ctx, x, y, text, c->r, c->g, c->b, ui->font_px);
 }
 
-static uint32_t sl_ui_font_w(void) {
-    uint32_t w = sl_text_cell_w();
+static uint32_t sl_ui_font_w(const sl_ui_ctx_t *ui) {
+    uint32_t w = sl_text_cell_w_px(ui ? ui->font_px : 0u);
     return w ? w : 8u;
 }
 
-static uint32_t sl_ui_font_h(void) {
-    uint32_t h = sl_text_cell_h();
+static uint32_t sl_ui_font_h(const sl_ui_ctx_t *ui) {
+    uint32_t h = sl_text_cell_h_px(ui ? ui->font_px : 0u);
     return h ? h : 8u;
 }
 
-static uint32_t sl_ui_text_center_y(uint32_t y, uint32_t h) {
-    uint32_t fh = sl_ui_font_h();
+static uint32_t sl_ui_text_center_y(const sl_ui_ctx_t *ui, uint32_t y, uint32_t h) {
+    uint32_t fh = sl_ui_font_h(ui);
     return y + ((h > fh) ? ((h - fh) / 2u) : 0u);
+}
+
+void sl_ui_set_font_px(sl_ui_ctx_t *ui, uint32_t font_px) {
+    if (!ui) return;
+    ui->font_px = font_px;
+}
+
+uint32_t sl_ui_get_font_px(const sl_ui_ctx_t *ui) {
+    if (!ui) return 0u;
+    return ui->font_px;
 }
 
 static sl_ui_color_token_t sl_ui_state_fill_token(sl_ui_control_state_t state) {
@@ -176,7 +186,7 @@ void sl_ui_label(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text,
 void sl_ui_label_rgb(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text,
                      uint8_t r, uint8_t g, uint8_t b) {
     if (!ui || !ui->ctx || !text) return;
-    sl_draw_text(ui->ctx, x, y, text, r, g, b);
+    sl_draw_text_px(ui->ctx, x, y, text, r, g, b, ui->font_px);
 }
 
 uint8_t sl_ui_button(sl_ui_ctx_t *ui, uint32_t id,
@@ -206,7 +216,7 @@ uint8_t sl_ui_button_state(sl_ui_ctx_t *ui, uint32_t id,
     sl_ui_fill_tok(ui, x, y + h - 1u, w, 1u, SL_UI_COLOR_BG_CANVAS);
     sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
     sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, SL_UI_COLOR_BG_CANVAS);
-    sl_ui_text_tok(ui, x + 6u, sl_ui_text_center_y(y, h), text, sl_ui_state_text_token(state));
+    sl_ui_text_tok(ui, x + 6u, sl_ui_text_center_y(ui, y, h), text, sl_ui_state_text_token(state));
     if (!enabled && active) ui->active_id = 0u;
 
     if (enabled && ui->mouse_released && active) {
@@ -400,8 +410,8 @@ uint8_t sl_ui_toggle_state(sl_ui_ctx_t *ui, uint32_t id,
 
     if (text[0]) {
         uint32_t text_x = x + 6u;
-        uint32_t text_y = sl_ui_text_center_y(y, h);
-        if (text_x + sl_ui_font_w() < sw_x) {
+        uint32_t text_y = sl_ui_text_center_y(ui, y, h);
+        if (text_x + sl_ui_font_w(ui) < sw_x) {
             sl_ui_text_tok(ui, text_x, text_y, text,
                            enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
         }
@@ -448,7 +458,7 @@ uint8_t sl_ui_select_cycle_state(sl_ui_ctx_t *ui, uint32_t id,
     sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
     sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, SL_UI_COLOR_BG_CANVAS);
 
-    uint32_t text_y = sl_ui_text_center_y(y, h);
+    uint32_t text_y = sl_ui_text_center_y(ui, y, h);
     sl_ui_text_tok(ui, x + 6u, text_y, current_text,
                    enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
     sl_ui_text_tok(ui, x + w - 10u, text_y, ">",
@@ -575,8 +585,8 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     sl_ui_fill_tok(ui, x, y, 1u, h, sl_ui_state_border_token(state));
     sl_ui_fill_tok(ui, x + w - 1u, y, 1u, h, (state == SL_UI_STATE_FOCUSED) ? SL_UI_COLOR_BORDER_FOCUS : SL_UI_COLOR_BG_CANVAS);
 
-    uint32_t fw = sl_ui_font_w();
-    uint32_t fh = sl_ui_font_h();
+    uint32_t fw = sl_ui_font_w(ui);
+    uint32_t fh = sl_ui_font_h(ui);
     uint32_t vis_chars = (w > 12u) ? ((w - 12u) / fw) : 0u;
     if (vis_chars > 0u) {
         uint8_t caret_visible = (enabled && focused &&
@@ -596,7 +606,7 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         if (caret_draw > vis_chars) caret_draw = vis_chars;
         draw_buf[n] = '\0';
         uint32_t text_x = x + 6u;
-        uint32_t text_y = sl_ui_text_center_y(y, h);
+        uint32_t text_y = sl_ui_text_center_y(ui, y, h);
         sl_ui_text_tok(ui, text_x, text_y, draw_buf,
                        enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
         if (caret_visible) {
@@ -796,8 +806,8 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t content_y = y + 6u;
     uint32_t content_w = (w > 12u) ? (w - 12u) : 0u;
     uint32_t content_h = (h > 12u) ? (h - 12u) : 0u;
-    uint32_t fw = sl_ui_font_w();
-    uint32_t fh = sl_ui_font_h();
+    uint32_t fw = sl_ui_font_w(ui);
+    uint32_t fh = sl_ui_font_h(ui);
     uint32_t vis_cols = content_w / fw;
     uint32_t vis_lines = content_h / fh;
     if (vis_cols == 0u || vis_lines == 0u) return changed;
@@ -1044,14 +1054,19 @@ uint8_t sl_ui_list_item(sl_ui_ctx_t *ui, uint32_t id,
     sl_ui_fill_tok(ui, x, y, w, h, sl_ui_state_fill_token(state));
     sl_ui_fill_tok(ui, x, y + h - 1u, w, 1u, SL_UI_COLOR_BG_CANVAS);
 
-    sl_ui_text_tok(ui, x + 8u, y + 4u, title,
+    uint32_t fh = sl_ui_font_h(ui);
+    uint32_t title_y = y + 4u;
+    sl_ui_text_tok(ui, x + 8u, title_y, title,
                    enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
     if (subtitle[0]) {
-        uint32_t sub_y = y + ((h > 22u) ? 14u : 12u);
+        uint32_t sub_y = title_y + fh + 2u;
+        if (sub_y + fh > y + h) {
+            sub_y = (y + h > fh) ? (y + h - fh) : y;
+        }
         sl_ui_text_tok(ui, x + 8u, sub_y, subtitle,
                        enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
     }
-    sl_ui_text_tok(ui, x + w - 10u, sl_ui_text_center_y(y, h), ">",
+    sl_ui_text_tok(ui, x + w - 10u, sl_ui_text_center_y(ui, y, h), ">",
                    enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
 
     if (!enabled && active) ui->active_id = 0u;

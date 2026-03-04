@@ -50,6 +50,7 @@
 #define ORBIT_SLUI_CAP_THEME_TOKENS     (1u << 23)
 #define ORBIT_SLUI_CAP_GRADIENT_2D      (1u << 24)
 #define ORBIT_SLUI_CAP_PANEL_INPUT      (1u << 25)
+#define ORBIT_SLUI_CAP_FONT_SIZE        (1u << 26)
 
 #define ORBIT_SLUI_ERR_MALFORMED   100u
 #define ORBIT_SLUI_ERR_HELLO       101u
@@ -69,6 +70,7 @@
 #define ORBIT_SLUI_ERR_TEXT_AREA   123u
 #define ORBIT_SLUI_ERR_GRAD2D      124u
 #define ORBIT_SLUI_ERR_PANEL       125u
+#define ORBIT_SLUI_ERR_FONT        126u
 #define ORBIT_SLUI_ERR_UNKNOWN_CMD 199u
 #define ORBIT_SLUI_ERR_CMD_LIMIT   200u
 
@@ -94,6 +96,7 @@ typedef enum {
     ORBIT_UI_CMD_RECTA_THEME = 18,
     ORBIT_UI_CMD_GRAD2D = 19,
     ORBIT_UI_CMD_PANEL = 20,
+    ORBIT_UI_CMD_FONT_SIZE = 21,
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -296,6 +299,7 @@ static uint32_t orbit_parse_cap_token(const char *tok, size_t tok_len) {
     if (orbit_token_is(tok, tok_len, "THEME_TOKENS")) return ORBIT_SLUI_CAP_THEME_TOKENS;
     if (orbit_token_is(tok, tok_len, "GRADIENT_2D")) return ORBIT_SLUI_CAP_GRADIENT_2D;
     if (orbit_token_is(tok, tok_len, "PANEL_INPUT")) return ORBIT_SLUI_CAP_PANEL_INPUT;
+    if (orbit_token_is(tok, tok_len, "FONT_SIZE")) return ORBIT_SLUI_CAP_FONT_SIZE;
     return 0u;
 }
 
@@ -337,7 +341,7 @@ static void orbit_send_ui_error(orbit_shell_t *shell, uint32_t code, const char 
 static void orbit_send_host_hello(orbit_shell_t *shell) {
     if (!shell || shell->child_stdin_fd < 0) return;
     const char *msg =
-        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT\n";
+        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT FONT_SIZE\n";
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, peos_strlen(msg));
     shell->ui.host_hello_sent = 1u;
 }
@@ -873,6 +877,16 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         cmd->b = (uint8_t)(bv & 0xFFu);
         p = orbit_skip_spaces(p);
         orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        return 1;
+    }
+
+    if (orbit_token_is(cmd_tok, cmd_len, "FONT_SIZE")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_FONT_SIZE);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->value)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_FONT, "font_size_invalid_args");
+            return 1;
+        }
         return 1;
     }
 
@@ -2026,6 +2040,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     ctx->cursor_x, ctx->cursor_y,
                     shell->ui.mouse_down, shell->ui.mouse_pressed, shell->ui.mouse_released,
                     shell->ui.mouse_wheel_x, shell->ui.mouse_wheel_y);
+        sl_ui_set_font_px(&shell->ui.ui, 0u);
         if (shell->ui.theme_override_enabled) {
             sl_ui_theme_apply(&shell->ui.ui, &shell->ui.theme_override);
         }
@@ -2082,6 +2097,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     sl_clip_set(ctx, body_x, body_y, body_w, body_h);
                 }
                 continue;
+            } else if (cmd->type == ORBIT_UI_CMD_FONT_SIZE) {
+                sl_ui_set_font_px(&shell->ui.ui, cmd->value);
             } else if (cmd->type == ORBIT_UI_CMD_LABEL) {
                 sl_ui_label_rgb(&shell->ui.ui, x, y, cmd->text, cmd->r, cmd->g, cmd->b);
             } else if (cmd->type == ORBIT_UI_CMD_LABEL_THEME) {
