@@ -610,6 +610,29 @@ uint32_t sl_font_line_height(void) {
     return g_font.line_h ? g_font.line_h : 8u;
 }
 
+static uint32_t sl_font_scale_for_px(uint32_t font_px) {
+    uint32_t base_h = sl_font_line_height();
+    if (base_h == 0u) base_h = 8u;
+    if (font_px == 0u) return 1u;
+    uint32_t scale = (font_px + (base_h / 2u)) / base_h;
+    if (scale == 0u) scale = 1u;
+    return scale;
+}
+
+uint32_t sl_font_advance_x_px(uint32_t font_px) {
+    uint64_t adv = (uint64_t)sl_font_advance_x() * (uint64_t)sl_font_scale_for_px(font_px);
+    if (adv == 0ull) adv = 1ull;
+    if (adv > 0xFFFFFFFFull) adv = 0xFFFFFFFFull;
+    return (uint32_t)adv;
+}
+
+uint32_t sl_font_line_height_px(uint32_t font_px) {
+    uint64_t h = (uint64_t)sl_font_line_height() * (uint64_t)sl_font_scale_for_px(font_px);
+    if (h == 0ull) h = 1ull;
+    if (h > 0xFFFFFFFFull) h = 0xFFFFFFFFull;
+    return (uint32_t)h;
+}
+
 static uint32_t sl_font_utf8_next(const char *s, uint32_t *adv_out) {
     const uint8_t *p = (const uint8_t *)s;
     uint32_t cp = SL_FONT_DEFAULT_FALLBACK_CP;
@@ -698,30 +721,62 @@ uint32_t sl_font_measure_text(const char *text) {
     return max;
 }
 
+uint32_t sl_font_measure_text_px(const char *text, uint32_t font_px) {
+    uint32_t adv_x = sl_font_advance_x_px(font_px);
+    uint32_t cur = 0u;
+    uint32_t max = 0u;
+    if (!text) return 0u;
+
+    for (size_t i = 0u; text[i]; ) {
+        uint32_t step = 1u;
+        uint32_t cp = sl_font_utf8_next(text + i, &step);
+        if (step == 0u) break;
+        i += step;
+
+        if (cp == '\n') {
+            if (cur > max) max = cur;
+            cur = 0u;
+            continue;
+        }
+        if (cp == '\r') continue;
+        cur += adv_x;
+    }
+    if (cur > max) max = cur;
+    return max;
+}
+
 static void sl_font_draw_builtin_codepoint(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t cp,
-                                           uint8_t r, uint8_t g, uint8_t b) {
+                                           uint8_t r, uint8_t g, uint8_t b, uint32_t scale) {
     uint32_t draw_cp = cp;
     if (draw_cp < 32u || draw_cp > 127u) draw_cp = g_font.fallback_cp;
     if (draw_cp < 32u || draw_cp > 127u) draw_cp = (uint32_t)'?';
 
     if (!ctx || !ctx->frame) return;
+    if (scale == 0u) scale = 1u;
     const uint8_t *glyph = peos_font8x8_glyph((char)(uint8_t)draw_cp);
     for (uint32_t gy = 0u; gy < 8u; gy++) {
         uint8_t bits = glyph[gy];
         if (!bits) continue;
         for (uint32_t gx = 0u; gx < 8u; gx++) {
             if ((bits & (uint8_t)(1u << gx)) != 0u) {
-                sl_put_pixel(ctx, x + gx, y + gy, r, g, b);
+                uint32_t px = x + (gx * scale);
+                uint32_t py = y + (gy * scale);
+                for (uint32_t sy = 0u; sy < scale; sy++) {
+                    for (uint32_t sx = 0u; sx < scale; sx++) {
+                        sl_put_pixel(ctx, px + sx, py + sy, r, g, b);
+                    }
+                }
             }
         }
     }
 }
 
 static void sl_font_draw_atlas_codepoint(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t cp,
-                                         uint8_t r, uint8_t g, uint8_t b) {
+                                         uint8_t r, uint8_t g, uint8_t b, uint32_t scale) {
     if (!ctx || !ctx->frame || !g_font.atlas.data) return;
     if (g_font.glyph_cols == 0u || g_font.glyph_w == 0u || g_font.glyph_h == 0u) return;
     if (g_font.render_w == 0u || g_font.render_h == 0u) return;
+    if (scale == 0u) scale = 1u;
 
     uint32_t idx = sl_font_lookup_index(&g_font, cp);
     uint32_t cell_x = (idx % g_font.glyph_cols) * g_font.glyph_w;
@@ -742,13 +797,20 @@ static void sl_font_draw_atlas_codepoint(sl_ctx_t *ctx, uint32_t x, uint32_t y, 
             uint32_t lum = ((uint32_t)p[0] * 77u + (uint32_t)p[1] * 150u + (uint32_t)p[2] * 29u) >> 8u;
             if (lum == 0u) continue;
             uint8_t a = (uint8_t)(((uint32_t)sa * lum + 127u) / 255u);
-            int32_t dst_x = (int32_t)x + (int32_t)dx + g_font.render_off_x;
-            int32_t dst_y = (int32_t)y + (int32_t)dy + g_font.render_off_y;
-            if (dst_x < 0 || dst_y < 0) continue;
-            uint32_t out_x = (uint32_t)dst_x;
-            uint32_t out_y = (uint32_t)dst_y;
-            if (a == 255u) sl_put_pixel(ctx, out_x, out_y, r, g, b);
-            else sl_fill_rect_a(ctx, out_x, out_y, 1u, 1u, r, g, b, a);
+            int32_t base_x = (int32_t)x + (int32_t)(dx * scale) + (g_font.render_off_x * (int32_t)scale);
+            int32_t base_y = (int32_t)y + (int32_t)(dy * scale) + (g_font.render_off_y * (int32_t)scale);
+            if (base_x < 0 || base_y < 0) continue;
+            uint32_t out_x = (uint32_t)base_x;
+            uint32_t out_y = (uint32_t)base_y;
+            if (a == 255u) {
+                for (uint32_t sy = 0u; sy < scale; sy++) {
+                    for (uint32_t sx = 0u; sx < scale; sx++) {
+                        sl_put_pixel(ctx, out_x + sx, out_y + sy, r, g, b);
+                    }
+                }
+            } else {
+                sl_fill_rect_a(ctx, out_x, out_y, scale, scale, r, g, b, a);
+            }
         }
     }
 }
@@ -758,18 +820,24 @@ void sl_font_draw_char(sl_ctx_t *ctx, uint32_t x, uint32_t y, char c,
     uint32_t cp = (uint32_t)(uint8_t)c;
     sl_font_ensure_initialized();
     if (g_font.kind == SL_FONT_KIND_ATLAS) {
-        sl_font_draw_atlas_codepoint(ctx, x, y, cp, r, g, b);
+        sl_font_draw_atlas_codepoint(ctx, x, y, cp, r, g, b, 1u);
         return;
     }
-    sl_font_draw_builtin_codepoint(ctx, x, y, cp, r, g, b);
+    sl_font_draw_builtin_codepoint(ctx, x, y, cp, r, g, b, 1u);
 }
 
 void sl_font_draw_text(sl_ctx_t *ctx, uint32_t x, uint32_t y, const char *text,
                        uint8_t r, uint8_t g, uint8_t b) {
+    sl_font_draw_text_px(ctx, x, y, text, r, g, b, 0u);
+}
+
+void sl_font_draw_text_px(sl_ctx_t *ctx, uint32_t x, uint32_t y, const char *text,
+                          uint8_t r, uint8_t g, uint8_t b, uint32_t font_px) {
     uint32_t pen_x = x;
     uint32_t pen_y = y;
-    uint32_t adv_x = sl_font_advance_x();
-    uint32_t line_h = sl_font_line_height();
+    uint32_t scale = sl_font_scale_for_px(font_px);
+    uint32_t adv_x = sl_font_advance_x_px(font_px);
+    uint32_t line_h = sl_font_line_height_px(font_px);
     if (!ctx || !ctx->frame || !text) return;
     if (adv_x == 0u) adv_x = 1u;
     if (line_h == 0u) line_h = 1u;
@@ -788,9 +856,9 @@ void sl_font_draw_text(sl_ctx_t *ctx, uint32_t x, uint32_t y, const char *text,
         if (cp == '\r') continue;
 
         if (g_font.kind == SL_FONT_KIND_ATLAS) {
-            sl_font_draw_atlas_codepoint(ctx, pen_x, pen_y, cp, r, g, b);
+            sl_font_draw_atlas_codepoint(ctx, pen_x, pen_y, cp, r, g, b, scale);
         } else {
-            sl_font_draw_builtin_codepoint(ctx, pen_x, pen_y, cp, r, g, b);
+            sl_font_draw_builtin_codepoint(ctx, pen_x, pen_y, cp, r, g, b, scale);
         }
         pen_x += adv_x;
     }

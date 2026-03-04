@@ -16,6 +16,11 @@ void sl_blit_rgba_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_
                           const uint8_t *src_rgba, uint32_t src_w, uint32_t src_h, uint32_t src_stride);
 void sl_draw_char(sl_ctx_t *ctx, uint32_t x, uint32_t y, char c, uint8_t r, uint8_t g, uint8_t b);
 void sl_draw_text(sl_ctx_t *ctx, uint32_t x, uint32_t y, const char *text, uint8_t r, uint8_t g, uint8_t b);
+void sl_draw_text_px(sl_ctx_t *ctx, uint32_t x, uint32_t y, const char *text,
+                     uint8_t r, uint8_t g, uint8_t b, uint32_t font_px);
 uint32_t sl_text_cell_w(void);
 uint32_t sl_text_cell_h(void);
 uint32_t sl_text_measure_width(const char *text);
+uint32_t sl_text_cell_w_px(uint32_t font_px);
+uint32_t sl_text_cell_h_px(uint32_t font_px);
+uint32_t sl_text_measure_width_px(const char *text, uint32_t font_px);

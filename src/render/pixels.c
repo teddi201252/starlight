@@ -274,6 +274,11 @@ void sl_draw_text(sl_ctx_t *ctx, uint32_t x, uint32_t y, const char *text, uint8
     sl_font_draw_text(ctx, x, y, text, r, g, b);
 }
 
+void sl_draw_text_px(sl_ctx_t *ctx, uint32_t x, uint32_t y, const char *text,
+                     uint8_t r, uint8_t g, uint8_t b, uint32_t font_px) {
+    sl_font_draw_text_px(ctx, x, y, text, r, g, b, font_px);
+}
+
 uint32_t sl_text_cell_w(void) {
     return sl_font_advance_x();
 }
@@ -284,4 +289,16 @@ uint32_t sl_text_cell_h(void) {
 
 uint32_t sl_text_measure_width(const char *text) {
     return sl_font_measure_text(text);
+}
+
+uint32_t sl_text_cell_w_px(uint32_t font_px) {
+    return sl_font_advance_x_px(font_px);
+}
+
+uint32_t sl_text_cell_h_px(uint32_t font_px) {
+    return sl_font_line_height_px(font_px);
+}
+
+uint32_t sl_text_measure_width_px(const char *text, uint32_t font_px) {
+    return sl_font_measure_text_px(text, font_px);
 }
