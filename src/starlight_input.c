@@ -28,7 +28,6 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
     }
 
     if (mr >= 0) {
-        out->mouse_updated = 1u;
         out->mouse_dx = mev.dx;
         out->mouse_dy = mev.dy;
         out->mouse_wheel_x = (int32_t)mev.wheel_x;
@@ -54,6 +53,12 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
         uint8_t left_prev = (uint8_t)(g_prev_mouse_buttons & 0x01u);
         out->mouse_left_pressed = (left_now && !left_prev) ? 1u : 0u;
         out->mouse_left_released = (!left_now && left_prev) ? 1u : 0u;
+
+        uint8_t buttons_changed = (mev.buttons != g_prev_mouse_buttons) ? 1u : 0u;
+        out->mouse_updated = (out->mouse_moved ||
+                              buttons_changed ||
+                              out->mouse_wheel_x != 0 ||
+                              out->mouse_wheel_y != 0) ? 1u : 0u;
 
         g_prev_mouse_buttons = mev.buttons;
     }

@@ -1,6 +1,37 @@
 #include "starlight_internal.h"
 #include "render/pixels.h"
 
+static void sl_fps_draw(sl_ctx_t *ctx, uint32_t fps_value) {
+    if (!ctx) return;
+    char fps_str[16];
+    if (!sl_u32_to_str(fps_value, fps_str, sizeof(fps_str))) {
+        fps_str[0] = '?';
+        fps_str[1] = '\0';
+    }
+    sl_dirty_add(ctx, 0u, 0u, 128u, 16u);
+    sl_fill_rect(ctx, 0, 0, 128, 16, 0x00, 0x00, 0x00);
+    sl_draw_text(ctx, 0, 0, "fps: ", 0xFF, 0xFF, 0xFF);
+    sl_draw_text(ctx, 32, 0, fps_str, 0xFF, 0xFF, 0xFF);
+}
+
+static void sl_fps_tick(sl_ctx_t *ctx, uint32_t *prev_value) {
+    if (!ctx || !prev_value) return;
+
+    ctx->fps_frames++;
+    uint64_t now = peos_time_ns();
+    uint64_t dt = now - ctx->fps_last_ns;
+    if (dt >= 1000000000ull) {
+        ctx->fps_value = (uint32_t)(((uint64_t)ctx->fps_frames * 1000000000ull) / dt);
+        ctx->fps_frames = 0u;
+        ctx->fps_last_ns = now;
+    }
+
+    if (ctx->fps_value != *prev_value) {
+        *prev_value = ctx->fps_value;
+        sl_fps_draw(ctx, ctx->fps_value);
+    }
+}
+
 // Entry point of the Starlight desktop loop.
 int main(void) {
     sl_ctx_t ctx;
@@ -71,33 +102,9 @@ int main(void) {
 
         sl_render_dirty_background(&ctx);
 
-        // FPS Counter
-        /*
-        ctx.fps_frames++;
-        uint64_t now = peos_time_ns();
-        uint64_t dt = now - ctx.fps_last_ns;
-        if (dt >= 1000000000ull) {
-            ctx.fps_value = (uint32_t)((ctx.fps_frames * 1000000000ull) / dt);
-            ctx.fps_frames = 0;
-            ctx.fps_last_ns = now;
-        }
-
-        if (ctx.fps_value != fps_value_prev) {
-            fps_value_prev = ctx.fps_value;
-            char fps_str[16];
-            if (!sl_u32_to_str(ctx.fps_value, fps_str, sizeof(fps_str))) {
-                fps_str[0] = '?';
-                fps_str[1] = '\0';
-            }
-            sl_dirty_add(&ctx, 0u, 0u, 128u, 16u);
-            sl_fill_rect(&ctx, 0, 0, 128, 16, 0x00, 0x00, 0x00);
-            sl_draw_text(&ctx, 0, 0, "fps: ", 0xFF, 0xFF, 0xFF);
-            sl_draw_text(&ctx, 32, 0, fps_str, 0xFF, 0xFF, 0xFF);
-        }
-        */
-
         sl_windows_render_all(&ctx);
         sl_launcher_render(&ctx);
+        sl_fps_tick(&ctx, &fps_value_prev);
 
         if (!ctx.hw_cursor) {
             sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);

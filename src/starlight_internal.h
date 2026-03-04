@@ -51,5 +51,8 @@ int sl_dirty_get_bounds(uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata);
 
 void sl_app_host_tick(sl_ctx_t *ctx);
+int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t *frame,
+                                 const void *userdata,
+                                 uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 
 char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap);

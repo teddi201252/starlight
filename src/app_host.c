@@ -143,6 +143,11 @@ typedef struct {
     uint32_t client_caps_mask;
     uint8_t key_down[256];
     uint32_t active_panel_id;
+    uint32_t hover_cmd_id;
+    uint32_t hover_cmd_x;
+    uint32_t hover_cmd_y;
+    uint32_t hover_cmd_w;
+    uint32_t hover_cmd_h;
     uint8_t theme_override_enabled;
     sl_ui_theme_t theme_override;
 } orbit_ui_state_t;
@@ -1764,6 +1769,204 @@ static uint8_t orbit_clip_intersect(uint32_t ax, uint32_t ay, uint32_t aw, uint3
     *ow = x1 - x0;
     *oh = y1 - y0;
     return 1u;
+}
+
+static uint8_t orbit_ui_body_rect(const sl_window_t *win,
+                                  uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!win || !x || !y || !w || !h) return 0u;
+    uint32_t bx = win->x + 2u;
+    uint32_t by = win->y + win->top_bar_height + 1u;
+    uint32_t bw = (win->width > 4u) ? (win->width - 4u) : 0u;
+    uint32_t bh = (win->height > (win->top_bar_height + 3u)) ? (win->height - win->top_bar_height - 3u) : 0u;
+    if (bw == 0u || bh == 0u) return 0u;
+    *x = bx; *y = by; *w = bw; *h = bh;
+    return 1u;
+}
+
+static int orbit_ui_cmd_is_interactive(const orbit_ui_cmd_t *cmd) {
+    if (!cmd || !cmd->enabled) return 0;
+    switch (cmd->type) {
+        case ORBIT_UI_CMD_BUTTON:
+        case ORBIT_UI_CMD_SLIDER:
+        case ORBIT_UI_CMD_TOGGLE:
+        case ORBIT_UI_CMD_SELECT:
+        case ORBIT_UI_CMD_TEXT_INPUT:
+        case ORBIT_UI_CMD_TEXT_AREA:
+        case ORBIT_UI_CMD_SCROLL_V:
+        case ORBIT_UI_CMD_LIST_ITEM:
+        case ORBIT_UI_CMD_PANEL:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static uint8_t orbit_ui_cmd_rect(const sl_window_t *win, const orbit_ui_cmd_t *cmd,
+                                 uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!win || !cmd || !x || !y || !w || !h) return 0u;
+    uint32_t body_x = 0u, body_y = 0u, body_w = 0u, body_h = 0u;
+    if (!orbit_ui_body_rect(win, &body_x, &body_y, &body_w, &body_h)) return 0u;
+
+    uint32_t rx = body_x + cmd->x;
+    uint32_t ry = body_y + cmd->y;
+    uint32_t rw = cmd->w;
+    uint32_t rh = cmd->h;
+    if (!orbit_clip_intersect(body_x, body_y, body_w, body_h, rx, ry, rw, rh, &rx, &ry, &rw, &rh)) return 0u;
+    *x = rx; *y = ry; *w = rw; *h = rh;
+    return 1u;
+}
+
+static void orbit_rect_union_accum(uint8_t *has_rect,
+                                   uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h,
+                                   uint32_t rx, uint32_t ry, uint32_t rw, uint32_t rh) {
+    if (!has_rect || !x || !y || !w || !h || rw == 0u || rh == 0u) return;
+    if (!*has_rect) {
+        *x = rx; *y = ry; *w = rw; *h = rh;
+        *has_rect = 1u;
+        return;
+    }
+    uint32_t x0 = (*x < rx) ? *x : rx;
+    uint32_t y0 = (*y < ry) ? *y : ry;
+    uint64_t x1a = (uint64_t)(*x) + (uint64_t)(*w);
+    uint64_t y1a = (uint64_t)(*y) + (uint64_t)(*h);
+    uint64_t x1b = (uint64_t)rx + (uint64_t)rw;
+    uint64_t y1b = (uint64_t)ry + (uint64_t)rh;
+    uint64_t x1 = (x1a > x1b) ? x1a : x1b;
+    uint64_t y1 = (y1a > y1b) ? y1a : y1b;
+    *x = x0;
+    *y = y0;
+    *w = (uint32_t)(x1 - x0);
+    *h = (uint32_t)(y1 - y0);
+}
+
+static int orbit_ui_cmd_find_hovered(const sl_window_t *win, const orbit_shell_t *shell,
+                                     uint32_t cursor_x, uint32_t cursor_y,
+                                     uint32_t *out_id, uint32_t *out_x, uint32_t *out_y,
+                                     uint32_t *out_w, uint32_t *out_h, size_t *out_idx) {
+    if (!win || !shell || !out_id || !out_x || !out_y || !out_w || !out_h) return 0;
+    if (!shell->ui.enabled || !shell->ui.committed || !shell->ui.cmds || shell->ui.cmd_count == 0u) return 0;
+
+    for (size_t i = shell->ui.cmd_count; i > 0u; i--) {
+        size_t idx = i - 1u;
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[idx];
+        if (!orbit_ui_cmd_is_interactive(cmd)) continue;
+        uint32_t x = 0u, y = 0u, w = 0u, h = 0u;
+        if (!orbit_ui_cmd_rect(win, cmd, &x, &y, &w, &h)) continue;
+        if (cursor_x >= x && cursor_y >= y && cursor_x < (x + w) && cursor_y < (y + h)) {
+            *out_id = cmd->id;
+            *out_x = x;
+            *out_y = y;
+            *out_w = w;
+            *out_h = h;
+            if (out_idx) *out_idx = idx;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int orbit_ui_cmd_find_by_id(const sl_window_t *win, const orbit_shell_t *shell, uint32_t id,
+                                   uint32_t *out_x, uint32_t *out_y,
+                                   uint32_t *out_w, uint32_t *out_h, size_t *out_idx) {
+    if (!win || !shell || !out_x || !out_y || !out_w || !out_h || id == 0u) return 0;
+    if (!shell->ui.cmds || shell->ui.cmd_count == 0u) return 0;
+    for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+        if (cmd->id != id) continue;
+        if (!orbit_ui_cmd_rect(win, cmd, out_x, out_y, out_w, out_h)) return 0;
+        if (out_idx) *out_idx = i;
+        return 1;
+    }
+    return 0;
+}
+
+int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t *frame,
+                                 const void *userdata,
+                                 uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!win || !frame || !userdata || !x || !y || !w || !h) return 0;
+
+    orbit_shell_t *shell = (orbit_shell_t *)userdata;
+    if (!shell->initialized) return 0;
+    if (!shell->ui.enabled || !shell->ui.committed || shell->ui.cmd_count == 0u) return 0;
+
+    uint8_t has_rect = 0u;
+    uint32_t rx = 0u, ry = 0u, rw = 0u, rh = 0u;
+
+    uint32_t cursor_x = win->ctx ? win->ctx->cursor_x : 0u;
+    uint32_t cursor_y = win->ctx ? win->ctx->cursor_y : 0u;
+
+    uint32_t hover_id = 0u, hover_x = 0u, hover_y = 0u, hover_w = 0u, hover_h = 0u;
+    size_t hover_idx = 0u;
+    uint8_t hover_now = orbit_ui_cmd_find_hovered(win, shell,
+                                                  cursor_x, cursor_y,
+                                                  &hover_id, &hover_x, &hover_y, &hover_w, &hover_h, &hover_idx) ? 1u : 0u;
+    uint8_t hover_prev = (shell->ui.hover_cmd_id != 0u) ? 1u : 0u;
+    uint8_t hover_changed = 0u;
+    if (hover_now != hover_prev) {
+        hover_changed = 1u;
+    } else if (hover_now) {
+        if (shell->ui.hover_cmd_id != hover_id ||
+            shell->ui.hover_cmd_x != hover_x || shell->ui.hover_cmd_y != hover_y ||
+            shell->ui.hover_cmd_w != hover_w || shell->ui.hover_cmd_h != hover_h) {
+            hover_changed = 1u;
+        }
+    }
+
+    uint8_t has_direct_interaction =
+        (frame->mouse_left_pressed || frame->mouse_left_released ||
+         frame->mouse_wheel_x != 0 || frame->mouse_wheel_y != 0 ||
+         ((frame->mouse_buttons & 0x01u) && frame->mouse_moved)) ? 1u : 0u;
+
+    if (hover_changed && shell->ui.hover_cmd_id != 0u) {
+        orbit_rect_union_accum(&has_rect, &rx, &ry, &rw, &rh,
+                               shell->ui.hover_cmd_x, shell->ui.hover_cmd_y,
+                               shell->ui.hover_cmd_w, shell->ui.hover_cmd_h);
+    }
+    if (hover_changed && hover_now) {
+        orbit_rect_union_accum(&has_rect, &rx, &ry, &rw, &rh, hover_x, hover_y, hover_w, hover_h);
+    }
+
+    if (has_direct_interaction && (frame->mouse_buttons & 0x01u) && shell->ui.ui.active_id != 0u) {
+        uint32_t ax = 0u, ay = 0u, aw = 0u, ah = 0u;
+        size_t active_idx = 0u;
+        if (orbit_ui_cmd_find_by_id(win, shell, shell->ui.ui.active_id, &ax, &ay, &aw, &ah, &active_idx)) {
+            orbit_rect_union_accum(&has_rect, &rx, &ry, &rw, &rh, ax, ay, aw, ah);
+
+            const orbit_ui_cmd_t *acmd = &shell->ui.cmds[active_idx];
+            if (acmd->type == ORBIT_UI_CMD_SCROLL_V && (active_idx + 1u) < shell->ui.cmd_count) {
+                const orbit_ui_cmd_t *next = &shell->ui.cmds[active_idx + 1u];
+                if (next->type == ORBIT_UI_CMD_CLIP_PUSH && next->y == acmd->y && next->h == acmd->h) {
+                    uint32_t cx = 0u, cy = 0u, cw = 0u, ch = 0u;
+                    if (orbit_ui_cmd_rect(win, next, &cx, &cy, &cw, &ch)) {
+                        orbit_rect_union_accum(&has_rect, &rx, &ry, &rw, &rh, cx, cy, cw, ch);
+                    }
+                }
+            }
+        }
+    }
+
+    if ((frame->mouse_wheel_x != 0 || frame->mouse_wheel_y != 0) && hover_now) {
+        const orbit_ui_cmd_t *hcmd = &shell->ui.cmds[hover_idx];
+        if (hcmd->type == ORBIT_UI_CMD_SCROLL_V && (hover_idx + 1u) < shell->ui.cmd_count) {
+            const orbit_ui_cmd_t *next = &shell->ui.cmds[hover_idx + 1u];
+            if (next->type == ORBIT_UI_CMD_CLIP_PUSH && next->y == hcmd->y && next->h == hcmd->h) {
+                uint32_t cx = 0u, cy = 0u, cw = 0u, ch = 0u;
+                if (orbit_ui_cmd_rect(win, next, &cx, &cy, &cw, &ch)) {
+                    orbit_rect_union_accum(&has_rect, &rx, &ry, &rw, &rh, cx, cy, cw, ch);
+                }
+            }
+        }
+    }
+
+    shell->ui.hover_cmd_id = hover_now ? hover_id : 0u;
+    shell->ui.hover_cmd_x = hover_now ? hover_x : 0u;
+    shell->ui.hover_cmd_y = hover_now ? hover_y : 0u;
+    shell->ui.hover_cmd_w = hover_now ? hover_w : 0u;
+    shell->ui.hover_cmd_h = hover_now ? hover_h : 0u;
+
+    if (!has_rect) return 0;
+    *x = rx; *y = ry; *w = rw; *h = rh;
+    return 1;
 }
 
 static const char *orbit_get_line(const orbit_shell_t *shell, size_t logical_index) {
