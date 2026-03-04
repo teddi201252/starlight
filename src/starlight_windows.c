@@ -10,6 +10,10 @@
 #define SL_APP_DIR "/system/apps"
 #define SL_APP_MANIFEST "app.ini"
 #define SL_APP_SLOT_MAX 8u
+#define SL_WIN_ANIM_MAX 32u
+#define SL_WIN_ANIM_OPEN_OFFSET_Y 28.0f
+#define SL_WIN_ANIM_OPEN_MS 140u
+#define SL_WIN_ANIM_CLOSE_MS 120u
 
 #define SL_LAUNCHER_MARGIN_LEFT 20u
 #define SL_LAUNCHER_RESERVED_GAP 12u
@@ -50,6 +54,16 @@ typedef struct {
     app_instance_t *instance;
 } sl_launcher_item_t;
 
+typedef struct {
+    uint8_t used;
+    uint8_t closing;
+    uint8_t close_ready;
+    uint8_t _pad;
+    app_instance_t *task;
+    float y_value;
+    float opacity;
+} sl_window_anim_t;
+
 static sl_window_t *g_windows = NULL;
 static size_t g_window_count = 0;
 static size_t g_focused_window = (size_t)-1;
@@ -60,9 +74,126 @@ static sl_image_t g_launcher_placeholder_icon;
 static uint8_t g_launcher_placeholder_loaded = 0u;
 static uint8_t g_launcher_placeholder_failed = 0u;
 static size_t g_launcher_hover_index = (size_t)-1;
+static sl_window_anim_t g_window_anims[SL_WIN_ANIM_MAX];
 
 static void sl_window_refresh_zorder(void);
 static void sl_launcher_compact_label(const char *src, char *dst, size_t cap);
+
+static uint32_t sl_anim_tween_id(size_t slot, uint32_t channel) {
+    return (uint32_t)(0xA1100000u + ((uint32_t)slot * 8u) + channel);
+}
+
+static int32_t sl_anim_find_slot(app_instance_t *task) {
+    if (!task) return -1;
+    for (size_t i = 0u; i < SL_WIN_ANIM_MAX; i++) {
+        if (g_window_anims[i].used && g_window_anims[i].task == task) return (int32_t)i;
+    }
+    return -1;
+}
+
+static int32_t sl_anim_find_or_alloc_slot(app_instance_t *task) {
+    int32_t idx;
+    if (!task) return -1;
+    idx = sl_anim_find_slot(task);
+    if (idx >= 0) return idx;
+    for (size_t i = 0u; i < SL_WIN_ANIM_MAX; i++) {
+        if (!g_window_anims[i].used) {
+            g_window_anims[i].used = 1u;
+            g_window_anims[i].closing = 0u;
+            g_window_anims[i].close_ready = 0u;
+            g_window_anims[i].task = task;
+            g_window_anims[i].y_value = 0.0f;
+            g_window_anims[i].opacity = 255.0f;
+            return (int32_t)i;
+        }
+    }
+    return -1;
+}
+
+static void sl_anim_clear_slot(size_t slot) {
+    if (slot >= SL_WIN_ANIM_MAX) return;
+    sl_tween_cancel_id(sl_anim_tween_id(slot, 0u));
+    sl_tween_cancel_id(sl_anim_tween_id(slot, 1u));
+    g_window_anims[slot].used = 0u;
+    g_window_anims[slot].closing = 0u;
+    g_window_anims[slot].close_ready = 0u;
+    g_window_anims[slot].task = NULL;
+    g_window_anims[slot].y_value = 0.0f;
+    g_window_anims[slot].opacity = 255.0f;
+}
+
+static void sl_anim_clear_task(app_instance_t *task) {
+    int32_t idx = sl_anim_find_slot(task);
+    if (idx >= 0) sl_anim_clear_slot((size_t)idx);
+}
+
+static void sl_anim_on_close_done(uint32_t id, void *userdata) {
+    (void)id;
+    sl_window_anim_t *anim = (sl_window_anim_t *)userdata;
+    if (!anim || !anim->used) return;
+    anim->close_ready = 1u;
+}
+
+static void sl_anim_start_open(sl_window_t *win, app_instance_t *task, int32_t target_y) {
+    if (!sl_tween_is_enabled()) {
+        int32_t idx_now = sl_anim_find_slot(task);
+        if (idx_now >= 0) sl_anim_clear_slot((size_t)idx_now);
+        if (win) {
+            win->y = (target_y < 0) ? 0u : (uint32_t)target_y;
+            win->anim_opacity = 255u;
+            win->force_redraw = 1u;
+            win->next_render_ns = 0ull;
+        }
+        return;
+    }
+
+    int32_t idx = sl_anim_find_or_alloc_slot(task);
+    if (idx < 0) return;
+    sl_window_anim_t *anim = &g_window_anims[(size_t)idx];
+    float target_yf = (float)target_y;
+    anim->closing = 0u;
+    anim->close_ready = 0u;
+    anim->y_value = target_yf + SL_WIN_ANIM_OPEN_OFFSET_Y;
+    anim->opacity = 0.0f;
+    if (win) {
+        int32_t y_px = (int32_t)(anim->y_value + 0.5f);
+        if (y_px < 0) y_px = 0;
+        win->y = (uint32_t)y_px;
+        win->anim_opacity = 0u;
+        win->force_redraw = 1u;
+        win->next_render_ns = 0ull;
+    }
+    (void)sl_tween_to_f32(sl_anim_tween_id((size_t)idx, 0u), &anim->y_value, target_yf,
+                          SL_WIN_ANIM_OPEN_MS, SL_TWEEN_EASE_OUT_CUBIC, NULL, NULL);
+    (void)sl_tween_to_f32(sl_anim_tween_id((size_t)idx, 1u), &anim->opacity, 255.0f,
+                          SL_WIN_ANIM_OPEN_MS, SL_TWEEN_EASE_OUT_CUBIC, NULL, NULL);
+}
+
+static void sl_anim_start_close(app_instance_t *task, int32_t current_y) {
+    int32_t idx = sl_anim_find_or_alloc_slot(task);
+    if (idx < 0) return;
+    sl_window_anim_t *anim = &g_window_anims[(size_t)idx];
+    float current_yf = (float)current_y;
+    if (anim->closing) return;
+    anim->closing = 1u;
+    anim->close_ready = 0u;
+    anim->y_value = current_yf;
+    if (anim->opacity > 255.0f) anim->opacity = 255.0f;
+    if (anim->opacity < 0.0f) anim->opacity = 0.0f;
+
+    if (!sl_tween_is_enabled()) {
+        anim->opacity = 0.0f;
+        anim->close_ready = 1u;
+        return;
+    }
+
+    (void)sl_tween_to_f32(sl_anim_tween_id((size_t)idx, 0u), &anim->y_value,
+                          current_yf + SL_WIN_ANIM_OPEN_OFFSET_Y,
+                          SL_WIN_ANIM_CLOSE_MS, SL_TWEEN_EASE_IN_OUT_CUBIC, NULL, NULL);
+    (void)sl_tween_to_f32(sl_anim_tween_id((size_t)idx, 1u), &anim->opacity,
+                          0.0f, SL_WIN_ANIM_CLOSE_MS,
+                          SL_TWEEN_EASE_IN_OUT_CUBIC, sl_anim_on_close_done, anim);
+}
 
 static int sl_is_space(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
@@ -477,6 +608,14 @@ static size_t sl_window_index_for_task(const app_instance_t *task) {
     return (size_t)-1;
 }
 
+static int sl_window_is_closing(const sl_window_t *win) {
+    int32_t idx;
+    if (!win || !win->task) return 0;
+    idx = sl_anim_find_slot(win->task);
+    if (idx < 0) return 0;
+    return g_window_anims[(size_t)idx].closing ? 1 : 0;
+}
+
 static int sl_window_contains_point(const sl_window_t *win, uint32_t x, uint32_t y) {
     if (!win) return 0;
     if (x < win->x || y < win->y) return 0;
@@ -502,11 +641,13 @@ static int sl_window_close_btn_hit(const sl_window_t *win, uint32_t x, uint32_t 
 
 static void sl_window_close_index(size_t index) {
     if (!g_windows || index >= g_window_count) return;
+    app_instance_t *task = g_windows[index].task;
 
     if (g_windows[index].task && g_windows[index].task->on_close) {
         g_windows[index].task->on_close(g_windows[index].task->userdata);
     }
     sl_window_shutdown(&g_windows[index]);
+    sl_anim_clear_task(task);
 
     for (size_t i = index + 1u; i < g_window_count; i++) {
         g_windows[i - 1u] = g_windows[i];
@@ -684,6 +825,8 @@ static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index) {
     g_window_count++;
     g_focused_window = g_window_count - 1u;
     sl_window_refresh_zorder();
+    sl_anim_start_open(&g_windows[g_window_count - 1u], g_windows[g_window_count - 1u].task,
+                       (int32_t)g_windows[g_window_count - 1u].y);
     sl_dirty_mark_full();
     return 1;
 }
@@ -740,6 +883,7 @@ void sl_windows_focus_at_cursor(uint32_t x, uint32_t y) {
     if (!g_windows || g_window_count == 0u) return;
     for (size_t i = g_window_count; i > 0u; i--) {
         size_t idx = i - 1u;
+        if (sl_window_is_closing(&g_windows[idx])) continue;
         if (sl_window_contains_point(&g_windows[idx], x, y)) {
             sl_focus_window(idx);
             return;
@@ -751,8 +895,10 @@ int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx || !g_windows || g_window_count == 0u) return 0;
     for (size_t i = g_window_count; i > 0u; i--) {
         size_t idx = i - 1u;
+        if (sl_window_is_closing(&g_windows[idx])) continue;
         if (!sl_window_close_btn_hit(&g_windows[idx], x, y)) continue;
-        sl_window_close_index(idx);
+        sl_anim_start_close(g_windows[idx].task, (int32_t)g_windows[idx].y);
+        sl_windows_mark_focused_activity();
         sl_dirty_mark_full();
         return 1;
     }
@@ -775,6 +921,8 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count) {
         g_window_count++;
         g_focused_window = g_window_count - 1u;
         sl_window_refresh_zorder();
+        sl_anim_start_open(&g_windows[g_window_count - 1u], g_windows[g_window_count - 1u].task,
+                           (int32_t)g_windows[g_window_count - 1u].y);
     }
 }
 
@@ -812,6 +960,70 @@ void sl_windows_mark_focused_activity(void) {
     sl_window_mark_activity(focused, peos_time_ns());
 }
 
+void sl_windows_tick_animations(sl_ctx_t *ctx) {
+    uint8_t any_active = 0u;
+    if (!ctx || !g_windows || g_window_count == 0u) return;
+
+    for (size_t i = 0u; i < g_window_count; ) {
+        sl_window_t *win = &g_windows[i];
+        int32_t anim_idx = (win->task) ? sl_anim_find_slot(win->task) : -1;
+        win->anim_opacity = 255u;
+
+        if (anim_idx < 0) {
+            i++;
+            continue;
+        }
+
+        sl_window_anim_t *anim = &g_window_anims[(size_t)anim_idx];
+        uint32_t old_x = win->x;
+        uint32_t old_y = win->y;
+        uint32_t old_w = win->width;
+        uint32_t old_h = win->height;
+
+        int32_t y = (int32_t)(anim->y_value + 0.5f);
+        if (y < 0) y = 0;
+        win->y = (uint32_t)y;
+        if (anim->opacity > 255.0f) anim->opacity = 255.0f;
+        if (anim->opacity < 0.0f) anim->opacity = 0.0f;
+        win->anim_opacity = (uint8_t)(anim->opacity + 0.5f);
+        win->force_redraw = 1u;
+        win->next_render_ns = 0ull;
+        sl_window_mark_activity(win, peos_time_ns());
+
+        sl_dirty_add(ctx, old_x, old_y, old_w, old_h);
+        sl_dirty_add(ctx, win->x, win->y, win->width, win->height);
+
+        if (anim->close_ready) {
+            sl_window_close_index(i);
+            sl_dirty_mark_full();
+            continue;
+        }
+
+        if (anim->closing &&
+            !sl_tween_is_active_id(sl_anim_tween_id((size_t)anim_idx, 0u)) &&
+            !sl_tween_is_active_id(sl_anim_tween_id((size_t)anim_idx, 1u))) {
+            /* Handles runtime disable/reset of tween system while a close animation is in-flight. */
+            anim->close_ready = 1u;
+            sl_window_close_index(i);
+            sl_dirty_mark_full();
+            continue;
+        }
+
+        if (!anim->closing &&
+            !sl_tween_is_active_id(sl_anim_tween_id((size_t)anim_idx, 0u)) &&
+            !sl_tween_is_active_id(sl_anim_tween_id((size_t)anim_idx, 1u)) &&
+            anim->opacity >= 254.5f) {
+            sl_anim_clear_slot((size_t)anim_idx);
+        } else {
+            any_active = 1u;
+        }
+
+        i++;
+    }
+
+    (void)any_active;
+}
+
 void sl_windows_render_all(sl_ctx_t *ctx) {
     if (!ctx || !g_windows || g_window_count == 0u) return;
     for (size_t i = 0; i < g_window_count; i++) {
@@ -824,6 +1036,9 @@ void sl_windows_render_all(sl_ctx_t *ctx) {
 }
 
 void sl_windows_destroy_all(void) {
+    for (size_t i = 0u; i < SL_WIN_ANIM_MAX; i++) {
+        if (g_window_anims[i].used) sl_anim_clear_slot(i);
+    }
     if (g_windows) {
         for (size_t i = 0; i < g_window_count; i++) {
             if (g_windows[i].task && g_windows[i].task->on_close) {

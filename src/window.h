@@ -42,8 +42,12 @@ struct sl_window {
     uint32_t client_width;
     uint32_t client_height;
     uint32_t client_stride;
+    uint8_t *anim_underlay;
+    uint32_t anim_underlay_stride;
+    uint32_t anim_underlay_height;
     uint8_t cache_valid;
     uint8_t force_redraw;
+    uint8_t anim_opacity;
     uint16_t fps_focused;
     uint16_t fps_unfocused;
     uint64_t next_render_ns;

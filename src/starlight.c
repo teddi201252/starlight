@@ -26,6 +26,13 @@ static void sl_fps_tick(sl_ctx_t *ctx, uint32_t *prev_value) {
         ctx->fps_last_ns = now;
     }
 
+    /*
+     * Intentionally redraw only when the numeric FPS value changes.
+     * We use this widget as a visual probe: if it disappears/flickers while
+     * values are stable, something else is over-invalidating or repainting.
+     * Do not switch this to "redraw whenever dirty" unless explicitly needed
+     * for debugging with a different method.
+     */
     if (ctx->fps_value != *prev_value) {
         *prev_value = ctx->fps_value;
         sl_fps_draw(ctx, ctx->fps_value);
@@ -64,8 +71,10 @@ int main(void) {
     }
 
     sl_windows_create_default(&ctx);
+    sl_tween_init();
 
     uint64_t next_frame_ns = 0;
+    uint64_t tween_last_ns = peos_time_ns();
     uint8_t app_prompt_blink_prev = 0u;
     uint32_t fps_value_prev = 0xFFFFFFFFu;
 
@@ -86,6 +95,17 @@ int main(void) {
                 sl_hw_cursor_sync_pos(&ctx);
             }
         }
+
+        {
+            uint64_t now_ns = peos_time_ns();
+            uint64_t dt_ns = now_ns - tween_last_ns;
+            uint32_t dt_ms = (uint32_t)(dt_ns / 1000000ull);
+            if (dt_ms > 0u) {
+                sl_tween_update(dt_ms);
+                tween_last_ns = now_ns;
+            }
+        }
+        sl_windows_tick_animations(&ctx);
 
         sl_app_host_tick(&ctx);
 
@@ -117,6 +137,7 @@ int main(void) {
 
     }
 
+    sl_tween_reset();
     if (ctx.bg_loaded) {
         sl_image_free(&ctx.bg_image);
     }

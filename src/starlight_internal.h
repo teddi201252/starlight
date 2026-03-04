@@ -1,6 +1,7 @@
 #pragma once
 
 #include "starlight.h"
+#include "tween.h"
 #include "window.h"
 
 #include <stddef.h>
@@ -49,6 +50,7 @@ void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint3
 int sl_dirty_intersects_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 int sl_dirty_get_bounds(uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata);
+void sl_windows_tick_animations(sl_ctx_t *ctx);
 
 void sl_app_host_tick(sl_ctx_t *ctx);
 int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t *frame,

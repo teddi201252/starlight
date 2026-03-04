@@ -20,6 +20,10 @@
 #define SL_TICK_NS 1000000ull
 #define SL_PACER_SPIN_NS 300000ull
 #define SL_HW_CURSOR_SCALE_DEFAULT 100u
+#define SL_ANIMATIONS_ENABLED_DEFAULT 1u
+#define SL_ANIMATION_SPEED_DEFAULT 100u
+#define SL_ANIMATION_SPEED_MIN 10u
+#define SL_ANIMATION_SPEED_MAX 400u
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
 #define SL_DIRTY_MAX_RECTS 256u
@@ -452,6 +456,8 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "cursor=%s\n", SL_RESOURCE_CURSOR);
     (void)fprintf(f, "cursor_scale=100\n");
     (void)fprintf(f, "font=%s\n", SL_RESOURCE_FONT_DEFAULT);
+    (void)fprintf(f, "animations_enabled=1\n");
+    (void)fprintf(f, "animation_speed_pct=100\n");
     (void)fclose(f);
 }
 
@@ -551,6 +557,8 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     sl_copy_text(ctx->cursor_path, sizeof(ctx->cursor_path), SL_RESOURCE_CURSOR);
     sl_copy_text(ctx->font_manifest_path, sizeof(ctx->font_manifest_path), SL_RESOURCE_FONT_DEFAULT);
     ctx->hw_cursor_scale_pct = SL_HW_CURSOR_SCALE_DEFAULT;
+    ctx->animations_enabled = SL_ANIMATIONS_ENABLED_DEFAULT;
+    ctx->animation_speed_pct = SL_ANIMATION_SPEED_DEFAULT;
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
     if (!cfg) {
@@ -589,6 +597,18 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     // in addition to the newer UI range.
                     if (sl_parse_u32(val, &n) && n >= 1u && n <= 400u) {
                         ctx->hw_cursor_scale_pct = n;
+                    }
+                } else if (strcmp(key, "animations_enabled") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n)) {
+                        ctx->animations_enabled = (n != 0u) ? 1u : 0u;
+                    }
+                } else if (strcmp(key, "animation_speed_pct") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n)) {
+                        if (n < SL_ANIMATION_SPEED_MIN) n = SL_ANIMATION_SPEED_MIN;
+                        if (n > SL_ANIMATION_SPEED_MAX) n = SL_ANIMATION_SPEED_MAX;
+                        ctx->animation_speed_pct = n;
                     }
                 }
             }
@@ -639,6 +659,23 @@ static void sl_load_theme_config(void) {
     free(cfg);
 
     sl_ui_theme_runtime_set(&theme);
+}
+
+static void sl_apply_animation_config(const sl_ctx_t *ctx) {
+    uint32_t speed = 100u;
+    uint32_t duration_scale_pct = 100u;
+    if (!ctx) return;
+
+    sl_tween_set_enabled(ctx->animations_enabled ? 1u : 0u);
+    speed = ctx->animation_speed_pct;
+    if (speed < SL_ANIMATION_SPEED_MIN) speed = SL_ANIMATION_SPEED_MIN;
+    if (speed > SL_ANIMATION_SPEED_MAX) speed = SL_ANIMATION_SPEED_MAX;
+
+    /* Intuitive mapping: lower speed => slower animations (longer duration). */
+    duration_scale_pct = (10000u + (speed / 2u)) / speed; /* speed=100 -> 100% */
+    if (duration_scale_pct < 10u) duration_scale_pct = 10u;
+    if (duration_scale_pct > 2000u) duration_scale_pct = 2000u;
+    sl_tween_set_duration_scale_pct(duration_scale_pct);
 }
 
 char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap) {
@@ -722,6 +759,7 @@ int sl_init(sl_ctx_t *ctx) {
     sl_ensure_config_dirs();
     sl_load_display_config(ctx);
     sl_load_starlight_config(ctx);
+    sl_apply_animation_config(ctx);
     sl_load_theme_config();
     sl_font_reset_default();
     if (ctx->font_manifest_path[0]) {
@@ -765,6 +803,7 @@ void sl_reload_display(sl_ctx_t *ctx) {
     if (!ctx) return;
 
     sl_load_starlight_config(ctx);
+    sl_apply_animation_config(ctx);
     sl_load_theme_config();
     sl_font_reset_default();
     if (ctx->font_manifest_path[0]) {
