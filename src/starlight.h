@@ -36,6 +36,8 @@ typedef struct {
     char font_manifest_path[160];
     uint32_t display_width;
     uint32_t display_height;
+    uint8_t animations_enabled;
+    uint32_t animation_speed_pct;
 
     // Background
     sl_image_t bg_image;

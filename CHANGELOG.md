@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.7.0] - 2026-03-04
+- Add tween-based window animations, runtime animation config, and performance fixes
+
 ## [0.6.0] - 2026-03-04
 - Optimize Starlight UI dirty invalidation for hover/drag/scroll and fix input regressions
 

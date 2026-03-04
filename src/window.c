@@ -29,6 +29,26 @@ static int sl_window_ensure_surface(sl_window_t *win) {
     return 1;
 }
 
+static int sl_window_ensure_anim_underlay(sl_window_t *win) {
+    if (!win || !win->ctx || win->width == 0u || win->height == 0u) return 0;
+    uint32_t stride = win->width * win->ctx->bytespp;
+    size_t bytes = (size_t)stride * (size_t)win->height;
+    if (bytes == 0u) return 0;
+
+    if (win->anim_underlay &&
+        win->anim_underlay_stride == stride &&
+        win->anim_underlay_height == win->height) {
+        return 1;
+    }
+
+    uint8_t *new_buf = (uint8_t *)realloc(win->anim_underlay, bytes);
+    if (!new_buf) return 0;
+    win->anim_underlay = new_buf;
+    win->anim_underlay_stride = stride;
+    win->anim_underlay_height = win->height;
+    return 1;
+}
+
 static int sl_window_copy_frame_to_cache(sl_window_t *win) {
     if (!win || !win->ctx || !win->ctx->frame) return 0;
     if (!sl_window_ensure_surface(win)) return 0;
@@ -181,6 +201,7 @@ int sl_window_init(sl_window_t *win, sl_ctx_t *ctx, app_instance_t* task, uint32
     win->top_bar_height = 20u;
     win->cache_valid = 0u;
     win->force_redraw = 1u;
+    win->anim_opacity = 255u;
     win->fps_focused = 60u;
     win->fps_unfocused = 24u;
     win->next_render_ns = 0ull;
@@ -197,14 +218,27 @@ void sl_window_shutdown(sl_window_t *win) {
         free(win->client_surface);
         win->client_surface = NULL;
     }
+    if (win->anim_underlay) {
+        free(win->anim_underlay);
+        win->anim_underlay = NULL;
+    }
     win->client_width = 0u;
     win->client_height = 0u;
     win->client_stride = 0u;
+    win->anim_underlay_stride = 0u;
+    win->anim_underlay_height = 0u;
     win->cache_valid = 0u;
 }
 
 int sl_window_render(sl_window_t *win) {
     if (!win) return 0;
+
+    uint8_t anim_opacity = win->anim_opacity;
+    uint8_t need_anim_blend = (anim_opacity < 255u) ? 1u : 0u;
+    uint8_t *underlay = NULL;
+    uint32_t underlay_stride = 0u;
+    int64_t ux0 = 0, uy0 = 0, ux1 = 0, uy1 = 0;
+    uint32_t ucopy_w = 0u, ucopy_h = 0u, uoff_x = 0u, uoff_y = 0u;
 
     uint64_t now = peos_time_ns();
     uint16_t base_fps = win->focused ? win->fps_focused : win->fps_unfocused;
@@ -233,6 +267,45 @@ int sl_window_render(sl_window_t *win) {
 
     if (!due) return 1;
 
+    if (need_anim_blend) {
+        int64_t x0 = (int64_t)win->x;
+        int64_t y0 = (int64_t)win->y;
+        int64_t x1 = x0 + (int64_t)win->width;
+        int64_t y1 = y0 + (int64_t)win->height;
+        ux0 = (x0 < 0) ? 0 : x0;
+        uy0 = (y0 < 0) ? 0 : y0;
+        ux1 = (x1 > (int64_t)win->ctx->fb.width) ? (int64_t)win->ctx->fb.width : x1;
+        uy1 = (y1 > (int64_t)win->ctx->fb.height) ? (int64_t)win->ctx->fb.height : y1;
+        if (ux1 > ux0 && uy1 > uy0) {
+            if (sl_window_ensure_anim_underlay(win)) {
+                underlay = win->anim_underlay;
+                underlay_stride = win->anim_underlay_stride;
+                if (underlay_stride == 0u) {
+                    need_anim_blend = 0u;
+                } else {
+                ucopy_w = (uint32_t)(ux1 - ux0);
+                ucopy_h = (uint32_t)(uy1 - uy0);
+                uoff_x = (uint32_t)(ux0 - x0);
+                uoff_y = (uint32_t)(uy0 - y0);
+                size_t row_bytes = (size_t)ucopy_w * (size_t)win->ctx->bytespp;
+                for (uint32_t row = 0; row < ucopy_h; row++) {
+                    uint8_t *dst = underlay +
+                                   ((size_t)(uoff_y + row) * (size_t)underlay_stride) +
+                                   ((size_t)uoff_x * (size_t)win->ctx->bytespp);
+                    const uint8_t *src = win->ctx->frame +
+                                         ((size_t)(uy0 + row) * win->ctx->row_stride) +
+                                         ((size_t)ux0 * (size_t)win->ctx->bytespp);
+                    peos_memcpy(dst, src, row_bytes);
+                }
+                }
+            } else {
+                need_anim_blend = 0u;
+            }
+        } else {
+            need_anim_blend = 0u;
+        }
+    }
+
     // For now render a black box on position and size of the window. In the future we can render the actual framebuffer content here.
     sl_fill_rect(win->ctx, win->x, win->y, win->width, win->height,
                  0u, 0u, 0u);
@@ -259,6 +332,27 @@ int sl_window_render(sl_window_t *win) {
         win->task->on_render(win->ctx, win, win->task->userdata);
     }
 
+    if (need_anim_blend && underlay) {
+        uint32_t inv = (uint32_t)(255u - anim_opacity);
+        if (ucopy_w > 0u && ucopy_h > 0u) {
+            for (uint32_t row = 0; row < ucopy_h; row++) {
+                uint8_t *dst = win->ctx->frame +
+                               ((size_t)(uy0 + row) * win->ctx->row_stride) +
+                               ((size_t)ux0 * (size_t)win->ctx->bytespp);
+                const uint8_t *bg = underlay +
+                                    ((size_t)(uoff_y + row) * (size_t)underlay_stride) +
+                                    ((size_t)uoff_x * (size_t)win->ctx->bytespp);
+                for (uint32_t col = 0u; col < ucopy_w; col++) {
+                    uint8_t *d = dst + ((size_t)col * (size_t)win->ctx->bytespp);
+                    const uint8_t *b = bg + ((size_t)col * (size_t)win->ctx->bytespp);
+                    d[0] = (uint8_t)((((uint32_t)d[0] * anim_opacity) + ((uint32_t)b[0] * inv) + 127u) / 255u);
+                    d[1] = (uint8_t)((((uint32_t)d[1] * anim_opacity) + ((uint32_t)b[1] * inv) + 127u) / 255u);
+                    d[2] = (uint8_t)((((uint32_t)d[2] * anim_opacity) + ((uint32_t)b[2] * inv) + 127u) / 255u);
+                    if (win->ctx->bytespp == 4u) d[3] = 0xFFu;
+                }
+            }
+        }
+    }
     win->cache_valid = sl_window_copy_frame_to_cache(win) ? 1u : 0u;
     win->force_redraw = 0u;
     if (target_fps > 0u) {
