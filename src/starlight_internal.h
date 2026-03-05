@@ -37,6 +37,7 @@ void sl_windows_focus_at_cursor(uint32_t x, uint32_t y);
 int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_windows_destroy_all(void);
 void sl_windows_mark_focused_activity(void);
+int sl_windows_open_app_bundle_path(sl_ctx_t *ctx, const char *bundle_path);
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y);
 sl_window_t* sl_window_get_focused(void);
 void sl_launcher_render(sl_ctx_t *ctx);

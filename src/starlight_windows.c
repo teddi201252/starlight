@@ -1,5 +1,6 @@
 #include "starlight_internal.h"
 #include "app_host.h"
+#include "context_menu_renderer.h"
 #include "render/pixels.h"
 #include "window.h"
 
@@ -45,6 +46,7 @@ typedef struct {
 typedef struct {
     size_t slot;
     char title[64];
+    char bundle_path[256];
     char icon_path[160];
     sl_image_t icon_image;
     uint8_t icon_loaded;
@@ -442,7 +444,7 @@ static void sl_launcher_items_reset(void) {
     g_launcher_ctx_h = 0u;
 }
 
-static void sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app) {
+static void sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app, const char *bundle_path) {
     if (!app || g_launcher_count >= SL_APP_SLOT_MAX) return;
     sl_launcher_item_t *item = &g_launcher_items[g_launcher_count++];
     item->slot = slot;
@@ -452,6 +454,7 @@ static void sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app) {
     item->icon_loaded = 0u;
     item->icon_failed = 0u;
     sl_copy_str(item->title, sizeof(item->title), app->title);
+    sl_copy_str(item->bundle_path, sizeof(item->bundle_path), bundle_path);
     sl_copy_str(item->icon_path, sizeof(item->icon_path), app->icon);
     if (item->title[0] == '\0') {
         sl_copy_str(item->title, sizeof(item->title), "App");
@@ -661,6 +664,11 @@ static void sl_launcher_context_action_text(const sl_launcher_item_t *item, uint
         if (action == 0u) sl_copy_str(out, out_cap, "Open");
         else sl_copy_str(out, out_cap, "(invalid)");
     }
+}
+
+static void sl_launcher_context_label_cb(uint32_t option_index, char *out, size_t out_cap, void *userdata) {
+    const sl_launcher_item_t *item = (const sl_launcher_item_t *)userdata;
+    sl_launcher_context_action_text(item, option_index, out, out_cap);
 }
 
 static void sl_launcher_context_open(sl_ctx_t *ctx, size_t item_index, uint32_t anchor_x, uint32_t anchor_y) {
@@ -1000,6 +1008,16 @@ static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index) {
     return 1;
 }
 
+int sl_windows_open_app_bundle_path(sl_ctx_t *ctx, const char *bundle_path) {
+    if (!ctx || !bundle_path || bundle_path[0] == '\0') return 0;
+    for (size_t i = 0u; i < g_launcher_count; i++) {
+        if (g_launcher_items[i].bundle_path[0] == '\0') continue;
+        if (strcmp(g_launcher_items[i].bundle_path, bundle_path) != 0) continue;
+        return sl_windows_open_launcher_item(ctx, i);
+    }
+    return 0;
+}
+
 static size_t sl_load_apps_from_system(void) {
     sl_app_host_slots_clear();
     sl_launcher_items_reset();
@@ -1041,7 +1059,7 @@ static size_t sl_load_apps_from_system(void) {
             if (!sl_load_app_bundle(bundle_path, NULL, &app)) continue;
         }
         if (!sl_app_host_slot_configure(slot, app.title, app.exec, app.args)) continue;
-        sl_launcher_add_item(slot, &app);
+        sl_launcher_add_item(slot, &app, bundle_path);
         slot++;
     }
 
@@ -1106,7 +1124,7 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
         sl_app_bundle_t fallback;
         peos_memset(&fallback, 0, sizeof(fallback));
         sl_copy_str(fallback.title, sizeof(fallback.title), "Orbit");
-        sl_launcher_add_item(0u, &fallback);
+        sl_launcher_add_item(0u, &fallback, NULL);
     }
 
     sl_dirty_mark_full();
@@ -1423,26 +1441,16 @@ void sl_launcher_render(sl_ctx_t *ctx) {
         const sl_launcher_item_t *item = &g_launcher_items[g_launcher_ctx_item_index];
         uint32_t action_count = sl_launcher_context_action_count(item);
         if (action_count > 0u) {
-            uint32_t mx = g_launcher_ctx_x;
-            uint32_t my = g_launcher_ctx_y;
-            uint32_t mw = g_launcher_ctx_w;
-            uint32_t mh = g_launcher_ctx_h;
-            sl_fill_rect_a(ctx, mx + 1u, my + mh, mw, 2u, 0u, 0u, 0u, 72u);
-            sl_fill_rect_a(ctx, mx + mw, my + 1u, 2u, mh + 1u, 0u, 0u, 0u, 72u);
-            sl_fill_rect(ctx, mx, my, mw, mh, 26u, 31u, 39u);
-            sl_fill_rect(ctx, mx, my, mw, 1u, 92u, 108u, 126u);
-            sl_fill_rect(ctx, mx, my + mh - 1u, mw, 1u, 92u, 108u, 126u);
-            sl_fill_rect(ctx, mx, my, 1u, mh, 92u, 108u, 126u);
-            sl_fill_rect(ctx, mx + mw - 1u, my, 1u, mh, 92u, 108u, 126u);
-
-            for (uint32_t i = 0u; i < action_count; i++) {
-                uint32_t row_y = my + 1u + i * SL_LAUNCHER_CTX_ROW_H;
-                uint8_t hover = ((int32_t)i == g_launcher_ctx_hover_row) ? 1u : 0u;
-                if (hover) sl_fill_rect(ctx, mx + 1u, row_y, mw - 2u, SL_LAUNCHER_CTX_ROW_H, 62u, 74u, 92u);
-                char label[24];
-                sl_launcher_context_action_text(item, i, label, sizeof(label));
-                sl_draw_text(ctx, mx + 8u, row_y + 6u, label, 236u, 240u, 244u);
-            }
+            sl_context_menu_draw(ctx,
+                                 g_launcher_ctx_x, g_launcher_ctx_y, g_launcher_ctx_w, g_launcher_ctx_h,
+                                 SL_LAUNCHER_CTX_ROW_H,
+                                 action_count,
+                                 0u,
+                                 action_count,
+                                 g_launcher_ctx_hover_row,
+                                 0u,
+                                 sl_launcher_context_label_cb,
+                                 (void *)item);
         }
     }
 }
