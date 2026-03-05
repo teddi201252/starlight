@@ -54,6 +54,19 @@ typedef struct {
     uint32_t text_caret_id;
     uint32_t text_caret_pos;
     uint32_t text_area_scroll_line;
+    uint32_t select_open_id;
+    uint8_t select_overlay_pending;
+    uint32_t select_overlay_id;
+    uint32_t select_overlay_x;
+    uint32_t select_overlay_y;
+    uint32_t select_overlay_w;
+    uint32_t select_overlay_row_h;
+    uint32_t select_overlay_start_idx;
+    uint32_t select_overlay_visible_items;
+    uint32_t select_overlay_option_count;
+    uint32_t select_overlay_selected;
+    const char *select_overlay_options_pipe;
+    uint32_t select_scroll_idx;
     uint32_t font_px;
     sl_ui_theme_t theme;
     uint8_t theme_initialized;
@@ -140,11 +153,19 @@ uint8_t sl_ui_toggle_state(sl_ui_ctx_t *ui, uint32_t id,
 uint8_t sl_ui_select_cycle(sl_ui_ctx_t *ui, uint32_t id,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                            uint32_t option_count, uint32_t *selected,
-                           const char *current_text);
+                           const char *current_text,
+                           const char *options_pipe);
 uint8_t sl_ui_select_cycle_state(sl_ui_ctx_t *ui, uint32_t id,
                                  uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                  uint32_t option_count, uint32_t *selected,
-                                 const char *current_text, uint8_t enabled);
+                                 const char *current_text, const char *options_pipe,
+                                 uint8_t enabled);
+uint8_t sl_ui_select_cycle_state_ex(sl_ui_ctx_t *ui, uint32_t id,
+                                    uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                    uint32_t option_count, uint32_t *selected,
+                                    const char *current_text, const char *options_pipe,
+                                    const peos_input_event_t *events, uint8_t event_count,
+                                    uint8_t enabled);
 
 uint8_t sl_ui_text_input(sl_ui_ctx_t *ui, uint32_t id,
                          uint32_t x, uint32_t y, uint32_t w, uint32_t h,
@@ -210,3 +231,5 @@ uint8_t sl_ui_grid_cell(const sl_ui_grid_t *grid, uint32_t col, uint32_t row,
 uint8_t sl_ui_grid_next(sl_ui_grid_t *grid,
                         uint32_t *out_x, uint32_t *out_y,
                         uint32_t *out_w, uint32_t *out_h);
+
+void sl_ui_draw_overlays(sl_ui_ctx_t *ui);

@@ -1815,6 +1815,26 @@ static int orbit_ui_cmd_is_interactive(const orbit_ui_cmd_t *cmd) {
     }
 }
 
+static uint8_t orbit_ui_cmd_enabled_for_modal(const orbit_ui_cmd_t *cmd, uint32_t modal_select_id) {
+    if (!cmd || !cmd->enabled) return 0u;
+    if (modal_select_id != 0u && cmd->id != modal_select_id) return 0u;
+    return 1u;
+}
+
+static uint8_t orbit_ui_dropdown_popup_rect(const orbit_shell_t *shell,
+                                            uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!shell || !x || !y || !w || !h) return 0u;
+    if (!shell->ui.ui.select_open_id) return 0u;
+    if (shell->ui.ui.select_overlay_visible_items == 0u ||
+        shell->ui.ui.select_overlay_row_h == 0u ||
+        shell->ui.ui.select_overlay_w == 0u) return 0u;
+    *x = shell->ui.ui.select_overlay_x;
+    *y = shell->ui.ui.select_overlay_y;
+    *w = shell->ui.ui.select_overlay_w;
+    *h = shell->ui.ui.select_overlay_visible_items * shell->ui.ui.select_overlay_row_h + 2u;
+    return (*w > 0u && *h > 0u) ? 1u : 0u;
+}
+
 static uint8_t orbit_ui_cmd_rect(const sl_window_t *win, const orbit_ui_cmd_t *cmd,
                                  uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
     if (!win || !cmd || !x || !y || !w || !h) return 0u;
@@ -1854,6 +1874,7 @@ static void orbit_rect_union_accum(uint8_t *has_rect,
 }
 
 static int orbit_ui_cmd_find_hovered(const sl_window_t *win, const orbit_shell_t *shell,
+                                     uint32_t modal_select_id,
                                      uint32_t cursor_x, uint32_t cursor_y,
                                      uint32_t *out_id, uint32_t *out_x, uint32_t *out_y,
                                      uint32_t *out_w, uint32_t *out_h, size_t *out_idx) {
@@ -1864,6 +1885,7 @@ static int orbit_ui_cmd_find_hovered(const sl_window_t *win, const orbit_shell_t
         size_t idx = i - 1u;
         const orbit_ui_cmd_t *cmd = &shell->ui.cmds[idx];
         if (!orbit_ui_cmd_is_interactive(cmd)) continue;
+        if (!orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id)) continue;
         uint32_t x = 0u, y = 0u, w = 0u, h = 0u;
         if (!orbit_ui_cmd_rect(win, cmd, &x, &y, &w, &h)) continue;
         if (cursor_x >= x && cursor_y >= y && cursor_x < (x + w) && cursor_y < (y + h)) {
@@ -1905,15 +1927,28 @@ int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t 
 
     uint8_t has_rect = 0u;
     uint32_t rx = 0u, ry = 0u, rw = 0u, rh = 0u;
+    uint32_t modal_select_id = shell->ui.ui.select_open_id;
+    uint32_t dd_x = 0u, dd_y = 0u, dd_w = 0u, dd_h = 0u;
+    uint8_t dropdown_open = orbit_ui_dropdown_popup_rect(shell, &dd_x, &dd_y, &dd_w, &dd_h);
 
     uint32_t cursor_x = win->ctx ? win->ctx->cursor_x : 0u;
     uint32_t cursor_y = win->ctx ? win->ctx->cursor_y : 0u;
 
     uint32_t hover_id = 0u, hover_x = 0u, hover_y = 0u, hover_w = 0u, hover_h = 0u;
     size_t hover_idx = 0u;
-    uint8_t hover_now = orbit_ui_cmd_find_hovered(win, shell,
+    uint8_t hover_now = orbit_ui_cmd_find_hovered(win, shell, modal_select_id,
                                                   cursor_x, cursor_y,
                                                   &hover_id, &hover_x, &hover_y, &hover_w, &hover_h, &hover_idx) ? 1u : 0u;
+    if (dropdown_open &&
+        cursor_x >= dd_x && cursor_y >= dd_y &&
+        cursor_x < (dd_x + dd_w) && cursor_y < (dd_y + dd_h)) {
+        hover_now = 1u;
+        hover_id = modal_select_id;
+        hover_x = dd_x;
+        hover_y = dd_y;
+        hover_w = dd_w;
+        hover_h = dd_h;
+    }
     uint8_t hover_prev = (shell->ui.hover_cmd_id != 0u) ? 1u : 0u;
     uint8_t hover_changed = 0u;
     if (hover_now != hover_prev) {
@@ -1970,6 +2005,12 @@ int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t 
                 }
             }
         }
+    }
+
+    if (dropdown_open &&
+        (frame->mouse_moved || frame->mouse_left_pressed || frame->mouse_left_released ||
+         frame->mouse_wheel_x != 0 || frame->mouse_wheel_y != 0)) {
+        orbit_rect_union_accum(&has_rect, &rx, &ry, &rw, &rh, dd_x, dd_y, dd_w, dd_h);
     }
 
     shell->ui.hover_cmd_id = hover_now ? hover_id : 0u;
@@ -2036,6 +2077,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     sl_draw_text(ctx, win->x + 6u, win->y + 6u, title, 20u, 20u, 20u);
 
     if (shell->ui.enabled && shell->ui.committed) {
+        uint32_t select_open_before = shell->ui.ui.select_open_id;
         sl_ui_begin(&shell->ui.ui, ctx, win,
                     ctx->cursor_x, ctx->cursor_y,
                     shell->ui.mouse_down, shell->ui.mouse_pressed, shell->ui.mouse_released,
@@ -2062,6 +2104,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         uint8_t clip_depth = 0u;
         sl_clip_set(ctx, body_x, body_y, body_w, body_h);
 
+        uint32_t modal_select_id = shell->ui.ui.select_open_id;
         for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
             orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
             uint32_t x = body_x + cmd->x;
@@ -2104,20 +2147,23 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             } else if (cmd->type == ORBIT_UI_CMD_LABEL_THEME) {
                 sl_ui_label(&shell->ui.ui, x, y, cmd->text, (sl_ui_color_token_t)cmd->value);
             } else if (cmd->type == ORBIT_UI_CMD_BUTTON) {
-                if (sl_ui_button_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, cmd->enabled)) {
+                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                if (sl_ui_button_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, en)) {
                     orbit_send_ui_event_button(shell, cmd->id);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_SLIDER) {
                 uint32_t prev = cmd->value;
+                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
                 if (sl_ui_slider_u32_state(&shell->ui.ui, cmd->id, x, y, cmd->w,
-                                           cmd->min_v, cmd->max_v, &cmd->value, cmd->enabled)) {
+                                           cmd->min_v, cmd->max_v, &cmd->value, en)) {
                     if (cmd->value != prev) {
                         orbit_send_ui_event_slider(shell, cmd->id, cmd->value);
                     }
                 }
             } else if (cmd->type == ORBIT_UI_CMD_TOGGLE) {
                 uint8_t v = cmd->value ? 1u : 0u;
-                if (sl_ui_toggle_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, &v, cmd->text, cmd->enabled)) {
+                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                if (sl_ui_toggle_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, &v, cmd->text, en)) {
                     cmd->value = v;
                     orbit_send_ui_event_toggle(shell, cmd->id, cmd->value);
                 } else {
@@ -2126,8 +2172,10 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             } else if (cmd->type == ORBIT_UI_CMD_SELECT) {
                 char current[ORBIT_UI_TEXT_CHARS];
                 orbit_select_option_text(cmd->text, cmd->value, current, sizeof(current));
-                if (sl_ui_select_cycle_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
-                                             cmd->min_v, &cmd->value, current, cmd->enabled)) {
+                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                if (sl_ui_select_cycle_state_ex(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
+                                                cmd->min_v, &cmd->value, current, cmd->text,
+                                                shell->ui.key_events, shell->ui.key_event_count, en)) {
                     orbit_send_ui_event_select(shell, cmd->id, cmd->value);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_TEXT_INPUT) {
@@ -2135,10 +2183,11 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 if (max_chars < 1u) max_chars = 1u;
                 if (max_chars >= ORBIT_UI_TEXT_CHARS) max_chars = ORBIT_UI_TEXT_CHARS - 1u;
                 cmd->text[max_chars] = '\0';
+                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
                 if (sl_ui_text_input_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
                                            cmd->text, max_chars + 1u,
                                            shell->ui.key_events, shell->ui.key_event_count,
-                                           cmd->enabled)) {
+                                           en)) {
                     orbit_send_ui_event_text_input(shell, cmd->id, cmd->text);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_TEXT_AREA) {
@@ -2146,14 +2195,16 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 if (max_chars < 1u) max_chars = 1u;
                 if (max_chars >= ORBIT_UI_TEXT_CHARS) max_chars = ORBIT_UI_TEXT_CHARS - 1u;
                 cmd->text[max_chars] = '\0';
+                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
                 if (sl_ui_text_area_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
                                           cmd->text, max_chars + 1u,
                                           shell->ui.key_events, shell->ui.key_event_count,
-                                          cmd->enabled)) {
+                                          en)) {
                     orbit_send_ui_event_text_area(shell, cmd->id, cmd->text);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_SCROLL_V) {
                 uint32_t prev = cmd->value;
+                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
                 uint32_t hit_x = x;
                 uint32_t hit_y = y;
                 uint32_t hit_w = cmd->w;
@@ -2180,13 +2231,14 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 }
 
                 if (sl_ui_scroll_v_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->max_v, &cmd->value,
-                                         hit_x, hit_y, hit_w, hit_h, cmd->enabled)) {
+                                         hit_x, hit_y, hit_w, hit_h, en)) {
                     if (cmd->value != prev) {
                         orbit_send_ui_event_scroll_v(shell, cmd->id, cmd->value);
                     }
                 }
             } else if (cmd->type == ORBIT_UI_CMD_PANEL) {
-                if (cmd->enabled && cmd->w > 0u && cmd->h > 0u) {
+                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                if (en && cmd->w > 0u && cmd->h > 0u) {
                     uint8_t hovered = 0u;
                     uint32_t cx = shell->ui.ui.cursor_x;
                     uint32_t cy = shell->ui.ui.cursor_y;
@@ -2223,8 +2275,9 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 char title[ORBIT_UI_TEXT_CHARS];
                 char subtitle[ORBIT_UI_TEXT_CHARS];
                 orbit_split_list_item_text(cmd->text, title, sizeof(title), subtitle, sizeof(subtitle));
+                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
                 if (sl_ui_list_item(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
-                                    title, subtitle, cmd->enabled)) {
+                                    title, subtitle, en)) {
                     orbit_send_ui_event_button(shell, cmd->id);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_RECT) {
@@ -2256,7 +2309,15 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             }
         }
 
+        sl_clip_set(ctx, body_x, body_y, body_w, body_h);
+        sl_ui_draw_overlays(&shell->ui.ui);
         sl_clip_clear(ctx);
+
+        if (select_open_before != shell->ui.ui.select_open_id) {
+            // Ensure all controls refresh visual state immediately when dropdown opens/closes.
+            sl_dirty_add(ctx, win->x, win->y, win->width, win->height);
+        }
+
         if (!shell->ui.mouse_down) shell->ui.active_panel_id = 0u;
         shell->ui.mouse_pressed = 0u;
         shell->ui.mouse_released = 0u;

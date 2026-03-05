@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.7.1] - 2026-03-05
+- Dropdown overlay UX fixes (shadow, scroll, keyboard nav) and ESC handling cleanup
+
 ## [0.7.0] - 2026-03-04
 - Add tween-based window animations, runtime animation config, and performance fixes
 
