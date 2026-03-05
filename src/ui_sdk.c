@@ -787,6 +787,7 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
                                uint8_t enabled) {
     if (!ui || !ui->ctx || !text || text_cap < 2u || w < 16u || h < 12u) return 0u;
 
+    int was_focused = (ui->focused_id == id);
     int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
     if (enabled && ui->mouse_pressed) {
         if (hovered) {
@@ -805,8 +806,26 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     if (focused && ui->text_caret_id != id) {
         ui->text_caret_id = id;
         ui->text_caret_pos = len;
+        ui->text_input_scroll_col = 0u;
     }
     if (ui->text_caret_id == id && ui->text_caret_pos > len) ui->text_caret_pos = len;
+
+    if (enabled && ui->mouse_pressed && hovered && was_focused) {
+        uint32_t fw = sl_ui_font_w(ui);
+        uint32_t vis_chars = (w > 12u) ? ((w - 12u) / fw) : 0u;
+        uint32_t start = ui->text_input_scroll_col;
+        uint32_t max_scroll_col = (len > vis_chars) ? (len - vis_chars) : 0u;
+        if (start > max_scroll_col) start = max_scroll_col;
+        if (ui->cursor_x <= x + 6u) {
+            ui->text_caret_pos = start;
+        } else if (vis_chars > 0u) {
+            uint32_t rel = ui->cursor_x - (x + 6u);
+            uint32_t col = rel / fw;
+            if (col > vis_chars) col = vis_chars;
+            ui->text_caret_pos = start + col;
+        }
+        if (ui->text_caret_pos > len) ui->text_caret_pos = len;
+    }
 
     uint8_t changed = 0u;
     for (uint8_t i = 0u; i < event_count; i++) {
@@ -897,18 +916,26 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     if (vis_chars > 0u) {
         uint8_t caret_visible = (enabled && focused &&
                                  ((peos_time_ns() / 500000000ull) & 1ull)) ? 1u : 0u;
-        uint32_t start = 0u;
-        if (ui->text_caret_pos > vis_chars) {
-            start = ui->text_caret_pos - vis_chars;
+        uint32_t input_caret_pos = (ui->text_caret_id == id) ? ui->text_caret_pos : len;
+        uint32_t max_scroll_col = (len > vis_chars) ? (len - vis_chars) : 0u;
+        if (ui->text_input_scroll_col > max_scroll_col) ui->text_input_scroll_col = max_scroll_col;
+        if (focused) {
+            if (input_caret_pos < ui->text_input_scroll_col) ui->text_input_scroll_col = input_caret_pos;
+            if (input_caret_pos >= ui->text_input_scroll_col + vis_chars) {
+                ui->text_input_scroll_col = input_caret_pos - vis_chars + 1u;
+            }
+            if (ui->text_input_scroll_col > max_scroll_col) ui->text_input_scroll_col = max_scroll_col;
         }
-        if (start > len) start = len;
+        uint32_t start = focused ? ui->text_input_scroll_col : 0u;
         char draw_buf[192];
         uint32_t n = 0u;
-        while (text[start + n] && n + 2u < (uint32_t)sizeof(draw_buf)) {
+        while (text[start + n] &&
+               n + 2u < (uint32_t)sizeof(draw_buf) &&
+               n < vis_chars) {
             draw_buf[n] = text[start + n];
             n++;
         }
-        uint32_t caret_draw = (ui->text_caret_pos >= start) ? (ui->text_caret_pos - start) : 0u;
+        uint32_t caret_draw = (input_caret_pos >= start) ? (input_caret_pos - start) : 0u;
         if (caret_draw > vis_chars) caret_draw = vis_chars;
         draw_buf[n] = '\0';
         uint32_t text_x = x + 6u;
@@ -951,6 +978,23 @@ static uint32_t sl_ui_text_total_lines(const char *text) {
     return lines;
 }
 
+static uint32_t sl_ui_text_max_line_len(const char *text) {
+    if (!text) return 0u;
+    uint32_t max_len = 0u;
+    uint32_t cur_len = 0u;
+    for (uint32_t i = 0u;; i++) {
+        char c = text[i];
+        if (c == '\0' || c == '\n') {
+            if (cur_len > max_len) max_len = cur_len;
+            if (c == '\0') break;
+            cur_len = 0u;
+            continue;
+        }
+        cur_len++;
+    }
+    return max_len;
+}
+
 static uint32_t sl_ui_text_line_col_at(const char *text, uint32_t pos, uint32_t *col_out) {
     uint32_t line = 0u;
     uint32_t col = 0u;
@@ -964,6 +1008,24 @@ static uint32_t sl_ui_text_line_col_at(const char *text, uint32_t pos, uint32_t 
     }
     if (col_out) *col_out = col;
     return line;
+}
+
+static uint32_t sl_ui_text_pos_from_line_col(const char *text, uint32_t target_line, uint32_t target_col) {
+    uint32_t line = 0u;
+    uint32_t i = 0u;
+    if (!text) return 0u;
+
+    while (text[i] && line < target_line) {
+        if (text[i] == '\n') line++;
+        i++;
+    }
+    if (line < target_line) return i;
+
+    uint32_t line_start = i;
+    uint32_t line_end = sl_ui_text_line_end(text, line_start);
+    uint32_t line_len = line_end - line_start;
+    if (target_col > line_len) target_col = line_len;
+    return line_start + target_col;
 }
 
 static void sl_ui_text_insert_char(char *text, uint32_t *len, uint32_t cap, uint32_t *caret, char c) {
@@ -992,6 +1054,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
                               uint8_t enabled) {
     if (!ui || !ui->ctx || !text || text_cap < 2u || w < 24u || h < 24u) return 0u;
 
+    int was_focused = (ui->focused_id == id);
     int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
     if (enabled && ui->mouse_pressed) {
         if (hovered) ui->focused_id = id;
@@ -1010,6 +1073,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         ui->text_caret_id = id;
         ui->text_caret_pos = len;
         ui->text_area_scroll_line = 0u;
+        ui->text_area_scroll_col = 0u;
     }
     if (ui->text_caret_id == id && ui->text_caret_pos > len) ui->text_caret_pos = len;
 
@@ -1121,6 +1185,22 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t total_lines = sl_ui_text_total_lines(text);
     uint32_t max_scroll = (total_lines > vis_lines) ? (total_lines - vis_lines) : 0u;
     if (ui->text_area_scroll_line > max_scroll) ui->text_area_scroll_line = max_scroll;
+    uint32_t max_line_len = sl_ui_text_max_line_len(text);
+    uint32_t max_scroll_col = (max_line_len > vis_cols) ? (max_line_len - vis_cols) : 0u;
+    if (ui->text_area_scroll_col > max_scroll_col) ui->text_area_scroll_col = max_scroll_col;
+
+    if (enabled && ui->mouse_pressed && hovered && was_focused) {
+        uint32_t click_row = 0u;
+        uint32_t click_col = 0u;
+        if (ui->cursor_y > content_y) click_row = (ui->cursor_y - content_y) / fh;
+        if (click_row >= vis_lines) click_row = vis_lines - 1u;
+        if (ui->cursor_x > content_x) click_col = (ui->cursor_x - content_x) / fw;
+        if (click_col > vis_cols) click_col = vis_cols;
+        click_col += ui->text_area_scroll_col;
+        uint32_t click_line = ui->text_area_scroll_line + click_row;
+        ui->text_caret_pos = sl_ui_text_pos_from_line_col(text, click_line, click_col);
+        if (ui->text_caret_pos > len) ui->text_caret_pos = len;
+    }
 
     if (enabled && hovered && !ui->wheel_consumed && max_scroll > 0u) {
         int32_t wheel = (ui->wheel_y != 0) ? ui->wheel_y : ui->wheel_x;
@@ -1133,14 +1213,20 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         }
     }
 
+    uint32_t area_caret_pos = (ui->text_caret_id == id) ? ui->text_caret_pos : len;
     uint32_t caret_col = 0u;
-    uint32_t caret_line = sl_ui_text_line_col_at(text, ui->text_caret_pos, &caret_col);
+    uint32_t caret_line = sl_ui_text_line_col_at(text, area_caret_pos, &caret_col);
     uint8_t caret_visible = (enabled && focused &&
                              (((peos_time_ns() / 500000000ull) & 1ull) != 0ull)) ? 1u : 0u;
     if (caret_line < ui->text_area_scroll_line) ui->text_area_scroll_line = caret_line;
     if (caret_line >= ui->text_area_scroll_line + vis_lines) {
         ui->text_area_scroll_line = caret_line - vis_lines + 1u;
     }
+    if (caret_col < ui->text_area_scroll_col) ui->text_area_scroll_col = caret_col;
+    if (caret_col >= ui->text_area_scroll_col + vis_cols) {
+        ui->text_area_scroll_col = caret_col - vis_cols + 1u;
+    }
+    if (ui->text_area_scroll_col > max_scroll_col) ui->text_area_scroll_col = max_scroll_col;
 
     uint32_t line_idx = 0u;
     uint32_t start = 0u;
@@ -1160,6 +1246,11 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         char draw_buf[256];
         uint32_t dn = 0u;
         uint32_t i = start;
+        uint32_t col = 0u;
+        while (i < end && col < ui->text_area_scroll_col) {
+            i++;
+            col++;
+        }
         while (i < end && dn + 1u < (uint32_t)sizeof(draw_buf) && dn < vis_cols) {
             char c = text[i++];
             if (c == '\t') c = ' ';
@@ -1171,7 +1262,11 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         sl_ui_text_tok(ui, content_x, ly, draw_buf,
                        enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
         if (caret_visible && line_idx == caret_line) {
-            uint32_t caret_x = (caret_col > vis_cols) ? vis_cols : caret_col;
+            uint32_t caret_x = 0u;
+            if (caret_col > ui->text_area_scroll_col) {
+                caret_x = caret_col - ui->text_area_scroll_col;
+            }
+            if (caret_x > vis_cols) caret_x = vis_cols;
             uint32_t caret_px = content_x + (caret_x * fw);
             uint32_t caret_max = content_x + (vis_cols * fw);
             if (caret_px >= caret_max) caret_px = caret_max - 1u;
