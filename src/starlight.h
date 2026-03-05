@@ -38,6 +38,7 @@ typedef struct {
     uint32_t display_height;
     uint8_t animations_enabled;
     uint32_t animation_speed_pct;
+    uint32_t double_click_ms;
 
     // Background
     sl_image_t bg_image;

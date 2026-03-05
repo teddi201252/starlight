@@ -51,6 +51,11 @@
 #define ORBIT_SLUI_CAP_GRADIENT_2D      (1u << 24)
 #define ORBIT_SLUI_CAP_PANEL_INPUT      (1u << 25)
 #define ORBIT_SLUI_CAP_FONT_SIZE        (1u << 26)
+#define ORBIT_SLUI_CAP_EVENT_DOUBLE_CLICK (1u << 27)
+
+#define ORBIT_UI_DOUBLE_CLICK_MS_DEFAULT 300u
+#define ORBIT_UI_DOUBLE_CLICK_MS_MIN      80u
+#define ORBIT_UI_DOUBLE_CLICK_MS_MAX      1000u
 
 #define ORBIT_SLUI_ERR_MALFORMED   100u
 #define ORBIT_SLUI_ERR_HELLO       101u
@@ -151,6 +156,11 @@ typedef struct {
     uint32_t hover_cmd_y;
     uint32_t hover_cmd_w;
     uint32_t hover_cmd_h;
+    uint32_t nav_focus_id;
+    uint8_t keyboard_nav_active;
+    uint32_t double_click_ms;
+    uint32_t last_click_id;
+    uint64_t last_click_ns;
     uint8_t theme_override_enabled;
     sl_ui_theme_t theme_override;
 } orbit_ui_state_t;
@@ -193,6 +203,7 @@ static app_instance_t g_orbit_app[ORBIT_APP_SLOTS];
 static orbit_slot_cfg_t g_orbit_cfg[ORBIT_APP_SLOTS];
 static uint8_t g_orbit_apps_bound = 0u;
 static uint8_t g_orbit_cfg_init = 0u;
+static uint32_t g_orbit_double_click_ms = ORBIT_UI_DOUBLE_CLICK_MS_DEFAULT;
 static uint8_t g_reload_display_requested = 0u;
 static uint8_t g_reload_theme_requested = 0u;
 
@@ -209,6 +220,12 @@ static void orbit_copy_str(char *dst, size_t cap, const char *src) {
 
 static uint8_t orbit_u8_clamp(uint32_t v) {
     return (uint8_t)((v > 255u) ? 255u : v);
+}
+
+static uint32_t orbit_double_click_ms_clamp(uint32_t v) {
+    if (v < ORBIT_UI_DOUBLE_CLICK_MS_MIN) return ORBIT_UI_DOUBLE_CLICK_MS_MIN;
+    if (v > ORBIT_UI_DOUBLE_CLICK_MS_MAX) return ORBIT_UI_DOUBLE_CLICK_MS_MAX;
+    return v;
 }
 
 static void orbit_theme_override_set_accent(orbit_shell_t *shell, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -300,6 +317,7 @@ static uint32_t orbit_parse_cap_token(const char *tok, size_t tok_len) {
     if (orbit_token_is(tok, tok_len, "GRADIENT_2D")) return ORBIT_SLUI_CAP_GRADIENT_2D;
     if (orbit_token_is(tok, tok_len, "PANEL_INPUT")) return ORBIT_SLUI_CAP_PANEL_INPUT;
     if (orbit_token_is(tok, tok_len, "FONT_SIZE")) return ORBIT_SLUI_CAP_FONT_SIZE;
+    if (orbit_token_is(tok, tok_len, "EVENT_DOUBLE_CLICK")) return ORBIT_SLUI_CAP_EVENT_DOUBLE_CLICK;
     return 0u;
 }
 
@@ -341,7 +359,7 @@ static void orbit_send_ui_error(orbit_shell_t *shell, uint32_t code, const char 
 static void orbit_send_host_hello(orbit_shell_t *shell) {
     if (!shell || shell->child_stdin_fd < 0) return;
     const char *msg =
-        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT FONT_SIZE\n";
+        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT FONT_SIZE EVENT_DOUBLE_CLICK\n";
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, peos_strlen(msg));
     shell->ui.host_hello_sent = 1u;
 }
@@ -458,6 +476,52 @@ static void orbit_send_ui_event_button(orbit_shell_t *shell, uint32_t id) {
     for (size_t i = 0u; i < m && n + 1u < sizeof(msg); i++) msg[n++] = num[i];
     if (n + 1u < sizeof(msg)) msg[n++] = '\n';
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
+}
+
+static void orbit_send_ui_event_double_click(orbit_shell_t *shell, uint32_t id) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[64];
+    size_t n = 0u;
+    const char *prefix = "@SLUI EVENT DOUBLE_CLICK ";
+    while (prefix[n] && n + 1u < sizeof(msg)) {
+        msg[n] = prefix[n];
+        n++;
+    }
+    char num[16];
+    size_t m = 0u;
+    uint32_t v = id;
+    if (v == 0u) {
+        num[m++] = '0';
+    } else {
+        char rev[16];
+        size_t r = 0u;
+        while (v > 0u && r < sizeof(rev)) {
+            rev[r++] = (char)('0' + (v % 10u));
+            v /= 10u;
+        }
+        while (r > 0u && m < sizeof(num)) num[m++] = rev[--r];
+    }
+    for (size_t i = 0u; i < m && n + 1u < sizeof(msg); i++) msg[n++] = num[i];
+    if (n + 1u < sizeof(msg)) msg[n++] = '\n';
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
+}
+
+static void orbit_emit_click_events(orbit_shell_t *shell, uint32_t id, uint8_t is_pointer_click) {
+    if (!shell) return;
+    orbit_send_ui_event_button(shell, id);
+    if (!is_pointer_click) return;
+
+    uint64_t now_ns = peos_time_ns();
+    uint64_t delta_ns = now_ns - shell->ui.last_click_ns;
+    uint64_t threshold_ns = (uint64_t)shell->ui.double_click_ms * 1000000ull;
+    if (shell->ui.last_click_id == id && shell->ui.last_click_ns != 0ull && delta_ns <= threshold_ns) {
+        orbit_send_ui_event_double_click(shell, id);
+        shell->ui.last_click_id = 0u;
+        shell->ui.last_click_ns = 0ull;
+    } else {
+        shell->ui.last_click_id = id;
+        shell->ui.last_click_ns = now_ns;
+    }
 }
 
 static void orbit_send_ui_event_slider(orbit_shell_t *shell, uint32_t id, uint32_t value) {
@@ -1362,6 +1426,10 @@ static void orbit_reset_buffer(orbit_shell_t *shell) {
     peos_memset(shell->ui.key_down, 0, sizeof(shell->ui.key_down));
     shell->ui.staged_enabled = 1u;
     shell->ui.active_panel_id = 0u;
+    shell->ui.nav_focus_id = 0u;
+    shell->ui.double_click_ms = g_orbit_double_click_ms;
+    shell->ui.last_click_id = 0u;
+    shell->ui.last_click_ns = 0ull;
     shell->ui.theme_override_enabled = 0u;
     shell->ui.ui.theme_initialized = 0u;
 }
@@ -1471,6 +1539,7 @@ static int orbit_spawn_process(orbit_shell_t *shell) {
     shell->ui.hello_seen = 0u;
     shell->ui.client_proto_ver = 0u;
     shell->ui.client_caps_mask = 0u;
+    shell->ui.double_click_ms = g_orbit_double_click_ms;
     return 1;
 }
 
@@ -1815,10 +1884,381 @@ static int orbit_ui_cmd_is_interactive(const orbit_ui_cmd_t *cmd) {
     }
 }
 
+static int orbit_ui_cmd_is_focusable(const orbit_ui_cmd_t *cmd) {
+    if (!cmd || !cmd->enabled) return 0;
+    switch (cmd->type) {
+        case ORBIT_UI_CMD_BUTTON:
+        case ORBIT_UI_CMD_SLIDER:
+        case ORBIT_UI_CMD_TOGGLE:
+        case ORBIT_UI_CMD_SELECT:
+        case ORBIT_UI_CMD_TEXT_INPUT:
+        case ORBIT_UI_CMD_TEXT_AREA:
+        case ORBIT_UI_CMD_SCROLL_V:
+        case ORBIT_UI_CMD_LIST_ITEM:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 static uint8_t orbit_ui_cmd_enabled_for_modal(const orbit_ui_cmd_t *cmd, uint32_t modal_select_id) {
     if (!cmd || !cmd->enabled) return 0u;
     if (modal_select_id != 0u && cmd->id != modal_select_id) return 0u;
     return 1u;
+}
+
+static int orbit_ui_find_focusable_index(const orbit_shell_t *shell, uint32_t modal_select_id,
+                                         uint32_t id, size_t *out_idx) {
+    if (!shell || !shell->ui.cmds || shell->ui.cmd_count == 0u || !out_idx || id == 0u) return 0;
+    for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+        if (cmd->id != id) continue;
+        if (!orbit_ui_cmd_is_focusable(cmd)) return 0;
+        if (!orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id)) return 0;
+        *out_idx = i;
+        return 1;
+    }
+    return 0;
+}
+
+static int orbit_ui_find_next_focusable(const orbit_shell_t *shell, uint32_t modal_select_id,
+                                        uint32_t current_id, int dir, uint32_t *out_id) {
+    if (!shell || !shell->ui.cmds || shell->ui.cmd_count == 0u || !out_id) return 0;
+    size_t start = 0u;
+    int has_current = orbit_ui_find_focusable_index(shell, modal_select_id, current_id, &start);
+    size_t count = shell->ui.cmd_count;
+    if (count == 0u) return 0;
+    if (dir >= 0) {
+        size_t i = has_current ? ((start + 1u) % count) : 0u;
+        for (size_t step = 0u; step < count; step++) {
+            const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+            if (orbit_ui_cmd_is_focusable(cmd) && orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id)) {
+                *out_id = cmd->id;
+                return 1;
+            }
+            i = (i + 1u) % count;
+        }
+    } else {
+        size_t i = has_current ? ((start + count - 1u) % count) : (count - 1u);
+        for (size_t step = 0u; step < count; step++) {
+            const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+            if (orbit_ui_cmd_is_focusable(cmd) && orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id)) {
+                *out_id = cmd->id;
+                return 1;
+            }
+            i = (i + count - 1u) % count;
+        }
+    }
+    return 0;
+}
+
+static void orbit_ui_draw_nav_focus_ring(sl_ui_ctx_t *ui, const orbit_ui_cmd_t *cmd,
+                                         uint32_t x, uint32_t y) {
+    if (!ui || !cmd || cmd->w < 2u || cmd->h < 2u) return;
+    sl_ui_rect(ui, x, y, cmd->w, 1u, SL_UI_COLOR_BORDER_FOCUS);
+    sl_ui_rect(ui, x, y + cmd->h - 1u, cmd->w, 1u, SL_UI_COLOR_BORDER_FOCUS);
+    sl_ui_rect(ui, x, y, 1u, cmd->h, SL_UI_COLOR_BORDER_FOCUS);
+    sl_ui_rect(ui, x + cmd->w - 1u, y, 1u, cmd->h, SL_UI_COLOR_BORDER_FOCUS);
+}
+
+static size_t orbit_ui_find_enclosing_scroll_index(const orbit_shell_t *shell, size_t cmd_idx) {
+    if (!shell || !shell->ui.cmds || cmd_idx >= shell->ui.cmd_count) return (size_t)-1;
+    uint32_t depth = 0u;
+    for (size_t i = cmd_idx; i > 0u; i--) {
+        const orbit_ui_cmd_t *c = &shell->ui.cmds[i - 1u];
+        if (c->type == ORBIT_UI_CMD_CLIP_POP) {
+            depth++;
+            continue;
+        }
+        if (c->type == ORBIT_UI_CMD_CLIP_PUSH) {
+            if (depth == 0u) {
+                if ((i - 1u) > 0u) {
+                    size_t prev = i - 2u;
+                    if (shell->ui.cmds[prev].type == ORBIT_UI_CMD_SCROLL_V) return prev;
+                }
+                return (size_t)-1;
+            }
+            depth--;
+        }
+    }
+    return (size_t)-1;
+}
+
+static uint8_t orbit_ui_scroll_step(orbit_shell_t *shell, size_t scroll_idx, int dir, uint32_t preferred_step) {
+    if (!shell || !shell->ui.cmds || scroll_idx >= shell->ui.cmd_count) return 0u;
+    orbit_ui_cmd_t *scroll = &shell->ui.cmds[scroll_idx];
+    if (scroll->type != ORBIT_UI_CMD_SCROLL_V) return 0u;
+    if (scroll->h == 0u) return 0u;
+
+    uint32_t max_off = (scroll->max_v > scroll->h) ? (scroll->max_v - scroll->h) : 0u;
+    if (scroll->value > max_off) scroll->value = max_off;
+
+    uint32_t step = preferred_step;
+    if (step < 8u) step = 8u;
+    if (step > scroll->h) step = scroll->h;
+    if (step == 0u) step = 8u;
+
+    uint32_t prev = scroll->value;
+    if (dir < 0) {
+        scroll->value = (scroll->value > step) ? (scroll->value - step) : 0u;
+    } else {
+        uint64_t nv = (uint64_t)scroll->value + (uint64_t)step;
+        scroll->value = (nv < (uint64_t)max_off) ? (uint32_t)nv : max_off;
+    }
+
+    if (scroll->value != prev) {
+        orbit_send_ui_event_scroll_v(shell, scroll->id, scroll->value);
+        return 1u;
+    }
+    return 0u;
+}
+
+static void orbit_ui_scroll_focus_into_view(orbit_shell_t *shell, size_t focus_idx) {
+    if (!shell || !shell->ui.cmds || focus_idx >= shell->ui.cmd_count) return;
+    orbit_ui_cmd_t *focused = &shell->ui.cmds[focus_idx];
+
+    /* Find the nearest enclosing CLIP_PUSH for this control. */
+    size_t clip_idx = shell->ui.cmd_count;
+    uint32_t depth = 0u;
+    for (size_t i = focus_idx; i > 0u; i--) {
+        const orbit_ui_cmd_t *c = &shell->ui.cmds[i - 1u];
+        if (c->type == ORBIT_UI_CMD_CLIP_POP) {
+            depth++;
+            continue;
+        }
+        if (c->type == ORBIT_UI_CMD_CLIP_PUSH) {
+            if (depth == 0u) {
+                clip_idx = i - 1u;
+                break;
+            }
+            depth--;
+        }
+    }
+    if (clip_idx >= shell->ui.cmd_count) return;
+    if (clip_idx == 0u) return;
+
+    orbit_ui_cmd_t *clip = &shell->ui.cmds[clip_idx];
+    orbit_ui_cmd_t *scroll = &shell->ui.cmds[clip_idx - 1u];
+    if (scroll->type != ORBIT_UI_CMD_SCROLL_V) return;
+    if (scroll->h == 0u) return;
+
+    uint32_t max_off = (scroll->max_v > scroll->h) ? (scroll->max_v - scroll->h) : 0u;
+    if (scroll->value > max_off) scroll->value = max_off;
+
+    uint32_t clip_top = clip->y;
+    uint32_t clip_bottom = clip->y + clip->h;
+    uint32_t focus_top = focused->y;
+    uint32_t focus_bottom = focused->y + focused->h;
+
+    uint32_t new_off = scroll->value;
+    if (focus_top < clip_top) {
+        uint32_t delta = clip_top - focus_top;
+        new_off = (new_off > delta) ? (new_off - delta) : 0u;
+    } else if (focus_bottom > clip_bottom) {
+        uint32_t delta = focus_bottom - clip_bottom;
+        uint64_t nv = (uint64_t)new_off + (uint64_t)delta;
+        new_off = (nv < (uint64_t)max_off) ? (uint32_t)nv : max_off;
+    }
+
+    if (new_off != scroll->value) {
+        scroll->value = new_off;
+        orbit_send_ui_event_scroll_v(shell, scroll->id, scroll->value);
+    }
+}
+
+static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
+    if (!shell || !shell->ui.enabled || !shell->ui.committed || !shell->ui.cmds || shell->ui.cmd_count == 0u) return;
+    uint32_t modal_select_id = shell->ui.ui.select_open_id;
+
+    size_t focus_idx = 0u;
+    if (!orbit_ui_find_focusable_index(shell, modal_select_id, shell->ui.nav_focus_id, &focus_idx)) {
+        uint32_t first_id = 0u;
+        if (orbit_ui_find_next_focusable(shell, modal_select_id, 0u, +1, &first_id)) {
+            shell->ui.nav_focus_id = first_id;
+            (void)orbit_ui_find_focusable_index(shell, modal_select_id, shell->ui.nav_focus_id, &focus_idx);
+        } else {
+            shell->ui.nav_focus_id = 0u;
+            shell->ui.ui.focused_id = 0u;
+            return;
+        }
+    }
+
+    for (uint8_t i = 0u; i < shell->ui.key_event_count; i++) {
+        peos_input_event_t *ev = &shell->ui.key_events[i];
+        uint16_t code = orbit_norm_keycode(ev->code);
+        if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) continue;
+        if (!ev->pressed) continue;
+
+        if (code == PEOS_KEY_TAB) {
+            if (!shell->shift_down) {
+                size_t cur_idx = 0u;
+                if (orbit_ui_find_focusable_index(shell, modal_select_id, shell->ui.nav_focus_id, &cur_idx)) {
+                    orbit_ui_cmd_t *cur = &shell->ui.cmds[cur_idx];
+                    if (cur->type == ORBIT_UI_CMD_TEXT_INPUT || cur->type == ORBIT_UI_CMD_TEXT_AREA) {
+                        /* Keep Tab inside text controls; only Shift+Tab leaves field focus. */
+                        continue;
+                    }
+                }
+            }
+            uint32_t next_id = 0u;
+            int dir = shell->shift_down ? -1 : +1;
+            size_t current_scroll = orbit_ui_find_enclosing_scroll_index(shell, focus_idx);
+            if (orbit_ui_find_next_focusable(shell, modal_select_id, shell->ui.nav_focus_id, dir, &next_id)) {
+                size_t next_idx = 0u;
+                size_t next_scroll = (size_t)-1;
+                if (orbit_ui_find_focusable_index(shell, modal_select_id, next_id, &next_idx)) {
+                    next_scroll = orbit_ui_find_enclosing_scroll_index(shell, next_idx);
+                }
+                if (current_scroll != (size_t)-1 && next_scroll != current_scroll) {
+                    uint32_t step = shell->ui.cmds[focus_idx].h + 6u;
+                    if (orbit_ui_scroll_step(shell, current_scroll, dir, step)) {
+                        shell->ui.keyboard_nav_active = 1u;
+                        continue;
+                    }
+                }
+                shell->ui.keyboard_nav_active = 1u;
+                shell->ui.nav_focus_id = next_id;
+                (void)orbit_ui_find_focusable_index(shell, modal_select_id, shell->ui.nav_focus_id, &focus_idx);
+                const orbit_ui_cmd_t *f = &shell->ui.cmds[focus_idx];
+                if (f->type == ORBIT_UI_CMD_TEXT_INPUT || f->type == ORBIT_UI_CMD_TEXT_AREA) {
+                    shell->ui.ui.focused_id = f->id;
+                } else {
+                    shell->ui.ui.focused_id = 0u;
+                }
+                orbit_ui_scroll_focus_into_view(shell, focus_idx);
+            } else if (current_scroll != (size_t)-1) {
+                uint32_t step = shell->ui.cmds[focus_idx].h + 6u;
+                if (orbit_ui_scroll_step(shell, current_scroll, dir, step)) {
+                    shell->ui.keyboard_nav_active = 1u;
+                    continue;
+                }
+            }
+            continue;
+        }
+
+        if (!orbit_ui_find_focusable_index(shell, modal_select_id, shell->ui.nav_focus_id, &focus_idx)) continue;
+        orbit_ui_cmd_t *cmd = &shell->ui.cmds[focus_idx];
+
+        if (code == PEOS_KEY_LEFT_NORM || code == PEOS_KEY_UP_NORM ||
+            code == PEOS_KEY_RIGHT_NORM || code == PEOS_KEY_DOWN_NORM) {
+            if (cmd->type != ORBIT_UI_CMD_SLIDER &&
+                cmd->type != ORBIT_UI_CMD_SCROLL_V &&
+                cmd->type != ORBIT_UI_CMD_SELECT &&
+                cmd->type != ORBIT_UI_CMD_TEXT_INPUT &&
+                cmd->type != ORBIT_UI_CMD_TEXT_AREA) {
+                uint32_t next_id = 0u;
+                int dir = (code == PEOS_KEY_LEFT_NORM || code == PEOS_KEY_UP_NORM) ? -1 : +1;
+                if (orbit_ui_find_next_focusable(shell, modal_select_id, shell->ui.nav_focus_id, dir, &next_id)) {
+                    size_t current_scroll = orbit_ui_find_enclosing_scroll_index(shell, focus_idx);
+                    size_t next_idx = 0u;
+                    size_t next_scroll = (size_t)-1;
+                    if (orbit_ui_find_focusable_index(shell, modal_select_id, next_id, &next_idx)) {
+                        next_scroll = orbit_ui_find_enclosing_scroll_index(shell, next_idx);
+                    }
+                    if (current_scroll != (size_t)-1 && next_scroll != current_scroll) {
+                        uint32_t step = cmd->h + 6u;
+                        if (orbit_ui_scroll_step(shell, current_scroll, dir, step)) {
+                            shell->ui.keyboard_nav_active = 1u;
+                            continue;
+                        }
+                    }
+                    shell->ui.keyboard_nav_active = 1u;
+                    shell->ui.nav_focus_id = next_id;
+                    (void)orbit_ui_find_focusable_index(shell, modal_select_id, shell->ui.nav_focus_id, &focus_idx);
+                    const orbit_ui_cmd_t *f = &shell->ui.cmds[focus_idx];
+                    if (f->type == ORBIT_UI_CMD_TEXT_INPUT || f->type == ORBIT_UI_CMD_TEXT_AREA) {
+                        shell->ui.ui.focused_id = f->id;
+                    } else {
+                        shell->ui.ui.focused_id = 0u;
+                    }
+                    orbit_ui_scroll_focus_into_view(shell, focus_idx);
+                } else {
+                    size_t current_scroll = orbit_ui_find_enclosing_scroll_index(shell, focus_idx);
+                    if (current_scroll != (size_t)-1) {
+                        uint32_t step = cmd->h + 6u;
+                        if (orbit_ui_scroll_step(shell, current_scroll, dir, step)) {
+                            shell->ui.keyboard_nav_active = 1u;
+                            continue;
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        if (code == PEOS_KEY_ESC) {
+            if (cmd->type == ORBIT_UI_CMD_SELECT && shell->ui.ui.select_open_id == cmd->id) {
+                shell->ui.ui.select_open_id = 0u;
+            }
+            continue;
+        }
+
+        if (cmd->type == ORBIT_UI_CMD_TEXT_INPUT || cmd->type == ORBIT_UI_CMD_TEXT_AREA) {
+            continue;
+        }
+
+        if (code == PEOS_KEY_ENTER || code == PEOS_KEY_SPACE) {
+            shell->ui.keyboard_nav_active = 1u;
+            if (cmd->type == ORBIT_UI_CMD_BUTTON || cmd->type == ORBIT_UI_CMD_LIST_ITEM) {
+                orbit_send_ui_event_button(shell, cmd->id);
+            } else if (cmd->type == ORBIT_UI_CMD_TOGGLE) {
+                cmd->value = cmd->value ? 0u : 1u;
+                orbit_send_ui_event_toggle(shell, cmd->id, cmd->value);
+            } else if (cmd->type == ORBIT_UI_CMD_SELECT) {
+                if (shell->ui.ui.select_open_id == cmd->id) shell->ui.ui.select_open_id = 0u;
+                else shell->ui.ui.select_open_id = cmd->id;
+            }
+            continue;
+        }
+
+        if (cmd->type == ORBIT_UI_CMD_SLIDER) {
+            shell->ui.keyboard_nav_active = 1u;
+            uint32_t prev = cmd->value;
+            uint32_t range = (cmd->max_v > cmd->min_v) ? (cmd->max_v - cmd->min_v) : 0u;
+            uint32_t step = (range >= 100u) ? (range / 100u) : 1u;
+            if (step == 0u) step = 1u;
+            if (code == PEOS_KEY_LEFT_NORM || code == PEOS_KEY_DOWN_NORM) {
+                if (cmd->value > cmd->min_v) {
+                    cmd->value = (cmd->value > cmd->min_v + step) ? (cmd->value - step) : cmd->min_v;
+                }
+            } else if (code == PEOS_KEY_RIGHT_NORM || code == PEOS_KEY_UP_NORM) {
+                if (cmd->value < cmd->max_v) {
+                    uint64_t nv = (uint64_t)cmd->value + (uint64_t)step;
+                    cmd->value = (nv < cmd->max_v) ? (uint32_t)nv : cmd->max_v;
+                }
+            }
+            if (cmd->value != prev) orbit_send_ui_event_slider(shell, cmd->id, cmd->value);
+            continue;
+        }
+
+        if (cmd->type == ORBIT_UI_CMD_SCROLL_V) {
+            shell->ui.keyboard_nav_active = 1u;
+            uint32_t prev = cmd->value;
+            uint32_t max_off = (cmd->max_v > cmd->h) ? (cmd->max_v - cmd->h) : 0u;
+            uint32_t step = (cmd->h / 8u);
+            if (step < 8u) step = 8u;
+            if (code == PEOS_KEY_UP_NORM || code == PEOS_KEY_LEFT_NORM) {
+                cmd->value = (cmd->value > step) ? (cmd->value - step) : 0u;
+            } else if (code == PEOS_KEY_DOWN_NORM || code == PEOS_KEY_RIGHT_NORM) {
+                uint64_t nv = (uint64_t)cmd->value + (uint64_t)step;
+                cmd->value = (nv < max_off) ? (uint32_t)nv : max_off;
+            }
+            if (cmd->value != prev) orbit_send_ui_event_scroll_v(shell, cmd->id, cmd->value);
+            continue;
+        }
+
+        if (cmd->type == ORBIT_UI_CMD_SELECT) {
+            shell->ui.keyboard_nav_active = 1u;
+            uint32_t prev = cmd->value;
+            if (code == PEOS_KEY_UP_NORM || code == PEOS_KEY_LEFT_NORM) {
+                if (cmd->value > 0u) cmd->value--;
+            } else if (code == PEOS_KEY_DOWN_NORM || code == PEOS_KEY_RIGHT_NORM) {
+                if (cmd->value + 1u < cmd->min_v) cmd->value++;
+            }
+            if (cmd->value != prev) orbit_send_ui_event_select(shell, cmd->id, cmd->value);
+            continue;
+        }
+    }
 }
 
 static uint8_t orbit_ui_dropdown_popup_rect(const orbit_shell_t *shell,
@@ -2082,10 +2522,12 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     ctx->cursor_x, ctx->cursor_y,
                     shell->ui.mouse_down, shell->ui.mouse_pressed, shell->ui.mouse_released,
                     shell->ui.mouse_wheel_x, shell->ui.mouse_wheel_y);
+        if (shell->ui.mouse_pressed) shell->ui.keyboard_nav_active = 0u;
         sl_ui_set_font_px(&shell->ui.ui, 0u);
         if (shell->ui.theme_override_enabled) {
             sl_ui_theme_apply(&shell->ui.ui, &shell->ui.theme_override);
         }
+        orbit_ui_apply_keyboard_navigation(shell);
         {
             const sl_ui_color_t *canvas = sl_ui_theme_color(&shell->ui.ui, SL_UI_COLOR_BG_CANVAS);
             if (canvas && canvas->a < 255u) {
@@ -2109,6 +2551,24 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
             uint32_t x = body_x + cmd->x;
             uint32_t y = body_y + cmd->y;
+            uint8_t cmd_enabled = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+            uint8_t draw_nav_focus = (shell->ui.nav_focus_id != 0u &&
+                                      shell->ui.keyboard_nav_active &&
+                                      cmd->id == shell->ui.nav_focus_id &&
+                                      orbit_ui_cmd_is_focusable(cmd) &&
+                                      cmd_enabled) ? 1u : 0u;
+            if (cmd_enabled && orbit_ui_cmd_is_focusable(cmd) && shell->ui.mouse_pressed) {
+                uint32_t cx = shell->ui.ui.cursor_x;
+                uint32_t cy = shell->ui.ui.cursor_y;
+                if (cx >= x && cy >= y && cx < (x + cmd->w) && cy < (y + cmd->h)) {
+                    shell->ui.nav_focus_id = cmd->id;
+                    if (cmd->type == ORBIT_UI_CMD_TEXT_INPUT || cmd->type == ORBIT_UI_CMD_TEXT_AREA) {
+                        shell->ui.ui.focused_id = cmd->id;
+                    } else {
+                        shell->ui.ui.focused_id = 0u;
+                    }
+                }
+            }
             if (cmd->type == ORBIT_UI_CMD_CLIP_PUSH) {
                 if (clip_depth < 8u) {
                     uint32_t nx = x, ny = y, nw = cmd->w, nh = cmd->h;
@@ -2147,13 +2607,13 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             } else if (cmd->type == ORBIT_UI_CMD_LABEL_THEME) {
                 sl_ui_label(&shell->ui.ui, x, y, cmd->text, (sl_ui_color_token_t)cmd->value);
             } else if (cmd->type == ORBIT_UI_CMD_BUTTON) {
-                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                uint8_t en = cmd_enabled;
                 if (sl_ui_button_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, en)) {
-                    orbit_send_ui_event_button(shell, cmd->id);
+                    orbit_emit_click_events(shell, cmd->id, 1u);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_SLIDER) {
                 uint32_t prev = cmd->value;
-                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                uint8_t en = cmd_enabled;
                 if (sl_ui_slider_u32_state(&shell->ui.ui, cmd->id, x, y, cmd->w,
                                            cmd->min_v, cmd->max_v, &cmd->value, en)) {
                     if (cmd->value != prev) {
@@ -2162,7 +2622,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 }
             } else if (cmd->type == ORBIT_UI_CMD_TOGGLE) {
                 uint8_t v = cmd->value ? 1u : 0u;
-                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                uint8_t en = cmd_enabled;
                 if (sl_ui_toggle_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, &v, cmd->text, en)) {
                     cmd->value = v;
                     orbit_send_ui_event_toggle(shell, cmd->id, cmd->value);
@@ -2172,7 +2632,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             } else if (cmd->type == ORBIT_UI_CMD_SELECT) {
                 char current[ORBIT_UI_TEXT_CHARS];
                 orbit_select_option_text(cmd->text, cmd->value, current, sizeof(current));
-                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                uint8_t en = cmd_enabled;
                 if (sl_ui_select_cycle_state_ex(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
                                                 cmd->min_v, &cmd->value, current, cmd->text,
                                                 shell->ui.key_events, shell->ui.key_event_count, en)) {
@@ -2183,7 +2643,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 if (max_chars < 1u) max_chars = 1u;
                 if (max_chars >= ORBIT_UI_TEXT_CHARS) max_chars = ORBIT_UI_TEXT_CHARS - 1u;
                 cmd->text[max_chars] = '\0';
-                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                uint8_t en = cmd_enabled;
                 if (sl_ui_text_input_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
                                            cmd->text, max_chars + 1u,
                                            shell->ui.key_events, shell->ui.key_event_count,
@@ -2195,7 +2655,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 if (max_chars < 1u) max_chars = 1u;
                 if (max_chars >= ORBIT_UI_TEXT_CHARS) max_chars = ORBIT_UI_TEXT_CHARS - 1u;
                 cmd->text[max_chars] = '\0';
-                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                uint8_t en = cmd_enabled;
                 if (sl_ui_text_area_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
                                           cmd->text, max_chars + 1u,
                                           shell->ui.key_events, shell->ui.key_event_count,
@@ -2204,7 +2664,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 }
             } else if (cmd->type == ORBIT_UI_CMD_SCROLL_V) {
                 uint32_t prev = cmd->value;
-                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                uint8_t en = cmd_enabled;
                 uint32_t hit_x = x;
                 uint32_t hit_y = y;
                 uint32_t hit_w = cmd->w;
@@ -2237,7 +2697,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     }
                 }
             } else if (cmd->type == ORBIT_UI_CMD_PANEL) {
-                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                uint8_t en = cmd_enabled;
                 if (en && cmd->w > 0u && cmd->h > 0u) {
                     uint8_t hovered = 0u;
                     uint32_t cx = shell->ui.ui.cursor_x;
@@ -2275,10 +2735,10 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 char title[ORBIT_UI_TEXT_CHARS];
                 char subtitle[ORBIT_UI_TEXT_CHARS];
                 orbit_split_list_item_text(cmd->text, title, sizeof(title), subtitle, sizeof(subtitle));
-                uint8_t en = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+                uint8_t en = cmd_enabled;
                 if (sl_ui_list_item(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
                                     title, subtitle, en)) {
-                    orbit_send_ui_event_button(shell, cmd->id);
+                    orbit_emit_click_events(shell, cmd->id, 1u);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_RECT) {
                 sl_ui_rect_rgb(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->r, cmd->g, cmd->b);
@@ -2306,6 +2766,12 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                                      cmd->image.height,
                                      cmd->image.stride);
                 }
+            }
+
+            if (draw_nav_focus &&
+                cmd->type != ORBIT_UI_CMD_TEXT_INPUT &&
+                cmd->type != ORBIT_UI_CMD_TEXT_AREA) {
+                orbit_ui_draw_nav_focus_ring(&shell->ui.ui, cmd, x, y);
             }
         }
 
@@ -2397,6 +2863,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
 void sl_app_host_tick(sl_ctx_t *ctx) {
     if (!ctx) return;
+    g_orbit_double_click_ms = orbit_double_click_ms_clamp(ctx->double_click_ms);
     if (g_reload_display_requested) {
         g_reload_display_requested = 0u;
         sl_reload_display(ctx);
@@ -2409,6 +2876,7 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
     for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
         orbit_shell_t *shell = &g_orbit[i];
         if (!shell->initialized) continue;
+        shell->ui.double_click_ms = g_orbit_double_click_ms;
         if (shell->next_poll_ns > now) continue;
         uint8_t changed = orbit_poll_output(shell);
         shell->next_poll_ns = now + orbit_poll_interval_ns(shell, changed);

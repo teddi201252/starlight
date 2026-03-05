@@ -24,6 +24,9 @@
 #define SL_ANIMATION_SPEED_DEFAULT 100u
 #define SL_ANIMATION_SPEED_MIN 10u
 #define SL_ANIMATION_SPEED_MAX 400u
+#define SL_DOUBLE_CLICK_MS_DEFAULT 300u
+#define SL_DOUBLE_CLICK_MS_MIN 80u
+#define SL_DOUBLE_CLICK_MS_MAX 1000u
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
 #define SL_DIRTY_MAX_RECTS 256u
@@ -458,6 +461,7 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "font=%s\n", SL_RESOURCE_FONT_DEFAULT);
     (void)fprintf(f, "animations_enabled=1\n");
     (void)fprintf(f, "animation_speed_pct=100\n");
+    (void)fprintf(f, "double_click_ms=300\n");
     (void)fclose(f);
 }
 
@@ -559,6 +563,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->hw_cursor_scale_pct = SL_HW_CURSOR_SCALE_DEFAULT;
     ctx->animations_enabled = SL_ANIMATIONS_ENABLED_DEFAULT;
     ctx->animation_speed_pct = SL_ANIMATION_SPEED_DEFAULT;
+    ctx->double_click_ms = SL_DOUBLE_CLICK_MS_DEFAULT;
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
     if (!cfg) {
@@ -609,6 +614,13 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                         if (n < SL_ANIMATION_SPEED_MIN) n = SL_ANIMATION_SPEED_MIN;
                         if (n > SL_ANIMATION_SPEED_MAX) n = SL_ANIMATION_SPEED_MAX;
                         ctx->animation_speed_pct = n;
+                    }
+                } else if (strcmp(key, "double_click_ms") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n)) {
+                        if (n < SL_DOUBLE_CLICK_MS_MIN) n = SL_DOUBLE_CLICK_MS_MIN;
+                        if (n > SL_DOUBLE_CLICK_MS_MAX) n = SL_DOUBLE_CLICK_MS_MAX;
+                        ctx->double_click_ms = n;
                     }
                 }
             }
