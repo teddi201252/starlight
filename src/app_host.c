@@ -52,6 +52,8 @@
 #define ORBIT_SLUI_CAP_PANEL_INPUT      (1u << 25)
 #define ORBIT_SLUI_CAP_FONT_SIZE        (1u << 26)
 #define ORBIT_SLUI_CAP_EVENT_DOUBLE_CLICK (1u << 27)
+#define ORBIT_SLUI_CAP_CONTEXT_MENU       (1u << 28)
+#define ORBIT_SLUI_CAP_EVENT_CONTEXT_MENU (1u << 29)
 
 #define ORBIT_UI_DOUBLE_CLICK_MS_DEFAULT 300u
 #define ORBIT_UI_DOUBLE_CLICK_MS_MIN      80u
@@ -76,6 +78,7 @@
 #define ORBIT_SLUI_ERR_GRAD2D      124u
 #define ORBIT_SLUI_ERR_PANEL       125u
 #define ORBIT_SLUI_ERR_FONT        126u
+#define ORBIT_SLUI_ERR_CONTEXT     127u
 #define ORBIT_SLUI_ERR_UNKNOWN_CMD 199u
 #define ORBIT_SLUI_ERR_CMD_LIMIT   200u
 
@@ -102,6 +105,7 @@ typedef enum {
     ORBIT_UI_CMD_GRAD2D = 19,
     ORBIT_UI_CMD_PANEL = 20,
     ORBIT_UI_CMD_FONT_SIZE = 21,
+    ORBIT_UI_CMD_CONTEXT_MENU = 22,
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -131,6 +135,9 @@ typedef struct {
     uint8_t mouse_down;
     uint8_t mouse_pressed;
     uint8_t mouse_released;
+    uint8_t mouse_r_down;
+    uint8_t mouse_r_pressed;
+    uint8_t mouse_r_released;
     int32_t mouse_wheel_x;
     int32_t mouse_wheel_y;
     uint8_t key_event_count;
@@ -163,6 +170,15 @@ typedef struct {
     uint64_t last_click_ns;
     uint8_t theme_override_enabled;
     sl_ui_theme_t theme_override;
+    uint32_t context_open_id;
+    uint32_t context_open_anchor_x;
+    uint32_t context_open_anchor_y;
+    uint32_t context_popup_x;
+    uint32_t context_popup_y;
+    uint32_t context_popup_w;
+    uint32_t context_popup_h;
+    uint32_t context_popup_row_h;
+    uint32_t context_scroll_idx;
 } orbit_ui_state_t;
 
 typedef struct {
@@ -318,6 +334,8 @@ static uint32_t orbit_parse_cap_token(const char *tok, size_t tok_len) {
     if (orbit_token_is(tok, tok_len, "PANEL_INPUT")) return ORBIT_SLUI_CAP_PANEL_INPUT;
     if (orbit_token_is(tok, tok_len, "FONT_SIZE")) return ORBIT_SLUI_CAP_FONT_SIZE;
     if (orbit_token_is(tok, tok_len, "EVENT_DOUBLE_CLICK")) return ORBIT_SLUI_CAP_EVENT_DOUBLE_CLICK;
+    if (orbit_token_is(tok, tok_len, "CONTEXT_MENU")) return ORBIT_SLUI_CAP_CONTEXT_MENU;
+    if (orbit_token_is(tok, tok_len, "EVENT_CONTEXT_MENU")) return ORBIT_SLUI_CAP_EVENT_CONTEXT_MENU;
     return 0u;
 }
 
@@ -359,7 +377,7 @@ static void orbit_send_ui_error(orbit_shell_t *shell, uint32_t code, const char 
 static void orbit_send_host_hello(orbit_shell_t *shell) {
     if (!shell || shell->child_stdin_fd < 0) return;
     const char *msg =
-        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT FONT_SIZE EVENT_DOUBLE_CLICK\n";
+        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT FONT_SIZE EVENT_DOUBLE_CLICK CONTEXT_MENU EVENT_CONTEXT_MENU\n";
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, peos_strlen(msg));
     shell->ui.host_hello_sent = 1u;
 }
@@ -599,6 +617,39 @@ static void orbit_send_ui_event_select(orbit_shell_t *shell, uint32_t id, uint32
     char msg[64];
     size_t n = 0u;
     const char *prefix = "@SLUI EVENT SELECT ";
+    while (prefix[n] && n + 1u < sizeof(msg)) msg[n] = prefix[n], n++;
+
+    char a[16];
+    size_t an = 0u;
+    uint32_t va = id;
+    if (va == 0u) a[an++] = '0';
+    else {
+        char rev[16]; size_t r = 0u;
+        while (va > 0u && r < sizeof(rev)) { rev[r++] = (char)('0' + (va % 10u)); va /= 10u; }
+        while (r > 0u && an < sizeof(a)) a[an++] = rev[--r];
+    }
+    for (size_t i = 0u; i < an && n + 1u < sizeof(msg); i++) msg[n++] = a[i];
+    if (n + 1u < sizeof(msg)) msg[n++] = ' ';
+
+    char b[16];
+    size_t bn = 0u;
+    uint32_t vb = value;
+    if (vb == 0u) b[bn++] = '0';
+    else {
+        char rev[16]; size_t r = 0u;
+        while (vb > 0u && r < sizeof(rev)) { rev[r++] = (char)('0' + (vb % 10u)); vb /= 10u; }
+        while (r > 0u && bn < sizeof(b)) b[bn++] = rev[--r];
+    }
+    for (size_t i = 0u; i < bn && n + 1u < sizeof(msg); i++) msg[n++] = b[i];
+    if (n + 1u < sizeof(msg)) msg[n++] = '\n';
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
+}
+
+static void orbit_send_ui_event_context_menu(orbit_shell_t *shell, uint32_t id, uint32_t value) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[64];
+    size_t n = 0u;
+    const char *prefix = "@SLUI EVENT CONTEXT_MENU ";
     while (prefix[n] && n + 1u < sizeof(msg)) msg[n] = prefix[n], n++;
 
     char a[16];
@@ -1072,6 +1123,36 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         return 1;
     }
 
+    if (orbit_token_is(cmd_tok, cmd_len, "CONTEXT_MENU") || orbit_token_is(cmd_tok, cmd_len, "CONTEXT_MENUX")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_CONTEXT_MENU);
+        if (!cmd) return 1;
+        uint8_t with_state = orbit_token_is(cmd_tok, cmd_len, "CONTEXT_MENUX") ? 1u : 0u;
+        if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
+            !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
+            !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->min_v)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CONTEXT, "context_menu_invalid_args");
+            return 1;
+        }
+        if (cmd->min_v == 0u) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CONTEXT, "context_menu_empty_options");
+            return 1;
+        }
+        if (with_state) {
+            uint32_t enabled = 1u;
+            if (!orbit_parse_u32(&p, &enabled)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CONTEXT, "context_menu_invalid_enabled");
+                return 1;
+            }
+            cmd->enabled = enabled ? 1u : 0u;
+        }
+        p = orbit_skip_spaces(p);
+        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        if (cmd->text[0] == '\0') {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CONTEXT, "context_menu_missing_options");
+        }
+        return 1;
+    }
+
     if (orbit_token_is(cmd_tok, cmd_len, "TEXT_INPUT") || orbit_token_is(cmd_tok, cmd_len, "TEXT_INPUTX")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TEXT_INPUT);
         if (!cmd) return 1;
@@ -1427,6 +1508,12 @@ static void orbit_reset_buffer(orbit_shell_t *shell) {
     shell->ui.staged_enabled = 1u;
     shell->ui.active_panel_id = 0u;
     shell->ui.nav_focus_id = 0u;
+    shell->ui.context_open_id = 0u;
+    shell->ui.context_popup_w = 0u;
+    shell->ui.context_popup_h = 0u;
+    shell->ui.mouse_r_down = 0u;
+    shell->ui.mouse_r_pressed = 0u;
+    shell->ui.mouse_r_released = 0u;
     shell->ui.double_click_ms = g_orbit_double_click_ms;
     shell->ui.last_click_id = 0u;
     shell->ui.last_click_ns = 0ull;
@@ -1693,6 +1780,10 @@ static uint16_t orbit_norm_keycode(uint16_t code) {
     return code;
 }
 
+static uint8_t orbit_clip_intersect(uint32_t ax, uint32_t ay, uint32_t aw, uint32_t ah,
+                                    uint32_t bx, uint32_t by, uint32_t bw, uint32_t bh,
+                                    uint32_t *ox, uint32_t *oy, uint32_t *ow, uint32_t *oh);
+
 static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
                            const peos_input_event_t *event, void *userdata) {
     (void)ctx;
@@ -1704,6 +1795,9 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         shell->ui.mouse_down = (frame->mouse_buttons & 0x01u) ? 1u : 0u;
         shell->ui.mouse_pressed = frame->mouse_left_pressed;
         shell->ui.mouse_released = frame->mouse_left_released;
+        shell->ui.mouse_r_down = (frame->mouse_buttons & 0x02u) ? 1u : 0u;
+        shell->ui.mouse_r_pressed = frame->mouse_right_pressed;
+        shell->ui.mouse_r_released = frame->mouse_right_released;
         shell->ui.mouse_wheel_x = frame->mouse_wheel_x;
         shell->ui.mouse_wheel_y = frame->mouse_wheel_y;
     }
@@ -1803,6 +1897,95 @@ static void orbit_select_option_text(const char *options_pipe, uint32_t selected
     }
 
     orbit_copy_str(out, out_cap, options_pipe);
+}
+
+static int orbit_context_find_zone_hovered(const orbit_shell_t *shell,
+                                           uint32_t cursor_x, uint32_t cursor_y,
+                                           uint32_t body_x, uint32_t body_y,
+                                           uint32_t body_w, uint32_t body_h,
+                                           size_t *out_idx) {
+    if (!shell || !shell->ui.cmds || !out_idx) return 0;
+    for (size_t i = shell->ui.cmd_count; i > 0u; i--) {
+        size_t idx = i - 1u;
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[idx];
+        if (cmd->type != ORBIT_UI_CMD_CONTEXT_MENU || !cmd->enabled || cmd->id == 0u) continue;
+        uint32_t x = body_x + cmd->x;
+        uint32_t y = body_y + cmd->y;
+        uint32_t w = cmd->w;
+        uint32_t h = cmd->h;
+        if (w == 0u || h == 0u) continue;
+        if (!orbit_clip_intersect(body_x, body_y, body_w, body_h, x, y, w, h, &x, &y, &w, &h)) continue;
+        if (cursor_x >= x && cursor_y >= y && cursor_x < (x + w) && cursor_y < (y + h)) {
+            *out_idx = idx;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int orbit_context_find_zone_by_id(const orbit_shell_t *shell, uint32_t id, size_t *out_idx) {
+    if (!shell || !shell->ui.cmds || !out_idx || id == 0u) return 0;
+    for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+        if (cmd->type != ORBIT_UI_CMD_CONTEXT_MENU) continue;
+        if (cmd->id != id) continue;
+        if (!cmd->enabled || cmd->min_v == 0u || cmd->text[0] == '\0') return 0;
+        *out_idx = i;
+        return 1;
+    }
+    return 0;
+}
+
+static void orbit_context_compute_popup(const orbit_shell_t *shell, const orbit_ui_cmd_t *zone,
+                                        uint32_t body_x, uint32_t body_y, uint32_t body_w, uint32_t body_h,
+                                        uint32_t anchor_x, uint32_t anchor_y,
+                                        uint32_t *out_x, uint32_t *out_y, uint32_t *out_w, uint32_t *out_h,
+                                        uint32_t *out_row_h, uint32_t *out_visible, uint32_t *out_max_start) {
+    if (!zone || !out_x || !out_y || !out_w || !out_h || !out_row_h || !out_visible || !out_max_start) return;
+    uint32_t option_count = zone->min_v;
+    uint32_t row_h = 20u;
+    uint32_t desired_items = (option_count < 10u) ? option_count : 10u;
+    if (desired_items == 0u) desired_items = 1u;
+
+    uint32_t popup_w = zone->w;
+    if (popup_w < 96u) popup_w = 96u;
+    if (popup_w > body_w) popup_w = body_w;
+
+    uint32_t fit_below = (body_y + body_h > anchor_y) ? ((body_y + body_h - anchor_y) / row_h) : 0u;
+    uint32_t fit_above = (anchor_y > body_y) ? ((anchor_y - body_y) / row_h) : 0u;
+    uint8_t open_above = 0u;
+    uint32_t fit_items = fit_below;
+    if (fit_items == 0u && fit_above > 0u) {
+        fit_items = fit_above;
+        open_above = 1u;
+    } else if (fit_above > fit_below && fit_above > 0u) {
+        fit_items = fit_above;
+        open_above = 1u;
+    }
+    if (fit_items == 0u) fit_items = 1u;
+
+    uint32_t visible_items = desired_items;
+    if (visible_items > fit_items) visible_items = fit_items;
+    if (visible_items == 0u) visible_items = 1u;
+
+    uint32_t popup_h = visible_items * row_h + 2u;
+    uint32_t px = anchor_x;
+    uint32_t py = open_above ? ((anchor_y >= popup_h) ? (anchor_y - popup_h) : body_y) : anchor_y;
+    if (px + popup_w > body_x + body_w) px = body_x + body_w - popup_w;
+    if (px < body_x) px = body_x;
+    if (py + popup_h > body_y + body_h) py = (anchor_y >= popup_h) ? (anchor_y - popup_h) : body_y;
+    if (py < body_y) py = body_y;
+    if (py + popup_h > body_y + body_h && body_h >= popup_h) py = body_y + body_h - popup_h;
+
+    uint32_t max_start = (option_count > visible_items) ? (option_count - visible_items) : 0u;
+    (void)shell;
+    *out_x = px;
+    *out_y = py;
+    *out_w = popup_w;
+    *out_h = popup_h;
+    *out_row_h = row_h;
+    *out_visible = visible_items;
+    *out_max_start = max_start;
 }
 
 static void orbit_split_list_item_text(const char *in, char *title, size_t title_cap,
@@ -2275,6 +2458,18 @@ static uint8_t orbit_ui_dropdown_popup_rect(const orbit_shell_t *shell,
     return (*w > 0u && *h > 0u) ? 1u : 0u;
 }
 
+static uint8_t orbit_ui_context_popup_rect(const orbit_shell_t *shell,
+                                           uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!shell || !x || !y || !w || !h) return 0u;
+    if (!shell->ui.context_open_id) return 0u;
+    if (shell->ui.context_popup_w == 0u || shell->ui.context_popup_h == 0u) return 0u;
+    *x = shell->ui.context_popup_x;
+    *y = shell->ui.context_popup_y;
+    *w = shell->ui.context_popup_w;
+    *h = shell->ui.context_popup_h;
+    return 1u;
+}
+
 static uint8_t orbit_ui_cmd_rect(const sl_window_t *win, const orbit_ui_cmd_t *cmd,
                                  uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
     if (!win || !cmd || !x || !y || !w || !h) return 0u;
@@ -2369,7 +2564,9 @@ int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t 
     uint32_t rx = 0u, ry = 0u, rw = 0u, rh = 0u;
     uint32_t modal_select_id = shell->ui.ui.select_open_id;
     uint32_t dd_x = 0u, dd_y = 0u, dd_w = 0u, dd_h = 0u;
+    uint32_t cm_x = 0u, cm_y = 0u, cm_w = 0u, cm_h = 0u;
     uint8_t dropdown_open = orbit_ui_dropdown_popup_rect(shell, &dd_x, &dd_y, &dd_w, &dd_h);
+    uint8_t context_open = orbit_ui_context_popup_rect(shell, &cm_x, &cm_y, &cm_w, &cm_h);
 
     uint32_t cursor_x = win->ctx ? win->ctx->cursor_x : 0u;
     uint32_t cursor_y = win->ctx ? win->ctx->cursor_y : 0u;
@@ -2389,6 +2586,16 @@ int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t 
         hover_w = dd_w;
         hover_h = dd_h;
     }
+    if (context_open &&
+        cursor_x >= cm_x && cursor_y >= cm_y &&
+        cursor_x < (cm_x + cm_w) && cursor_y < (cm_y + cm_h)) {
+        hover_now = 1u;
+        hover_id = shell->ui.context_open_id;
+        hover_x = cm_x;
+        hover_y = cm_y;
+        hover_w = cm_w;
+        hover_h = cm_h;
+    }
     uint8_t hover_prev = (shell->ui.hover_cmd_id != 0u) ? 1u : 0u;
     uint8_t hover_changed = 0u;
     if (hover_now != hover_prev) {
@@ -2403,6 +2610,7 @@ int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t 
 
     uint8_t has_direct_interaction =
         (frame->mouse_left_pressed || frame->mouse_left_released ||
+         frame->mouse_right_pressed || frame->mouse_right_released ||
          frame->mouse_wheel_x != 0 || frame->mouse_wheel_y != 0 ||
          ((frame->mouse_buttons & 0x01u) && frame->mouse_moved)) ? 1u : 0u;
 
@@ -2451,6 +2659,13 @@ int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t 
         (frame->mouse_moved || frame->mouse_left_pressed || frame->mouse_left_released ||
          frame->mouse_wheel_x != 0 || frame->mouse_wheel_y != 0)) {
         orbit_rect_union_accum(&has_rect, &rx, &ry, &rw, &rh, dd_x, dd_y, dd_w, dd_h);
+    }
+    if (context_open &&
+        (frame->mouse_moved ||
+         frame->mouse_left_pressed || frame->mouse_left_released ||
+         frame->mouse_right_pressed || frame->mouse_right_released ||
+         frame->mouse_wheel_x != 0 || frame->mouse_wheel_y != 0)) {
+        orbit_rect_union_accum(&has_rect, &rx, &ry, &rw, &rh, cm_x, cm_y, cm_w, cm_h);
     }
 
     shell->ui.hover_cmd_id = hover_now ? hover_id : 0u;
@@ -2518,6 +2733,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
     if (shell->ui.enabled && shell->ui.committed) {
         uint32_t select_open_before = shell->ui.ui.select_open_id;
+        uint32_t context_open_before = shell->ui.context_open_id;
         sl_ui_begin(&shell->ui.ui, ctx, win,
                     ctx->cursor_x, ctx->cursor_y,
                     shell->ui.mouse_down, shell->ui.mouse_pressed, shell->ui.mouse_released,
@@ -2528,6 +2744,120 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             sl_ui_theme_apply(&shell->ui.ui, &shell->ui.theme_override);
         }
         orbit_ui_apply_keyboard_navigation(shell);
+
+        if (shell->ui.context_open_id != 0u) {
+            size_t open_idx = 0u;
+            if (!orbit_context_find_zone_by_id(shell, shell->ui.context_open_id, &open_idx)) {
+                shell->ui.context_open_id = 0u;
+                shell->ui.context_popup_w = 0u;
+                shell->ui.context_popup_h = 0u;
+            }
+        }
+
+        if (shell->ui.mouse_r_pressed) {
+            size_t zone_idx = 0u;
+            if (orbit_context_find_zone_hovered(shell,
+                                                shell->ui.ui.cursor_x, shell->ui.ui.cursor_y,
+                                                body_x, body_y, body_w, body_h,
+                                                &zone_idx)) {
+                orbit_ui_cmd_t *zone = &shell->ui.cmds[zone_idx];
+                shell->ui.context_open_id = zone->id;
+                shell->ui.context_open_anchor_x = shell->ui.ui.cursor_x;
+                shell->ui.context_open_anchor_y = shell->ui.ui.cursor_y;
+                shell->ui.context_scroll_idx = 0u;
+                shell->ui.ui.select_open_id = 0u;
+            } else {
+                shell->ui.context_open_id = 0u;
+                shell->ui.context_popup_w = 0u;
+                shell->ui.context_popup_h = 0u;
+            }
+        }
+
+        if (shell->ui.context_open_id != 0u) {
+            size_t zone_idx = 0u;
+            if (orbit_context_find_zone_by_id(shell, shell->ui.context_open_id, &zone_idx)) {
+                orbit_ui_cmd_t *zone = &shell->ui.cmds[zone_idx];
+                uint32_t max_start = 0u;
+                uint32_t visible_items = 0u;
+                orbit_context_compute_popup(shell, zone,
+                                            body_x, body_y, body_w, body_h,
+                                            shell->ui.context_open_anchor_x,
+                                            shell->ui.context_open_anchor_y,
+                                            &shell->ui.context_popup_x,
+                                            &shell->ui.context_popup_y,
+                                            &shell->ui.context_popup_w,
+                                            &shell->ui.context_popup_h,
+                                            &shell->ui.context_popup_row_h,
+                                            &visible_items,
+                                            &max_start);
+                if (shell->ui.context_scroll_idx > max_start) shell->ui.context_scroll_idx = max_start;
+
+                uint8_t popup_hovered = 0u;
+                uint32_t px = shell->ui.context_popup_x;
+                uint32_t py = shell->ui.context_popup_y;
+                uint32_t pw = shell->ui.context_popup_w;
+                uint32_t ph = shell->ui.context_popup_h;
+                if (pw > 0u && ph > 0u) {
+                    uint32_t cx = shell->ui.ui.cursor_x;
+                    uint32_t cy = shell->ui.ui.cursor_y;
+                    popup_hovered = (cx >= px && cy >= py && cx < (px + pw) && cy < (py + ph)) ? 1u : 0u;
+                }
+
+                if (popup_hovered && !shell->ui.ui.wheel_consumed && max_start > 0u) {
+                    int32_t wheel = (shell->ui.ui.wheel_y != 0) ? shell->ui.ui.wheel_y : shell->ui.ui.wheel_x;
+                    if (wheel != 0) {
+                        int64_t nv = (int64_t)shell->ui.context_scroll_idx - (int64_t)wheel;
+                        if (nv < 0) nv = 0;
+                        if (nv > (int64_t)max_start) nv = (int64_t)max_start;
+                        shell->ui.context_scroll_idx = (uint32_t)nv;
+                        shell->ui.ui.wheel_consumed = 1u;
+                    }
+                }
+
+                for (uint8_t k = 0u; k < shell->ui.key_event_count; k++) {
+                    peos_input_event_t *ev = &shell->ui.key_events[k];
+                    if (!ev->pressed) continue;
+                    if (orbit_norm_keycode(ev->code) == PEOS_KEY_ESC) {
+                        shell->ui.context_open_id = 0u;
+                        shell->ui.context_popup_w = 0u;
+                        shell->ui.context_popup_h = 0u;
+                        break;
+                    }
+                }
+
+                if (shell->ui.context_open_id != 0u && shell->ui.mouse_pressed) {
+                    uint32_t cx = shell->ui.ui.cursor_x;
+                    uint32_t cy = shell->ui.ui.cursor_y;
+                    uint8_t inside = (cx >= px && cy >= py && cx < (px + pw) && cy < (py + ph)) ? 1u : 0u;
+                    if (!inside) {
+                        shell->ui.context_open_id = 0u;
+                        shell->ui.context_popup_w = 0u;
+                        shell->ui.context_popup_h = 0u;
+                    }
+                }
+                if (shell->ui.context_open_id != 0u && shell->ui.mouse_released) {
+                    uint32_t cx = shell->ui.ui.cursor_x;
+                    uint32_t cy = shell->ui.ui.cursor_y;
+                    uint8_t has_scrollbar = (zone->min_v > visible_items && shell->ui.context_popup_w > 20u) ? 1u : 0u;
+                    uint32_t scrollbar_w = has_scrollbar ? 8u : 0u;
+                    uint32_t list_w = (shell->ui.context_popup_w > scrollbar_w) ? (shell->ui.context_popup_w - scrollbar_w) : shell->ui.context_popup_w;
+                    uint8_t in_list = (cx >= px + 1u && cy >= py + 1u &&
+                                       cx < (px + list_w - 1u) && cy < (py + shell->ui.context_popup_h - 1u)) ? 1u : 0u;
+                    if (in_list) {
+                        uint32_t rel = cy - (py + 1u);
+                        uint32_t item = (shell->ui.context_popup_row_h > 0u) ? (rel / shell->ui.context_popup_row_h) : 0u;
+                        uint32_t picked = shell->ui.context_scroll_idx + item;
+                        if (item < visible_items && picked < zone->min_v) {
+                            orbit_send_ui_event_context_menu(shell, zone->id, picked);
+                        }
+                    }
+                    shell->ui.context_open_id = 0u;
+                    shell->ui.context_popup_w = 0u;
+                    shell->ui.context_popup_h = 0u;
+                }
+            }
+        }
+
         {
             const sl_ui_color_t *canvas = sl_ui_theme_color(&shell->ui.ui, SL_UI_COLOR_BG_CANVAS);
             if (canvas && canvas->a < 255u) {
@@ -2547,11 +2877,13 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         sl_clip_set(ctx, body_x, body_y, body_w, body_h);
 
         uint32_t modal_select_id = shell->ui.ui.select_open_id;
+        uint8_t context_modal_open = (shell->ui.context_open_id != 0u) ? 1u : 0u;
         for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
             orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
             uint32_t x = body_x + cmd->x;
             uint32_t y = body_y + cmd->y;
             uint8_t cmd_enabled = orbit_ui_cmd_enabled_for_modal(cmd, modal_select_id);
+            if (context_modal_open) cmd_enabled = 0u;
             uint8_t draw_nav_focus = (shell->ui.nav_focus_id != 0u &&
                                       shell->ui.keyboard_nav_active &&
                                       cmd->id == shell->ui.nav_focus_id &&
@@ -2750,6 +3082,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 sl_ui_rect_a(&shell->ui.ui, x, y, cmd->w, cmd->h, (sl_ui_color_token_t)cmd->value, cmd->a);
             } else if (cmd->type == ORBIT_UI_CMD_GRAD2D) {
                 orbit_draw_grad2d(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->grad);
+            } else if (cmd->type == ORBIT_UI_CMD_CONTEXT_MENU) {
+                // Registration-only control: rendered by host overlay on right click.
             } else if (cmd->type == ORBIT_UI_CMD_IMAGE_FILE) {
                 if (!cmd->image_loaded && !cmd->image_failed) {
                     if (sl_decode_image_file(cmd->text, &cmd->image)) {
@@ -2777,9 +3111,84 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
         sl_clip_set(ctx, body_x, body_y, body_w, body_h);
         sl_ui_draw_overlays(&shell->ui.ui);
+        if (shell->ui.context_open_id != 0u && shell->ui.context_popup_w > 0u && shell->ui.context_popup_h > 0u) {
+            size_t zone_idx = 0u;
+            if (orbit_context_find_zone_by_id(shell, shell->ui.context_open_id, &zone_idx)) {
+                const orbit_ui_cmd_t *zone = &shell->ui.cmds[zone_idx];
+                uint32_t px = shell->ui.context_popup_x;
+                uint32_t py = shell->ui.context_popup_y;
+                uint32_t pw = shell->ui.context_popup_w;
+                uint32_t ph = shell->ui.context_popup_h;
+                uint32_t row_h = shell->ui.context_popup_row_h;
+                uint32_t visible_items = (ph > 2u && row_h > 0u) ? ((ph - 2u) / row_h) : 0u;
+                uint32_t option_count = zone->min_v;
+                if (visible_items == 0u) visible_items = 1u;
+                if (visible_items > option_count) visible_items = option_count;
+
+                uint8_t has_scrollbar = (option_count > visible_items && pw > 20u) ? 1u : 0u;
+                uint32_t scrollbar_w = has_scrollbar ? 8u : 0u;
+                uint32_t list_w = (pw > scrollbar_w) ? (pw - scrollbar_w) : pw;
+                uint32_t max_start = (option_count > visible_items) ? (option_count - visible_items) : 0u;
+                uint32_t start_idx = shell->ui.context_scroll_idx;
+                if (start_idx > max_start) start_idx = max_start;
+
+                sl_fill_rect_a(ctx, px + 1u, py + ph, pw, 2u, 0u, 0u, 0u, 72u);
+                sl_fill_rect_a(ctx, px + pw, py + 1u, 2u, ph + 1u, 0u, 0u, 0u, 72u);
+
+                sl_ui_rect(&shell->ui.ui, px, py, pw, ph, SL_UI_COLOR_BG_PANEL);
+                sl_ui_rect(&shell->ui.ui, px, py, pw, 1u, SL_UI_COLOR_BORDER);
+                sl_ui_rect(&shell->ui.ui, px, py + ph - 1u, pw, 1u, SL_UI_COLOR_BG_CANVAS);
+                sl_ui_rect(&shell->ui.ui, px, py, 1u, ph, SL_UI_COLOR_BORDER);
+                sl_ui_rect(&shell->ui.ui, px + pw - 1u, py, 1u, ph, SL_UI_COLOR_BG_CANVAS);
+
+                uint32_t cell_h = sl_text_cell_h();
+                if (cell_h == 0u) cell_h = 8u;
+                for (uint32_t i = 0u; i < visible_items; i++) {
+                    uint32_t opt_idx = start_idx + i;
+                    if (opt_idx >= option_count) break;
+                    uint32_t iy = py + 1u + i * row_h;
+                    uint32_t cx = shell->ui.ui.cursor_x;
+                    uint32_t cy = shell->ui.ui.cursor_y;
+                    uint8_t hover = (cx >= px + 1u && cy >= iy && cx < (px + list_w - 1u) && cy < (iy + row_h)) ? 1u : 0u;
+                    if (hover) sl_ui_rect(&shell->ui.ui, px + 1u, iy, list_w - 2u, row_h, SL_UI_COLOR_BG_CONTROL_HOVER);
+
+                    char opt_text[128];
+                    orbit_select_option_text(zone->text, opt_idx, opt_text, sizeof(opt_text));
+                    uint32_t ty = iy + ((row_h > cell_h) ? ((row_h - cell_h) / 2u) : 0u);
+                    sl_ui_label(&shell->ui.ui, px + 6u, ty, opt_text, SL_UI_COLOR_TEXT_PRIMARY);
+                }
+
+                if (has_scrollbar) {
+                    uint32_t sx = px + list_w;
+                    uint32_t sy = py + 1u;
+                    uint32_t sw = pw - list_w;
+                    uint32_t sh = (ph > 2u) ? (ph - 2u) : 0u;
+                    if (sw > 0u && sh > 0u) {
+                        sl_ui_rect(&shell->ui.ui, sx, sy, sw, sh, SL_UI_COLOR_BG_CANVAS);
+                        uint32_t track_x = sx + 2u;
+                        uint32_t track_y = sy + 1u;
+                        uint32_t track_w = (sw > 4u) ? (sw - 4u) : sw;
+                        uint32_t track_h = (sh > 2u) ? (sh - 2u) : sh;
+                        if (track_w > 0u && track_h > 0u && max_start > 0u) {
+                            uint32_t thumb_h = (uint32_t)(((uint64_t)visible_items * (uint64_t)track_h) / (uint64_t)option_count);
+                            if (thumb_h < 8u) thumb_h = 8u;
+                            if (thumb_h > track_h) thumb_h = track_h;
+                            uint32_t travel = track_h - thumb_h;
+                            uint32_t thumb_y = track_y;
+                            if (travel > 0u) {
+                                thumb_y += (uint32_t)(((uint64_t)start_idx * (uint64_t)travel) / (uint64_t)max_start);
+                            }
+                            sl_ui_rect(&shell->ui.ui, track_x, track_y, track_w, track_h, SL_UI_COLOR_BG_PANEL);
+                            sl_ui_rect(&shell->ui.ui, track_x, thumb_y, track_w, thumb_h, SL_UI_COLOR_BG_CONTROL);
+                        }
+                    }
+                }
+            }
+        }
         sl_clip_clear(ctx);
 
-        if (select_open_before != shell->ui.ui.select_open_id) {
+        if (select_open_before != shell->ui.ui.select_open_id ||
+            context_open_before != shell->ui.context_open_id) {
             // Ensure all controls refresh visual state immediately when dropdown opens/closes.
             sl_dirty_add(ctx, win->x, win->y, win->width, win->height);
         }
@@ -2787,6 +3196,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         if (!shell->ui.mouse_down) shell->ui.active_panel_id = 0u;
         shell->ui.mouse_pressed = 0u;
         shell->ui.mouse_released = 0u;
+        shell->ui.mouse_r_pressed = 0u;
+        shell->ui.mouse_r_released = 0u;
         shell->ui.mouse_wheel_x = 0;
         shell->ui.mouse_wheel_y = 0;
         shell->ui.key_event_count = 0u;

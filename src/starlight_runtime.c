@@ -845,6 +845,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
     if (sl_input_poll(ctx, &input) < 0) return 1;
 
     if (input.mouse_moved) {
+        sl_launcher_handle_context_hover(ctx);
         sl_launcher_handle_hover(ctx);
     }
 
@@ -857,7 +858,8 @@ int sl_handle_input(sl_ctx_t *ctx) {
         (input.mouse_updated || input.mouse_left_pressed || input.mouse_left_released || input.mouse_moved)) {
         focused->task->on_input(ctx, &input, NULL, focused->task->userdata);
         sl_windows_mark_focused_activity();
-        if (input.mouse_left_pressed || input.mouse_left_released) {
+        if (input.mouse_left_pressed || input.mouse_left_released ||
+            input.mouse_right_pressed || input.mouse_right_released) {
             sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
         } else {
             uint32_t dx = 0u, dy = 0u, dw = 0u, dh = 0u;
@@ -879,6 +881,14 @@ int sl_handle_input(sl_ctx_t *ctx) {
     }
 
     if (input.quit_requested) return 1;
+
+    if (input.mouse_right_pressed) {
+        if (sl_launcher_handle_right_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
+            g_drag_active = 0u;
+            g_drag_window = NULL;
+            return 0;
+        }
+    }
 
     if (input.mouse_left_pressed) {
         uint8_t had_prev_focus = 0u;

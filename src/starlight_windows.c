@@ -74,10 +74,25 @@ static sl_image_t g_launcher_placeholder_icon;
 static uint8_t g_launcher_placeholder_loaded = 0u;
 static uint8_t g_launcher_placeholder_failed = 0u;
 static size_t g_launcher_hover_index = (size_t)-1;
+static uint8_t g_launcher_ctx_open = 0u;
+static size_t g_launcher_ctx_item_index = (size_t)-1;
+static uint32_t g_launcher_ctx_x = 0u;
+static uint32_t g_launcher_ctx_y = 0u;
+static uint32_t g_launcher_ctx_w = 0u;
+static uint32_t g_launcher_ctx_h = 0u;
+static int32_t g_launcher_ctx_hover_row = -1;
 static sl_window_anim_t g_window_anims[SL_WIN_ANIM_MAX];
 
 static void sl_window_refresh_zorder(void);
 static void sl_launcher_compact_label(const char *src, char *dst, size_t cap);
+static size_t sl_window_index_for_task(const app_instance_t *task);
+static void sl_focus_window(size_t index);
+static int sl_window_is_closing(const sl_window_t *win);
+static void sl_anim_start_close(app_instance_t *task, int32_t current_y);
+static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index);
+
+#define SL_LAUNCHER_CTX_ROW_H 20u
+#define SL_LAUNCHER_CTX_MIN_W 108u
 
 static uint32_t sl_anim_tween_id(size_t slot, uint32_t channel) {
     return (uint32_t)(0xA1100000u + ((uint32_t)slot * 8u) + channel);
@@ -419,6 +434,12 @@ static void sl_launcher_items_reset(void) {
     peos_memset(g_launcher_items, 0, sizeof(g_launcher_items));
     g_launcher_count = 0u;
     g_launcher_hover_index = (size_t)-1;
+    g_launcher_ctx_open = 0u;
+    g_launcher_ctx_item_index = (size_t)-1;
+    g_launcher_ctx_x = 0u;
+    g_launcher_ctx_y = 0u;
+    g_launcher_ctx_w = 0u;
+    g_launcher_ctx_h = 0u;
 }
 
 static void sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app) {
@@ -598,6 +619,154 @@ static int sl_launcher_hit_test(const sl_ctx_t *ctx, uint32_t x, uint32_t y, siz
     }
 
     return 0;
+}
+
+static void sl_launcher_context_close(sl_ctx_t *ctx) {
+    if (!ctx) return;
+    if (!g_launcher_ctx_open) return;
+    if (g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u) {
+        uint32_t dx = (g_launcher_ctx_x > 0u) ? (g_launcher_ctx_x - 1u) : 0u;
+        uint32_t dy = (g_launcher_ctx_y > 0u) ? (g_launcher_ctx_y - 1u) : 0u;
+        uint32_t dw = g_launcher_ctx_w + 4u;
+        uint32_t dh = g_launcher_ctx_h + 4u;
+        sl_dirty_add(ctx, dx, dy, dw, dh);
+    }
+    g_launcher_ctx_open = 0u;
+    g_launcher_ctx_item_index = (size_t)-1;
+    g_launcher_ctx_x = 0u;
+    g_launcher_ctx_y = 0u;
+    g_launcher_ctx_w = 0u;
+    g_launcher_ctx_h = 0u;
+    g_launcher_ctx_hover_row = -1;
+}
+
+static uint32_t sl_launcher_context_action_count(const sl_launcher_item_t *item) {
+    if (!item) return 0u;
+    app_instance_t *app = sl_app_host_instance_at(item->slot);
+    if (!app) return 0u;
+    return (sl_window_index_for_task(app) != (size_t)-1) ? 2u : 1u;
+}
+
+static void sl_launcher_context_action_text(const sl_launcher_item_t *item, uint32_t action,
+                                            char *out, size_t out_cap) {
+    if (!out || out_cap == 0u) return;
+    out[0] = '\0';
+    if (!item) return;
+    app_instance_t *app = sl_app_host_instance_at(item->slot);
+    if (app && sl_window_index_for_task(app) != (size_t)-1) {
+        if (action == 0u) sl_copy_str(out, out_cap, "Focus");
+        else if (action == 1u) sl_copy_str(out, out_cap, "Close");
+        else sl_copy_str(out, out_cap, "(invalid)");
+    } else {
+        if (action == 0u) sl_copy_str(out, out_cap, "Open");
+        else sl_copy_str(out, out_cap, "(invalid)");
+    }
+}
+
+static void sl_launcher_context_open(sl_ctx_t *ctx, size_t item_index, uint32_t anchor_x, uint32_t anchor_y) {
+    if (!ctx || item_index >= g_launcher_count) return;
+    if (g_launcher_ctx_open && g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u) {
+        uint32_t old_x = (g_launcher_ctx_x > 0u) ? (g_launcher_ctx_x - 1u) : 0u;
+        uint32_t old_y = (g_launcher_ctx_y > 0u) ? (g_launcher_ctx_y - 1u) : 0u;
+        uint32_t old_w = g_launcher_ctx_w + 4u;
+        uint32_t old_h = g_launcher_ctx_h + 4u;
+        sl_dirty_add(ctx, old_x, old_y, old_w, old_h);
+    }
+    const sl_launcher_item_t *item = &g_launcher_items[item_index];
+    uint32_t action_count = sl_launcher_context_action_count(item);
+    if (action_count == 0u) return;
+
+    uint32_t menu_w = SL_LAUNCHER_CTX_MIN_W;
+    uint32_t menu_h = action_count * SL_LAUNCHER_CTX_ROW_H + 2u;
+    if (menu_w > ctx->fb.width) menu_w = ctx->fb.width;
+    if (menu_h > ctx->fb.height) menu_h = ctx->fb.height;
+    uint32_t menu_x = anchor_x;
+    uint32_t menu_y = anchor_y;
+    if (menu_x + menu_w > ctx->fb.width) menu_x = (ctx->fb.width > menu_w) ? (ctx->fb.width - menu_w) : 0u;
+    if (menu_y + menu_h > ctx->fb.height) {
+        menu_y = (anchor_y >= menu_h) ? (anchor_y - menu_h) : 0u;
+    }
+    if (menu_y + menu_h > ctx->fb.height && ctx->fb.height >= menu_h) {
+        menu_y = ctx->fb.height - menu_h;
+    }
+
+    g_launcher_ctx_open = 1u;
+    g_launcher_ctx_item_index = item_index;
+    g_launcher_ctx_x = menu_x;
+    g_launcher_ctx_y = menu_y;
+    g_launcher_ctx_w = menu_w;
+    g_launcher_ctx_h = menu_h;
+    g_launcher_ctx_hover_row = -1;
+    if (g_launcher_hover_index != (size_t)-1) {
+        uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
+        sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
+        if (tw > 0u && th > 0u) sl_dirty_add(ctx, tx, ty, tw, th);
+        g_launcher_hover_index = (size_t)-1;
+    }
+    {
+        uint32_t dx = (g_launcher_ctx_x > 0u) ? (g_launcher_ctx_x - 1u) : 0u;
+        uint32_t dy = (g_launcher_ctx_y > 0u) ? (g_launcher_ctx_y - 1u) : 0u;
+        uint32_t dw = g_launcher_ctx_w + 4u;
+        uint32_t dh = g_launcher_ctx_h + 4u;
+        sl_dirty_add(ctx, dx, dy, dw, dh);
+    }
+}
+
+static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint32_t action) {
+    if (!ctx || item_index >= g_launcher_count) return 0;
+    sl_launcher_item_t *item = &g_launcher_items[item_index];
+    app_instance_t *app = sl_app_host_instance_at(item->slot);
+    if (!app) return 0;
+    item->instance = app;
+
+    size_t existing = sl_window_index_for_task(app);
+    if (existing != (size_t)-1) {
+        if (action == 0u) {
+            sl_focus_window(existing);
+            sl_windows_mark_focused_activity();
+            sl_dirty_mark_full();
+            return 1;
+        }
+        if (action == 1u) {
+            if (!sl_window_is_closing(&g_windows[existing])) {
+                sl_anim_start_close(g_windows[existing].task, (int32_t)g_windows[existing].y);
+                sl_windows_mark_focused_activity();
+                sl_dirty_mark_full();
+            }
+            return 1;
+        }
+        return 0;
+    }
+
+    if (action == 0u) return sl_windows_open_launcher_item(ctx, item_index);
+    return 0;
+}
+
+void sl_launcher_handle_context_hover(sl_ctx_t *ctx) {
+    if (!ctx || !g_launcher_ctx_open || g_launcher_ctx_item_index >= g_launcher_count) return;
+    if (g_launcher_ctx_w == 0u || g_launcher_ctx_h == 0u) return;
+    const sl_launcher_item_t *item = &g_launcher_items[g_launcher_ctx_item_index];
+    uint32_t action_count = sl_launcher_context_action_count(item);
+    if (action_count == 0u) return;
+
+    int32_t next_row = -1;
+    if (sl_point_in_rect(ctx->cursor_x, ctx->cursor_y, g_launcher_ctx_x, g_launcher_ctx_y,
+                         g_launcher_ctx_w, g_launcher_ctx_h)) {
+        if (ctx->cursor_y >= g_launcher_ctx_y + 1u) {
+            uint32_t rel_y = ctx->cursor_y - (g_launcher_ctx_y + 1u);
+            uint32_t row = rel_y / SL_LAUNCHER_CTX_ROW_H;
+            if (row < action_count) next_row = (int32_t)row;
+        }
+    }
+    if (next_row == g_launcher_ctx_hover_row) return;
+    g_launcher_ctx_hover_row = next_row;
+    {
+        uint32_t dx = (g_launcher_ctx_x > 0u) ? (g_launcher_ctx_x - 1u) : 0u;
+        uint32_t dy = (g_launcher_ctx_y > 0u) ? (g_launcher_ctx_y - 1u) : 0u;
+        uint32_t dw = g_launcher_ctx_w + 4u;
+        uint32_t dh = g_launcher_ctx_h + 4u;
+        sl_dirty_add(ctx, dx, dy, dw, dh);
+    }
 }
 
 static size_t sl_window_index_for_task(const app_instance_t *task) {
@@ -1059,6 +1228,12 @@ void sl_windows_destroy_all(void) {
     g_launcher_placeholder_loaded = 0u;
     g_launcher_placeholder_failed = 0u;
     g_launcher_hover_index = (size_t)-1;
+    g_launcher_ctx_open = 0u;
+    g_launcher_ctx_item_index = (size_t)-1;
+    g_launcher_ctx_x = 0u;
+    g_launcher_ctx_y = 0u;
+    g_launcher_ctx_w = 0u;
+    g_launcher_ctx_h = 0u;
 }
 
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y) {
@@ -1084,6 +1259,23 @@ uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx) {
 int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx) return 0;
 
+    if (g_launcher_ctx_open && g_launcher_ctx_item_index < g_launcher_count) {
+        uint8_t inside_menu = sl_point_in_rect(x, y, g_launcher_ctx_x, g_launcher_ctx_y,
+                                               g_launcher_ctx_w, g_launcher_ctx_h) ? 1u : 0u;
+        if (inside_menu) {
+            uint32_t rel_y = (y >= g_launcher_ctx_y + 1u) ? (y - (g_launcher_ctx_y + 1u)) : 0u;
+            uint32_t row = rel_y / SL_LAUNCHER_CTX_ROW_H;
+            uint32_t action_count = sl_launcher_context_action_count(&g_launcher_items[g_launcher_ctx_item_index]);
+            if (row < action_count) {
+                (void)sl_launcher_context_activate(ctx, g_launcher_ctx_item_index, row);
+            }
+            sl_launcher_context_close(ctx);
+            return 1;
+        }
+        sl_launcher_context_close(ctx);
+        if (x < sl_launcher_reserved_left(ctx)) return 1;
+    }
+
     uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
     sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
     if (panel_w == 0u || panel_h == 0u) return 0;
@@ -1099,8 +1291,23 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     return 1;
 }
 
+int sl_launcher_handle_right_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx) return 0;
+    size_t index = 0u;
+    if (sl_launcher_hit_test(ctx, x, y, &index)) {
+        sl_launcher_context_open(ctx, index, x, y);
+        return 1;
+    }
+    if (g_launcher_ctx_open) {
+        sl_launcher_context_close(ctx);
+        if (x < sl_launcher_reserved_left(ctx)) return 1;
+    }
+    return 0;
+}
+
 void sl_launcher_handle_hover(sl_ctx_t *ctx) {
     if (!ctx) return;
+    if (g_launcher_ctx_open) return;
 
     size_t next_hover = (size_t)-1;
     (void)sl_launcher_hit_test(ctx, ctx->cursor_x, ctx->cursor_y, &next_hover);
@@ -1135,6 +1342,7 @@ void sl_launcher_render(sl_ctx_t *ctx) {
 
     uint8_t needs_panel = sl_dirty_intersects_rect(panel_x, panel_y, panel_w, panel_h) ? 1u : 0u;
     uint8_t needs_tip = 0u;
+    uint8_t needs_ctx = 0u;
     if (g_launcher_hover_index != (size_t)-1) {
         uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
         sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
@@ -1142,7 +1350,12 @@ void sl_launcher_render(sl_ctx_t *ctx) {
             needs_tip = 1u;
         }
     }
-    if (!needs_panel && !needs_tip) return;
+    if (g_launcher_ctx_open && g_launcher_ctx_item_index < g_launcher_count &&
+        g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u &&
+        sl_dirty_intersects_rect(g_launcher_ctx_x, g_launcher_ctx_y, g_launcher_ctx_w, g_launcher_ctx_h)) {
+        needs_ctx = 1u;
+    }
+    if (!needs_panel && !needs_tip && !needs_ctx) return;
 
     sl_fill_rect(ctx, panel_x, panel_y, panel_w, panel_h, 16u, 20u, 26u);
     sl_fill_rect(ctx, panel_x + panel_w - 1u, panel_y, 1u, panel_h, 54u, 65u, 78u);
@@ -1154,7 +1367,9 @@ void sl_launcher_render(sl_ctx_t *ctx) {
         sl_launcher_item_rect(ctx, i, &ix, &iy, &iw, &ih);
         sl_launcher_try_load_icon(item);
 
-        size_t win_idx = (item->instance) ? sl_window_index_for_task(item->instance) : (size_t)-1;
+        app_instance_t *app = sl_app_host_instance_at(item->slot);
+        item->instance = app;
+        size_t win_idx = app ? sl_window_index_for_task(app) : (size_t)-1;
         uint8_t running = (win_idx != (size_t)-1) ? 1u : 0u;
         uint8_t focused = (running && win_idx == g_focused_window) ? 1u : 0u;
 
@@ -1201,5 +1416,33 @@ void sl_launcher_render(sl_ctx_t *ctx) {
 
     if (g_launcher_hover_index != (size_t)-1) {
         sl_launcher_draw_hover_label(ctx, g_launcher_hover_index);
+    }
+
+    if (g_launcher_ctx_open && g_launcher_ctx_item_index < g_launcher_count &&
+        g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u) {
+        const sl_launcher_item_t *item = &g_launcher_items[g_launcher_ctx_item_index];
+        uint32_t action_count = sl_launcher_context_action_count(item);
+        if (action_count > 0u) {
+            uint32_t mx = g_launcher_ctx_x;
+            uint32_t my = g_launcher_ctx_y;
+            uint32_t mw = g_launcher_ctx_w;
+            uint32_t mh = g_launcher_ctx_h;
+            sl_fill_rect_a(ctx, mx + 1u, my + mh, mw, 2u, 0u, 0u, 0u, 72u);
+            sl_fill_rect_a(ctx, mx + mw, my + 1u, 2u, mh + 1u, 0u, 0u, 0u, 72u);
+            sl_fill_rect(ctx, mx, my, mw, mh, 26u, 31u, 39u);
+            sl_fill_rect(ctx, mx, my, mw, 1u, 92u, 108u, 126u);
+            sl_fill_rect(ctx, mx, my + mh - 1u, mw, 1u, 92u, 108u, 126u);
+            sl_fill_rect(ctx, mx, my, 1u, mh, 92u, 108u, 126u);
+            sl_fill_rect(ctx, mx + mw - 1u, my, 1u, mh, 92u, 108u, 126u);
+
+            for (uint32_t i = 0u; i < action_count; i++) {
+                uint32_t row_y = my + 1u + i * SL_LAUNCHER_CTX_ROW_H;
+                uint8_t hover = ((int32_t)i == g_launcher_ctx_hover_row) ? 1u : 0u;
+                if (hover) sl_fill_rect(ctx, mx + 1u, row_y, mw - 2u, SL_LAUNCHER_CTX_ROW_H, 62u, 74u, 92u);
+                char label[24];
+                sl_launcher_context_action_text(item, i, label, sizeof(label));
+                sl_draw_text(ctx, mx + 8u, row_y + 6u, label, 236u, 240u, 244u);
+            }
+        }
     }
 }
