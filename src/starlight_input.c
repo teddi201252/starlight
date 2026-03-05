@@ -21,10 +21,6 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
         if (out->key_event_count < 16u) {
             out->key_events[out->key_event_count++] = evs[i];
         }
-        if (evs[i].pressed && evs[i].code == PEOS_KEY_ESC) {
-            out->quit_requested = 1u;
-            break;
-        }
     }
 
     if (mr >= 0) {

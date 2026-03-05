@@ -166,6 +166,8 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
     ui->wheel_x = wheel_x;
     ui->wheel_y = wheel_y;
     ui->wheel_consumed = 0u;
+    ui->select_overlay_pending = 0u;
+    ui->select_overlay_options_pipe = NULL;
     if (!g_runtime_theme_initialized) {
         sl_ui_theme_set_default(&g_runtime_theme);
         g_runtime_theme_initialized = 1u;
@@ -423,19 +425,120 @@ uint8_t sl_ui_toggle_state(sl_ui_ctx_t *ui, uint32_t id,
 uint8_t sl_ui_select_cycle(sl_ui_ctx_t *ui, uint32_t id,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                            uint32_t option_count, uint32_t *selected,
-                           const char *current_text) {
-    return sl_ui_select_cycle_state(ui, id, x, y, w, h, option_count, selected, current_text, 1u);
+                           const char *current_text,
+                           const char *options_pipe) {
+    return sl_ui_select_cycle_state(ui, id, x, y, w, h, option_count, selected, current_text, options_pipe, 1u);
+}
+
+static void sl_ui_select_option_text(const char *options_pipe, uint32_t index,
+                                     char *out, uint32_t out_cap) {
+    uint32_t idx = 0u;
+    uint32_t n = 0u;
+    const char *start = options_pipe;
+    const char *p = options_pipe;
+    if (!out || out_cap == 0u) return;
+    out[0] = '\0';
+    if (!options_pipe || options_pipe[0] == '\0') return;
+
+    while (1) {
+        if (*p == '|' || *p == '\0') {
+            if (idx == index) {
+                const char *q = start;
+                while (q < p && n + 1u < out_cap) {
+                    out[n++] = *q++;
+                }
+                out[n] = '\0';
+                return;
+            }
+            if (*p == '\0') break;
+            idx++;
+            start = p + 1;
+        }
+        p++;
+    }
 }
 
 uint8_t sl_ui_select_cycle_state(sl_ui_ctx_t *ui, uint32_t id,
                                  uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                  uint32_t option_count, uint32_t *selected,
-                                 const char *current_text, uint8_t enabled) {
+                                 const char *current_text, const char *options_pipe,
+                                 uint8_t enabled) {
+    return sl_ui_select_cycle_state_ex(ui, id,
+                                       x, y, w, h,
+                                       option_count, selected,
+                                       current_text, options_pipe,
+                                       NULL, 0u, enabled);
+}
+
+uint8_t sl_ui_select_cycle_state_ex(sl_ui_ctx_t *ui, uint32_t id,
+                                    uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                    uint32_t option_count, uint32_t *selected,
+                                    const char *current_text, const char *options_pipe,
+                                    const peos_input_event_t *events, uint8_t event_count,
+                                    uint8_t enabled) {
     if (!ui || !ui->ctx || !selected || !current_text || w < 16u || h < 12u) return 0u;
     if (option_count == 0u) return 0u;
     if (*selected >= option_count) *selected = 0u;
 
+    uint32_t row_h = (h < 20u) ? 20u : h;
+    uint32_t max_items = 6u;
+    uint32_t desired_items = (option_count < max_items) ? option_count : max_items;
+
+    uint32_t body_top = 0u;
+    uint32_t body_bottom = ui->ctx->fb.height;
+    if (ui->win) {
+        uint32_t by = ui->win->y + ui->win->top_bar_height + 1u;
+        uint32_t bh = (ui->win->height > (ui->win->top_bar_height + 3u))
+            ? (ui->win->height - ui->win->top_bar_height - 3u)
+            : 0u;
+        if (bh > 0u) {
+            body_top = by;
+            body_bottom = by + bh;
+        }
+    }
+
+    uint32_t trigger_bottom = y + h;
+    uint32_t space_below = (body_bottom > trigger_bottom) ? (body_bottom - trigger_bottom) : 0u;
+    uint32_t space_above = (y > body_top) ? (y - body_top) : 0u;
+    uint32_t fit_below = (space_below > 2u) ? ((space_below - 2u) / row_h) : 0u;
+    uint32_t fit_above = (space_above > 2u) ? ((space_above - 2u) / row_h) : 0u;
+
+    uint8_t open_above = 0u;
+    uint32_t fit_items = fit_below;
+    if (fit_items == 0u && fit_above > 0u) {
+        fit_items = fit_above;
+        open_above = 1u;
+    } else if (fit_above > fit_below && fit_above > 0u) {
+        fit_items = fit_above;
+        open_above = 1u;
+    }
+    if (fit_items == 0u) fit_items = 1u;
+
+    uint32_t visible_items = desired_items;
+    if (visible_items > fit_items) visible_items = fit_items;
+    if (visible_items == 0u) visible_items = 1u;
+
+    uint32_t popup_h = visible_items * row_h + 2u;
+    uint32_t popup_y = open_above ? ((y >= popup_h) ? (y - popup_h) : body_top) : (y + h);
+    if (!open_above && popup_y + popup_h > body_bottom) {
+        popup_y = (y >= popup_h) ? (y - popup_h) : body_top;
+    }
+    if (popup_y < body_top) popup_y = body_top;
+    if (popup_y + popup_h > body_bottom && body_bottom > popup_h) {
+        popup_y = body_bottom - popup_h;
+    }
+    int was_open = (ui->select_open_id == id) ? 1 : 0;
+    int open = was_open;
+    uint32_t max_start = (option_count > visible_items) ? (option_count - visible_items) : 0u;
+    uint8_t has_scrollbar = (option_count > visible_items && w > 20u) ? 1u : 0u;
+    uint32_t scrollbar_w = has_scrollbar ? 8u : 0u;
+    uint32_t list_w = (w > scrollbar_w) ? (w - scrollbar_w) : w;
+
     int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
+    int popup_hovered = open ? sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, popup_y, w, popup_h) : 0;
+    int popup_list_hovered = open ? sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, popup_y, list_w, popup_h) : 0;
+    int popup_scroll_hovered = (open && has_scrollbar)
+        ? sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x + list_w, popup_y, w - list_w, popup_h) : 0;
     if (enabled && hovered && ui->mouse_pressed) ui->active_id = id;
     int active = (ui->active_id == id);
 
@@ -443,14 +546,28 @@ uint8_t sl_ui_select_cycle_state(sl_ui_ctx_t *ui, uint32_t id,
     if (enabled && ui->mouse_released && active) {
         ui->active_id = 0u;
         if (hovered) {
-            *selected = (*selected + 1u) % option_count;
-            changed = 1u;
+            if (open) ui->select_open_id = 0u;
+            else ui->select_open_id = id;
+            open = (ui->select_open_id == id) ? 1 : 0;
         }
     }
+    if (!enabled && open) {
+        ui->select_open_id = 0u;
+        open = 0;
+    }
+    if (open && !was_open) {
+        uint32_t start = 0u;
+        if (*selected >= visible_items) {
+            start = *selected - (visible_items - 1u);
+            if (start > max_start) start = max_start;
+        }
+        ui->select_scroll_idx = start;
+    }
+    if (ui->select_scroll_idx > max_start) ui->select_scroll_idx = max_start;
 
     sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
     if (!enabled) state = SL_UI_STATE_DISABLED;
-    else if (active && ui->mouse_down) state = SL_UI_STATE_ACTIVE;
+    else if (open || (active && ui->mouse_down)) state = SL_UI_STATE_ACTIVE;
     else if (hovered) state = SL_UI_STATE_HOVER;
     sl_ui_fill_tok(ui, x, y, w, h, sl_ui_state_fill_token(state));
     sl_ui_fill_tok(ui, x, y, w, 1u, sl_ui_state_border_token(state));
@@ -461,10 +578,199 @@ uint8_t sl_ui_select_cycle_state(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t text_y = sl_ui_text_center_y(ui, y, h);
     sl_ui_text_tok(ui, x + 6u, text_y, current_text,
                    enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
-    sl_ui_text_tok(ui, x + w - 10u, text_y, ">",
+    sl_ui_text_tok(ui, x + w - 10u, text_y, open ? "v" : ">",
                    enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
     if (!enabled && active) ui->active_id = 0u;
+
+    if (open) {
+        if (enabled && popup_hovered && !ui->wheel_consumed && max_start > 0u) {
+            int32_t wheel = (ui->wheel_y != 0) ? ui->wheel_y : ui->wheel_x;
+            if (wheel != 0) {
+                int64_t nv = (int64_t)ui->select_scroll_idx - (int64_t)wheel;
+                if (nv < 0) nv = 0;
+                if (nv > (int64_t)max_start) nv = (int64_t)max_start;
+                ui->select_scroll_idx = (uint32_t)nv;
+                ui->wheel_consumed = 1u;
+            }
+        }
+
+        if (enabled && popup_scroll_hovered && has_scrollbar && ui->mouse_pressed) {
+            uint32_t track_y = popup_y + 2u;
+            uint32_t track_h = (popup_h > 4u) ? (popup_h - 4u) : 0u;
+            if (track_h > 0u && max_start > 0u) {
+                uint32_t thumb_h = (uint32_t)(((uint64_t)visible_items * (uint64_t)track_h) / (uint64_t)option_count);
+                if (thumb_h < 8u) thumb_h = 8u;
+                if (thumb_h > track_h) thumb_h = track_h;
+                uint32_t travel = track_h - thumb_h;
+                uint32_t cy = ui->cursor_y;
+                if (cy < track_y) cy = track_y;
+                if (cy > track_y + track_h) cy = track_y + track_h;
+                uint32_t pos = (cy > (track_y + (thumb_h / 2u))) ? (cy - track_y - (thumb_h / 2u)) : 0u;
+                if (pos > travel) pos = travel;
+                ui->select_scroll_idx = (travel > 0u)
+                    ? (uint32_t)(((uint64_t)pos * (uint64_t)max_start) / (uint64_t)travel)
+                    : 0u;
+            }
+        }
+
+        for (uint8_t i = 0u; i < event_count; i++) {
+            uint16_t code = sl_ui_norm_keycode(events[i].code);
+            if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) {
+                ui->shift_down = events[i].pressed ? 1u : 0u;
+                continue;
+            }
+            if (code == PEOS_KEY_LCTRL || code == PEOS_KEY_RCTRL_NORM) {
+                ui->ctrl_down = events[i].pressed ? 1u : 0u;
+                continue;
+            }
+            if (code == PEOS_KEY_LALT || code == PEOS_KEY_RALT_NORM) {
+                ui->alt_down = events[i].pressed ? 1u : 0u;
+                continue;
+            }
+            if (code == PEOS_KEY_LSUPER_NORM || code == PEOS_KEY_RSUPER_NORM) {
+                ui->super_down = events[i].pressed ? 1u : 0u;
+                continue;
+            }
+            if (!enabled || !events[i].pressed) continue;
+
+            if (code == PEOS_KEY_ESC) {
+                ui->select_open_id = 0u;
+                open = 0;
+                break;
+            }
+            if (code == PEOS_KEY_ENTER) {
+                ui->select_open_id = 0u;
+                open = 0;
+                break;
+            }
+            if (code == PEOS_KEY_UP_NORM) {
+                if (*selected > 0u) {
+                    (*selected)--;
+                    changed = 1u;
+                }
+            } else if (code == PEOS_KEY_DOWN_NORM) {
+                if ((*selected + 1u) < option_count) {
+                    (*selected)++;
+                    changed = 1u;
+                }
+            } else {
+                continue;
+            }
+
+            if (*selected < ui->select_scroll_idx) {
+                ui->select_scroll_idx = *selected;
+            } else if (*selected >= ui->select_scroll_idx + visible_items) {
+                ui->select_scroll_idx = *selected - visible_items + 1u;
+            }
+            if (ui->select_scroll_idx > max_start) ui->select_scroll_idx = max_start;
+        }
+
+        uint32_t start_idx = ui->select_scroll_idx;
+        if (start_idx > max_start) start_idx = max_start;
+        ui->select_scroll_idx = start_idx;
+
+        ui->select_overlay_pending = 1u;
+        ui->select_overlay_id = id;
+        ui->select_overlay_x = x;
+        ui->select_overlay_y = popup_y;
+        ui->select_overlay_w = w;
+        ui->select_overlay_row_h = row_h;
+        ui->select_overlay_start_idx = start_idx;
+        ui->select_overlay_visible_items = visible_items;
+        ui->select_overlay_option_count = option_count;
+        ui->select_overlay_selected = *selected;
+        ui->select_overlay_options_pipe = options_pipe;
+
+        if (enabled && ui->mouse_released && !active) {
+            if (popup_list_hovered) {
+                uint32_t rel = (ui->cursor_y >= popup_y + 1u) ? (ui->cursor_y - (popup_y + 1u)) : 0u;
+                uint32_t item = rel / row_h;
+                if (item < visible_items) {
+                    uint32_t picked = start_idx + item;
+                    if (picked < option_count && *selected != picked) {
+                        *selected = picked;
+                        changed = 1u;
+                    }
+                }
+                ui->select_open_id = 0u;
+            } else if (!hovered) {
+                ui->select_open_id = 0u;
+            }
+        }
+    }
+
     return changed;
+}
+
+void sl_ui_draw_overlays(sl_ui_ctx_t *ui) {
+    if (!ui || !ui->ctx || !ui->select_overlay_pending) return;
+
+    uint32_t x = ui->select_overlay_x;
+    uint32_t y = ui->select_overlay_y;
+    uint32_t w = ui->select_overlay_w;
+    uint32_t row_h = ui->select_overlay_row_h;
+    uint32_t start_idx = ui->select_overlay_start_idx;
+    uint32_t visible_items = ui->select_overlay_visible_items;
+    uint32_t option_count = ui->select_overlay_option_count;
+    uint32_t selected = ui->select_overlay_selected;
+    const char *options_pipe = ui->select_overlay_options_pipe;
+    uint32_t popup_h = visible_items * row_h + 2u;
+    uint8_t has_scrollbar = (option_count > visible_items && w > 20u) ? 1u : 0u;
+    uint32_t scrollbar_w = has_scrollbar ? 8u : 0u;
+    uint32_t list_w = (w > scrollbar_w) ? (w - scrollbar_w) : w;
+    uint32_t max_start = (option_count > visible_items) ? (option_count - visible_items) : 0u;
+    if (start_idx > max_start) start_idx = max_start;
+
+    if (ui->ctx) {
+        sl_fill_rect_a(ui->ctx, x + 1u, y + popup_h, w, 2u, 0u, 0u, 0u, 72u);
+        sl_fill_rect_a(ui->ctx, x + w, y + 1u, 2u, popup_h + 1u, 0u, 0u, 0u, 72u);
+    }
+
+    sl_ui_fill_tok(ui, x, y, w, popup_h, SL_UI_COLOR_BG_PANEL);
+    sl_ui_fill_tok(ui, x, y, w, 1u, SL_UI_COLOR_BORDER);
+    sl_ui_fill_tok(ui, x, y + popup_h - 1u, w, 1u, SL_UI_COLOR_BG_CANVAS);
+    sl_ui_fill_tok(ui, x, y, 1u, popup_h, SL_UI_COLOR_BORDER);
+    sl_ui_fill_tok(ui, x + w - 1u, y, 1u, popup_h, SL_UI_COLOR_BG_CANVAS);
+
+    for (uint32_t i = 0u; i < visible_items; i++) {
+        uint32_t opt_idx = start_idx + i;
+        uint32_t iy = y + 1u + i * row_h;
+        if (opt_idx >= option_count) break;
+
+        int item_hover = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x + 1u, iy, list_w - 2u, row_h);
+        if (item_hover) sl_ui_fill_tok(ui, x + 1u, iy, list_w - 2u, row_h, SL_UI_COLOR_BG_CONTROL_HOVER);
+        else if (opt_idx == selected) sl_ui_fill_tok(ui, x + 1u, iy, list_w - 2u, row_h, SL_UI_COLOR_BG_CONTROL_ACTIVE);
+
+        char opt_text[128];
+        sl_ui_select_option_text(options_pipe, opt_idx, opt_text, (uint32_t)sizeof(opt_text));
+        sl_ui_text_tok(ui, x + 6u, sl_ui_text_center_y(ui, iy, row_h), opt_text, SL_UI_COLOR_TEXT_PRIMARY);
+    }
+
+    if (has_scrollbar) {
+        uint32_t sx = x + list_w;
+        uint32_t sy = y + 1u;
+        uint32_t sw = w - list_w;
+        uint32_t sh = (popup_h > 2u) ? (popup_h - 2u) : 0u;
+        if (sw > 0u && sh > 0u) {
+            sl_ui_fill_tok(ui, sx, sy, sw, sh, SL_UI_COLOR_BG_CANVAS);
+
+            uint32_t track_x = sx + 2u;
+            uint32_t track_y = sy + 1u;
+            uint32_t track_w = (sw > 4u) ? (sw - 4u) : sw;
+            uint32_t track_h = (sh > 2u) ? (sh - 2u) : sh;
+            if (track_w > 0u && track_h > 0u) {
+                sl_ui_fill_tok(ui, track_x, track_y, track_w, track_h, SL_UI_COLOR_BG_CONTROL);
+                uint32_t thumb_h = (uint32_t)(((uint64_t)visible_items * (uint64_t)track_h) / (uint64_t)option_count);
+                if (thumb_h < 8u) thumb_h = 8u;
+                if (thumb_h > track_h) thumb_h = track_h;
+                uint32_t travel = track_h - thumb_h;
+                uint32_t thumb_y = (max_start > 0u)
+                    ? (track_y + (uint32_t)(((uint64_t)start_idx * (uint64_t)travel) / (uint64_t)max_start))
+                    : track_y;
+                sl_ui_fill_tok(ui, track_x, thumb_y, track_w, thumb_h, SL_UI_COLOR_ACCENT);
+            }
+        }
+    }
 }
 
 uint8_t sl_ui_text_input(sl_ui_ctx_t *ui, uint32_t id,

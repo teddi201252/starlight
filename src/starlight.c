@@ -47,7 +47,7 @@ int main(void) {
         peos_exit(1);
     }
     sl_audio_init();
-    peos_puts("starlight: minimal skeleton running (ESC to exit)\n");
+    peos_puts("starlight: minimal skeleton running\n");
     if (ctx.fb_direct) {
         peos_puts("starlight: renderer mode = fbmap zero-copy\n");
     } else {
