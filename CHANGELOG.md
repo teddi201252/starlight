@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.7.4] - 2026-03-05
+- Configurable key repeat and click-to-caret behavior
+
 ## [0.7.3] - 2026-03-05
 - Context menu integration and launcher context-menu fixes
 

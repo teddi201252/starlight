@@ -39,6 +39,8 @@ typedef struct {
     uint8_t animations_enabled;
     uint32_t animation_speed_pct;
     uint32_t double_click_ms;
+    uint32_t keyboard_repeat_delay_ms;
+    uint32_t keyboard_repeat_rate_hz;
 
     // Background
     sl_image_t bg_image;

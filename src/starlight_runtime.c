@@ -27,6 +27,12 @@
 #define SL_DOUBLE_CLICK_MS_DEFAULT 300u
 #define SL_DOUBLE_CLICK_MS_MIN 80u
 #define SL_DOUBLE_CLICK_MS_MAX 1000u
+#define SL_KEY_REPEAT_DELAY_MS_DEFAULT 250u
+#define SL_KEY_REPEAT_DELAY_MS_MIN 100u
+#define SL_KEY_REPEAT_DELAY_MS_MAX 1000u
+#define SL_KEY_REPEAT_RATE_HZ_DEFAULT 30u
+#define SL_KEY_REPEAT_RATE_HZ_MIN 5u
+#define SL_KEY_REPEAT_RATE_HZ_MAX 60u
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
 #define SL_DIRTY_MAX_RECTS 256u
@@ -462,6 +468,8 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "animations_enabled=1\n");
     (void)fprintf(f, "animation_speed_pct=100\n");
     (void)fprintf(f, "double_click_ms=300\n");
+    (void)fprintf(f, "keyboard_repeat_delay_ms=250\n");
+    (void)fprintf(f, "keyboard_repeat_rate_hz=30\n");
     (void)fclose(f);
 }
 
@@ -564,6 +572,8 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->animations_enabled = SL_ANIMATIONS_ENABLED_DEFAULT;
     ctx->animation_speed_pct = SL_ANIMATION_SPEED_DEFAULT;
     ctx->double_click_ms = SL_DOUBLE_CLICK_MS_DEFAULT;
+    ctx->keyboard_repeat_delay_ms = SL_KEY_REPEAT_DELAY_MS_DEFAULT;
+    ctx->keyboard_repeat_rate_hz = SL_KEY_REPEAT_RATE_HZ_DEFAULT;
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
     if (!cfg) {
@@ -621,6 +631,20 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                         if (n < SL_DOUBLE_CLICK_MS_MIN) n = SL_DOUBLE_CLICK_MS_MIN;
                         if (n > SL_DOUBLE_CLICK_MS_MAX) n = SL_DOUBLE_CLICK_MS_MAX;
                         ctx->double_click_ms = n;
+                    }
+                } else if (strcmp(key, "keyboard_repeat_delay_ms") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n)) {
+                        if (n < SL_KEY_REPEAT_DELAY_MS_MIN) n = SL_KEY_REPEAT_DELAY_MS_MIN;
+                        if (n > SL_KEY_REPEAT_DELAY_MS_MAX) n = SL_KEY_REPEAT_DELAY_MS_MAX;
+                        ctx->keyboard_repeat_delay_ms = n;
+                    }
+                } else if (strcmp(key, "keyboard_repeat_rate_hz") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n)) {
+                        if (n < SL_KEY_REPEAT_RATE_HZ_MIN) n = SL_KEY_REPEAT_RATE_HZ_MIN;
+                        if (n > SL_KEY_REPEAT_RATE_HZ_MAX) n = SL_KEY_REPEAT_RATE_HZ_MAX;
+                        ctx->keyboard_repeat_rate_hz = n;
                     }
                 }
             }
@@ -688,6 +712,19 @@ static void sl_apply_animation_config(const sl_ctx_t *ctx) {
     if (duration_scale_pct < 10u) duration_scale_pct = 10u;
     if (duration_scale_pct > 2000u) duration_scale_pct = 2000u;
     sl_tween_set_duration_scale_pct(duration_scale_pct);
+}
+
+static void sl_apply_keyboard_config(const sl_ctx_t *ctx) {
+    uint32_t delay_ms = SL_KEY_REPEAT_DELAY_MS_DEFAULT;
+    uint32_t rate_hz = SL_KEY_REPEAT_RATE_HZ_DEFAULT;
+    if (!ctx) return;
+    delay_ms = ctx->keyboard_repeat_delay_ms;
+    rate_hz = ctx->keyboard_repeat_rate_hz;
+    if (delay_ms < SL_KEY_REPEAT_DELAY_MS_MIN) delay_ms = SL_KEY_REPEAT_DELAY_MS_MIN;
+    if (delay_ms > SL_KEY_REPEAT_DELAY_MS_MAX) delay_ms = SL_KEY_REPEAT_DELAY_MS_MAX;
+    if (rate_hz < SL_KEY_REPEAT_RATE_HZ_MIN) rate_hz = SL_KEY_REPEAT_RATE_HZ_MIN;
+    if (rate_hz > SL_KEY_REPEAT_RATE_HZ_MAX) rate_hz = SL_KEY_REPEAT_RATE_HZ_MAX;
+    sl_input_set_key_repeat_config(delay_ms, rate_hz);
 }
 
 char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap) {
@@ -772,6 +809,7 @@ int sl_init(sl_ctx_t *ctx) {
     sl_load_display_config(ctx);
     sl_load_starlight_config(ctx);
     sl_apply_animation_config(ctx);
+    sl_apply_keyboard_config(ctx);
     sl_load_theme_config();
     sl_font_reset_default();
     if (ctx->font_manifest_path[0]) {
@@ -816,6 +854,7 @@ void sl_reload_display(sl_ctx_t *ctx) {
 
     sl_load_starlight_config(ctx);
     sl_apply_animation_config(ctx);
+    sl_apply_keyboard_config(ctx);
     sl_load_theme_config();
     sl_font_reset_default();
     if (ctx->font_manifest_path[0]) {
