@@ -10,6 +10,8 @@ typedef struct {
     uint8_t mouse_moved;
     uint8_t mouse_left_pressed;
     uint8_t mouse_left_released;
+    uint8_t mouse_right_pressed;
+    uint8_t mouse_right_released;
     uint8_t mouse_buttons;
     uint8_t key_event_count;
     int32_t mouse_dx;
