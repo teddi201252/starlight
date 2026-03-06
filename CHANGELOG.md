@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.8.1] - 2026-03-06
+- Add mipmapped bilinear image downscaling for higher-quality UI icons
+
 ## [0.8.0] - 2026-03-06
 - Use dynamic host-side UI text buffers for long SLUI payloads
 - Improve text input event delivery for updated app behavior

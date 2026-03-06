@@ -1407,11 +1407,7 @@ void sl_launcher_render(sl_ctx_t *ctx) {
         uint32_t icon_y = iy + ((ih > icon_size) ? ((ih - icon_size) / 2u) : 0u);
 
         if (icon_img && icon_img->data) {
-            sl_blit_rgba_stretch(ctx, icon_x, icon_y, icon_size, icon_size,
-                                 icon_img->data,
-                                 icon_img->width,
-                                 icon_img->height,
-                                 icon_img->stride);
+            sl_blit_image_stretch(ctx, icon_x, icon_y, icon_size, icon_size, icon_img);
             drew_icon = 1u;
         }
 

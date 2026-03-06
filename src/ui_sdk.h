@@ -200,6 +200,8 @@ uint8_t sl_ui_scroll_v_state(sl_ui_ctx_t *ui, uint32_t id,
 
 void sl_ui_image_rgba(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                       const uint8_t *rgba, uint32_t src_w, uint32_t src_h, uint32_t src_stride);
+void sl_ui_image(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                 const sl_image_t *image);
 void sl_ui_rect(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                 sl_ui_color_token_t token);
 void sl_ui_rect_a(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,

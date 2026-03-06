@@ -7,6 +7,148 @@ static inline uint8_t sl_blend_chan(uint8_t src, uint8_t dst, uint8_t a) {
     return (uint8_t)(out / 255u);
 }
 
+static inline uint8_t sl_u8_from_float(float v) {
+    if (v <= 0.0f) return 0u;
+    if (v >= 255.0f) return 255u;
+    return (uint8_t)(v + 0.5f);
+}
+
+static void sl_sample_rgba_bilinear(const uint8_t *src_rgba, uint32_t src_w, uint32_t src_h,
+                                    uint32_t src_stride, float src_fx, float src_fy,
+                                    uint8_t *out_r, uint8_t *out_g, uint8_t *out_b, uint8_t *out_a) {
+    uint32_t x0 = 0u;
+    uint32_t y0 = 0u;
+    uint32_t x1 = 0u;
+    uint32_t y1 = 0u;
+    float tx = 0.0f;
+    float ty = 0.0f;
+    float w00 = 0.0f;
+    float w10 = 0.0f;
+    float w01 = 0.0f;
+    float w11 = 0.0f;
+    float acc_r = 0.0f;
+    float acc_g = 0.0f;
+    float acc_b = 0.0f;
+    float acc_a = 0.0f;
+    const uint8_t *p00 = NULL;
+    const uint8_t *p10 = NULL;
+    const uint8_t *p01 = NULL;
+    const uint8_t *p11 = NULL;
+
+    if (!src_rgba || !out_r || !out_g || !out_b || !out_a || src_w == 0u || src_h == 0u) return;
+
+    if (src_fx <= 0.0f) {
+        x0 = 0u;
+        tx = 0.0f;
+    } else if (src_fx >= (float)(src_w - 1u)) {
+        x0 = src_w - 1u;
+        tx = 0.0f;
+    } else {
+        x0 = (uint32_t)src_fx;
+        tx = src_fx - (float)x0;
+    }
+
+    if (src_fy <= 0.0f) {
+        y0 = 0u;
+        ty = 0.0f;
+    } else if (src_fy >= (float)(src_h - 1u)) {
+        y0 = src_h - 1u;
+        ty = 0.0f;
+    } else {
+        y0 = (uint32_t)src_fy;
+        ty = src_fy - (float)y0;
+    }
+
+    x1 = (x0 + 1u < src_w) ? (x0 + 1u) : x0;
+    y1 = (y0 + 1u < src_h) ? (y0 + 1u) : y0;
+
+    w00 = (1.0f - tx) * (1.0f - ty);
+    w10 = tx * (1.0f - ty);
+    w01 = (1.0f - tx) * ty;
+    w11 = tx * ty;
+
+    p00 = src_rgba + ((size_t)y0 * (size_t)src_stride) + ((size_t)x0 * 4u);
+    p10 = src_rgba + ((size_t)y0 * (size_t)src_stride) + ((size_t)x1 * 4u);
+    p01 = src_rgba + ((size_t)y1 * (size_t)src_stride) + ((size_t)x0 * 4u);
+    p11 = src_rgba + ((size_t)y1 * (size_t)src_stride) + ((size_t)x1 * 4u);
+
+    {
+        float a = ((float)p00[3] / 255.0f) * w00;
+        acc_r += (float)p00[0] * a;
+        acc_g += (float)p00[1] * a;
+        acc_b += (float)p00[2] * a;
+        acc_a += a;
+    }
+    {
+        float a = ((float)p10[3] / 255.0f) * w10;
+        acc_r += (float)p10[0] * a;
+        acc_g += (float)p10[1] * a;
+        acc_b += (float)p10[2] * a;
+        acc_a += a;
+    }
+    {
+        float a = ((float)p01[3] / 255.0f) * w01;
+        acc_r += (float)p01[0] * a;
+        acc_g += (float)p01[1] * a;
+        acc_b += (float)p01[2] * a;
+        acc_a += a;
+    }
+    {
+        float a = ((float)p11[3] / 255.0f) * w11;
+        acc_r += (float)p11[0] * a;
+        acc_g += (float)p11[1] * a;
+        acc_b += (float)p11[2] * a;
+        acc_a += a;
+    }
+
+    if (acc_a <= 0.0f) {
+        *out_r = 0u;
+        *out_g = 0u;
+        *out_b = 0u;
+        *out_a = 0u;
+        return;
+    }
+
+    *out_a = sl_u8_from_float(acc_a * 255.0f);
+    *out_r = sl_u8_from_float(acc_r / acc_a);
+    *out_g = sl_u8_from_float(acc_g / acc_a);
+    *out_b = sl_u8_from_float(acc_b / acc_a);
+}
+
+static uint32_t sl_image_level_width(const sl_image_t *image, uint32_t level) {
+    if (!image) return 0u;
+    return (level == 0u) ? image->width : image->mip_width[level - 1u];
+}
+
+static uint32_t sl_image_level_height(const sl_image_t *image, uint32_t level) {
+    if (!image) return 0u;
+    return (level == 0u) ? image->height : image->mip_height[level - 1u];
+}
+
+static uint32_t sl_image_level_stride(const sl_image_t *image, uint32_t level) {
+    if (!image) return 0u;
+    return (level == 0u) ? image->stride : image->mip_stride[level - 1u];
+}
+
+static const uint8_t *sl_image_level_data(const sl_image_t *image, uint32_t level) {
+    if (!image) return NULL;
+    return (level == 0u) ? image->data : image->mip_data[level - 1u];
+}
+
+static uint32_t sl_image_pick_mip_level(const sl_image_t *image, uint32_t dst_w, uint32_t dst_h) {
+    uint32_t level = 0u;
+    if (!image || dst_w == 0u || dst_h == 0u) return 0u;
+    while (level < image->mip_count) {
+        uint32_t next_level = level + 1u;
+        uint32_t next_w = sl_image_level_width(image, next_level);
+        uint32_t next_h = sl_image_level_height(image, next_level);
+        if (!next_w || !next_h) break;
+        if (next_w < dst_w || next_h < dst_h) break;
+        level = next_level;
+    }
+    return level;
+}
+
 static int sl_point_in_clip(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx || !ctx->clip_enabled) return 1;
     if (ctx->clip_w == 0u || ctx->clip_h == 0u) return 0;
@@ -231,24 +373,40 @@ void sl_blit_rgba_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_
     float src_y_step = (float)src_h / (float)dst_h;
     uint32_t off_x = draw_x - dst_x;
     uint32_t off_y = draw_y - dst_y;
+    int use_bilinear = (dst_w < src_w || dst_h < src_h) ? 1 : 0;
 
     for (uint32_t y = 0; y < draw_h; y++) {
-        int src_y = (int)((off_y + y) * src_y_step);
-        if (src_y < 0) src_y = 0;
-        if ((uint32_t)src_y >= src_h) src_y = (int)(src_h - 1u);
-        const uint8_t *srow = src_rgba + ((size_t)src_y * (size_t)src_stride);
         uint8_t *drow = ctx->frame + ((size_t)(draw_y + y) * ctx->row_stride) +
                         ((size_t)draw_x * (size_t)ctx->bytespp);
 
         for (uint32_t x = 0; x < draw_w; x++) {
-            int src_x = (int)((off_x + x) * src_x_step);
-            if (src_x < 0) src_x = 0;
-            if ((uint32_t)src_x >= src_w) src_x = (int)(src_w - 1u);
-            const uint8_t *s = srow + ((size_t)src_x * 4u);
-            uint8_t sr = s[0];
-            uint8_t sg = s[1];
-            uint8_t sb = s[2];
-            uint8_t sa = s[3];
+            uint8_t sr = 0u;
+            uint8_t sg = 0u;
+            uint8_t sb = 0u;
+            uint8_t sa = 0u;
+
+            if (use_bilinear) {
+                float src_fx = (((float)(off_x + x) + 0.5f) * src_x_step) - 0.5f;
+                float src_fy = (((float)(off_y + y) + 0.5f) * src_y_step) - 0.5f;
+                sl_sample_rgba_bilinear(src_rgba, src_w, src_h, src_stride,
+                                        src_fx, src_fy, &sr, &sg, &sb, &sa);
+            } else {
+                int src_y = (int)((off_y + y) * src_y_step);
+                int src_x = (int)((off_x + x) * src_x_step);
+                const uint8_t *srow = NULL;
+                const uint8_t *s = NULL;
+
+                if (src_y < 0) src_y = 0;
+                if ((uint32_t)src_y >= src_h) src_y = (int)(src_h - 1u);
+                if (src_x < 0) src_x = 0;
+                if ((uint32_t)src_x >= src_w) src_x = (int)(src_w - 1u);
+                srow = src_rgba + ((size_t)src_y * (size_t)src_stride);
+                s = srow + ((size_t)src_x * 4u);
+                sr = s[0];
+                sg = s[1];
+                sb = s[2];
+                sa = s[3];
+            }
 
             if (sa == 255u) {
                 drow[0] = sb;
@@ -264,6 +422,25 @@ void sl_blit_rgba_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_
             drow += ctx->bytespp;
         }
     }
+}
+
+void sl_blit_image_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_t dst_w, uint32_t dst_h,
+                           const sl_image_t *image) {
+    uint32_t level = 0u;
+    const uint8_t *src = NULL;
+    uint32_t src_w = 0u;
+    uint32_t src_h = 0u;
+    uint32_t src_stride = 0u;
+
+    if (!image || !image->data) return;
+    level = sl_image_pick_mip_level(image, dst_w, dst_h);
+    src = sl_image_level_data(image, level);
+    src_w = sl_image_level_width(image, level);
+    src_h = sl_image_level_height(image, level);
+    src_stride = sl_image_level_stride(image, level);
+    if (!src || src_w == 0u || src_h == 0u || src_stride < src_w * 4u) return;
+
+    sl_blit_rgba_stretch(ctx, dst_x, dst_y, dst_w, dst_h, src, src_w, src_h, src_stride);
 }
 
 void sl_draw_char(sl_ctx_t *ctx, uint32_t x, uint32_t y, char c, uint8_t r, uint8_t g, uint8_t b) {
