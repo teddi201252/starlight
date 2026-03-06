@@ -2,6 +2,10 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.8.0] - 2026-03-06
+- Use dynamic host-side UI text buffers for long SLUI payloads
+- Improve text input event delivery for updated app behavior
+
 ## [0.7.4] - 2026-03-05
 - Configurable key repeat and click-to-caret behavior
 
