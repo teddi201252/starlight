@@ -10,7 +10,7 @@
 
 #define ORBIT_MAX_LINES 256u
 #define ORBIT_LINE_CHARS 160u
-#define ORBIT_PENDING_LINE_CHARS 4096u
+#define ORBIT_PENDING_LINE_INITIAL_CHARS 256u
 #define ORBIT_TITLE_CHARS 64u
 #define ORBIT_EXEC_CHARS 160u
 #define ORBIT_ARGS_CHARS 160u
@@ -22,7 +22,6 @@
 #define ORBIT_POLL_INTERVAL_IDLE_NS  16000000ull
 #define ORBIT_UI_CMD_SOFT_CHUNK 64u
 #define ORBIT_UI_CMD_HARD_MAX 1024u
-#define ORBIT_UI_TEXT_CHARS 4096u
 #define ORBIT_SLUI_PROTO_VERSION 1u
 
 #define ORBIT_SLUI_CAP_LABEL        (1u << 0)
@@ -124,7 +123,8 @@ typedef struct {
     uint8_t b;
     uint8_t a;
     uint8_t grad[4][4];
-    char text[ORBIT_UI_TEXT_CHARS];
+    char *text;
+    size_t text_cap;
     sl_image_t image;
     uint8_t image_loaded;
     uint8_t image_failed;
@@ -193,8 +193,9 @@ typedef struct {
     char lines[ORBIT_MAX_LINES][ORBIT_LINE_CHARS];
     size_t line_head;
     size_t line_count;
-    char pending_line[ORBIT_PENDING_LINE_CHARS];
+    char *pending_line;
     size_t pending_len;
+    size_t pending_cap;
     uint8_t shift_down;
     uint8_t ctrl_down;
     uint8_t alt_down;
@@ -226,6 +227,48 @@ static uint8_t g_reload_theme_requested = 0u;
 static uint8_t g_open_app_requested = 0u;
 static char g_open_app_bundle_path[256];
 
+static int orbit_pending_line_reserve(orbit_shell_t *shell, size_t need_cap) {
+    if (!shell) return 0;
+    if (need_cap == 0u) need_cap = 1u;
+    if (shell->pending_cap >= need_cap && shell->pending_line) return 1;
+
+    size_t cap = shell->pending_cap;
+    if (cap < ORBIT_PENDING_LINE_INITIAL_CHARS) cap = ORBIT_PENDING_LINE_INITIAL_CHARS;
+    while (cap < need_cap) {
+        if (cap > (SIZE_MAX / 2u)) {
+            cap = need_cap;
+            break;
+        }
+        cap *= 2u;
+    }
+
+    char *buf = (char *)realloc(shell->pending_line, cap);
+    if (!buf) return 0;
+    shell->pending_line = buf;
+    shell->pending_cap = cap;
+    if (shell->pending_len >= shell->pending_cap) shell->pending_len = shell->pending_cap - 1u;
+    shell->pending_line[shell->pending_len] = '\0';
+    return 1;
+}
+
+static void orbit_pending_line_reset(orbit_shell_t *shell) {
+    if (!shell) return;
+    shell->pending_len = 0u;
+    if (shell->pending_line && shell->pending_cap > 0u) {
+        shell->pending_line[0] = '\0';
+    }
+}
+
+static void orbit_pending_line_free(orbit_shell_t *shell) {
+    if (!shell) return;
+    if (shell->pending_line) {
+        free(shell->pending_line);
+        shell->pending_line = NULL;
+    }
+    shell->pending_cap = 0u;
+    shell->pending_len = 0u;
+}
+
 static void orbit_copy_str(char *dst, size_t cap, const char *src) {
     if (!dst || cap == 0u) return;
     if (!src) src = "";
@@ -235,6 +278,74 @@ static void orbit_copy_str(char *dst, size_t cap, const char *src) {
         i++;
     }
     dst[i] = '\0';
+}
+
+static int orbit_cmd_text_reserve(orbit_ui_cmd_t *cmd, size_t need_cap) {
+    if (!cmd) return 0;
+    if (need_cap == 0u) need_cap = 1u;
+    if (cmd->text && cmd->text_cap >= need_cap) return 1;
+    size_t cap = cmd->text_cap;
+    if (cap < 32u) cap = 32u;
+    while (cap < need_cap) {
+        if (cap > (SIZE_MAX / 2u)) {
+            cap = need_cap;
+            break;
+        }
+        cap *= 2u;
+    }
+    char *grown = (char *)realloc(cmd->text, cap);
+    if (!grown) return 0;
+    cmd->text = grown;
+    cmd->text_cap = cap;
+    return 1;
+}
+
+static void orbit_cmd_text_free(orbit_ui_cmd_t *cmd) {
+    if (!cmd) return;
+    if (cmd->text) {
+        free(cmd->text);
+        cmd->text = NULL;
+    }
+    cmd->text_cap = 0u;
+}
+
+static int orbit_cmd_set_text_raw(orbit_ui_cmd_t *cmd, const char *src) {
+    if (!cmd) return 0;
+    if (!src) src = "";
+    size_t n = peos_strlen(src);
+    if (!orbit_cmd_text_reserve(cmd, n + 1u)) return 0;
+    if (n > 0u) peos_memcpy(cmd->text, src, n);
+    cmd->text[n] = '\0';
+    return 1;
+}
+
+static int orbit_cmd_set_text_unescaped(orbit_ui_cmd_t *cmd, const char *src) {
+    if (!cmd) return 0;
+    if (!src) src = "";
+    size_t si = 0u;
+    size_t out_n = 0u;
+    while (src[si]) {
+        char c = src[si++];
+        if (c == '\\' && src[si]) si++;
+        out_n++;
+    }
+    if (!orbit_cmd_text_reserve(cmd, out_n + 1u)) return 0;
+    si = 0u;
+    size_t di = 0u;
+    while (src[si]) {
+        char c = src[si++];
+        if (c == '\\' && src[si]) {
+            char n = src[si++];
+            if (n == 'n') c = '\n';
+            else if (n == 'r') c = '\r';
+            else if (n == 't') c = '\t';
+            else if (n == '\\') c = '\\';
+            else c = n;
+        }
+        cmd->text[di++] = c;
+    }
+    cmd->text[di] = '\0';
+    return 1;
 }
 
 static uint8_t orbit_u8_clamp(uint32_t v) {
@@ -387,6 +498,7 @@ static void orbit_send_host_hello(orbit_shell_t *shell) {
 
 static void orbit_ui_cmd_release(orbit_ui_cmd_t *cmd) {
     if (!cmd) return;
+    orbit_cmd_text_free(cmd);
     if (cmd->image.data) {
         sl_image_free(&cmd->image);
     }
@@ -754,67 +866,52 @@ static void orbit_send_ui_event_panel(orbit_shell_t *shell, uint32_t id, uint32_
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
 }
 
+static void orbit_write_fd_u32(int64_t fd, uint32_t v) {
+    char num[16];
+    size_t n = 0u;
+    if (v == 0u) {
+        num[n++] = '0';
+    } else {
+        char rev[16];
+        size_t r = 0u;
+        while (v > 0u && r < sizeof(rev)) {
+            rev[r++] = (char)('0' + (v % 10u));
+            v /= 10u;
+        }
+        while (r > 0u && n < sizeof(num)) num[n++] = rev[--r];
+    }
+    (void)peos_fwrite((uint64_t)fd, num, n);
+}
+
 static void orbit_send_ui_event_text_input(orbit_shell_t *shell, uint32_t id, const char *text) {
     if (!shell || shell->child_stdin_fd < 0) return;
     if (!text) text = "";
-
-    char msg[320];
-    size_t n = 0u;
-    const char *prefix = "@SLUI EVENT TEXT_INPUT ";
-    while (prefix[n] && n + 1u < sizeof(msg)) msg[n] = prefix[n], n++;
-
-    char num[16];
-    size_t m = 0u;
-    uint32_t v = id;
-    if (v == 0u) num[m++] = '0';
-    else {
-        char rev[16]; size_t r = 0u;
-        while (v > 0u && r < sizeof(rev)) { rev[r++] = (char)('0' + (v % 10u)); v /= 10u; }
-        while (r > 0u && m < sizeof(num)) num[m++] = rev[--r];
-    }
-    for (size_t i = 0u; i < m && n + 1u < sizeof(msg); i++) msg[n++] = num[i];
-    if (n + 1u < sizeof(msg)) msg[n++] = ' ';
-
-    for (size_t i = 0u; text[i] && n + 1u < sizeof(msg); i++) {
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "@SLUI EVENT TEXT_INPUT ", peos_strlen("@SLUI EVENT TEXT_INPUT "));
+    orbit_write_fd_u32(shell->child_stdin_fd, id);
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, " ", 1u);
+    for (size_t i = 0u; text[i]; i++) {
         char c = text[i];
         if (c == '\n' || c == '\r') c = ' ';
-        msg[n++] = c;
+        (void)peos_fwrite((uint64_t)shell->child_stdin_fd, &c, 1u);
     }
-    if (n + 1u < sizeof(msg)) msg[n++] = '\n';
-    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\n", 1u);
 }
 
 static void orbit_send_ui_event_text_area(orbit_shell_t *shell, uint32_t id, const char *text) {
     if (!shell || shell->child_stdin_fd < 0) return;
     if (!text) text = "";
-
-    char msg[4608];
-    size_t n = 0u;
-    const char *prefix = "@SLUI EVENT TEXT_AREA ";
-    while (prefix[n] && n + 1u < sizeof(msg)) msg[n] = prefix[n], n++;
-
-    char num[16];
-    size_t m = 0u;
-    uint32_t v = id;
-    if (v == 0u) num[m++] = '0';
-    else {
-        char rev[16]; size_t r = 0u;
-        while (v > 0u && r < sizeof(rev)) { rev[r++] = (char)('0' + (v % 10u)); v /= 10u; }
-        while (r > 0u && m < sizeof(num)) num[m++] = rev[--r];
-    }
-    for (size_t i = 0u; i < m && n + 1u < sizeof(msg); i++) msg[n++] = num[i];
-    if (n + 1u < sizeof(msg)) msg[n++] = ' ';
-
-    for (size_t i = 0u; text[i] && n + 2u < sizeof(msg); i++) {
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "@SLUI EVENT TEXT_AREA ", peos_strlen("@SLUI EVENT TEXT_AREA "));
+    orbit_write_fd_u32(shell->child_stdin_fd, id);
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, " ", 1u);
+    for (size_t i = 0u; text[i]; i++) {
         char c = text[i];
-        if (c == '\\') { msg[n++] = '\\'; msg[n++] = '\\'; }
-        else if (c == '\n') { msg[n++] = '\\'; msg[n++] = 'n'; }
-        else if (c == '\r') { msg[n++] = '\\'; msg[n++] = 'r'; }
-        else if (c == '\t') { msg[n++] = '\\'; msg[n++] = 't'; }
-        else msg[n++] = c;
+        if (c == '\\') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\\\", 2u);
+        else if (c == '\n') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\n", 2u);
+        else if (c == '\r') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\r", 2u);
+        else if (c == '\t') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\t", 2u);
+        else (void)peos_fwrite((uint64_t)shell->child_stdin_fd, &c, 1u);
     }
-    if (n + 1u < sizeof(msg)) msg[n++] = '\n';
-    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\n", 1u);
 }
 
 static uint32_t orbit_mod_mask(const orbit_shell_t *shell) {
@@ -944,11 +1041,12 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
     if (orbit_token_is(cmd_tok, cmd_len, "COMMIT")) {
         orbit_ui_cmd_release_array(shell->ui.cmds, shell->ui.cmd_count);
         shell->ui.enabled = shell->ui.staged_enabled;
-        if (!orbit_ui_cmd_reserve(&shell->ui.cmds, &shell->ui.cmd_cap, shell->ui.staged_count)) {
-            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "command_buffer_alloc_failed");
-            shell->ui.cmd_count = 0u;
-            shell->ui.staged_count = 0u;
-            shell->ui.cmd_limit_reached = 0u;
+    if (!orbit_ui_cmd_reserve(&shell->ui.cmds, &shell->ui.cmd_cap, shell->ui.staged_count)) {
+        orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "command_buffer_alloc_failed");
+        orbit_ui_cmd_release_array(shell->ui.staged_cmds, shell->ui.staged_count);
+        shell->ui.cmd_count = 0u;
+        shell->ui.staged_count = 0u;
+        shell->ui.cmd_limit_reached = 0u;
             shell->ui.committed = 1u;
             return 1;
         }
@@ -1025,7 +1123,10 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         cmd->g = (uint8_t)(gv & 0xFFu);
         cmd->b = (uint8_t)(bv & 0xFFu);
         p = orbit_skip_spaces(p);
-        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "label_text_alloc_failed");
+            return 1;
+        }
         return 1;
     }
 
@@ -1052,7 +1153,10 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             return 1;
         }
         p = orbit_skip_spaces(p);
-        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "labelt_text_alloc_failed");
+            return 1;
+        }
         return 1;
     }
 
@@ -1075,7 +1179,10 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             cmd->enabled = enabled ? 1u : 0u;
         }
         p = orbit_skip_spaces(p);
-        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "button_text_alloc_failed");
+            return 1;
+        }
         return 1;
     }
 
@@ -1121,7 +1228,10 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             cmd->enabled = enabled ? 1u : 0u;
         }
         p = orbit_skip_spaces(p);
-        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "toggle_text_alloc_failed");
+            return 1;
+        }
         return 1;
     }
 
@@ -1150,8 +1260,11 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             cmd->enabled = enabled ? 1u : 0u;
         }
         p = orbit_skip_spaces(p);
-        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
-        if (cmd->text[0] == '\0') {
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "select_text_alloc_failed");
+            return 1;
+        }
+        if (!cmd->text || cmd->text[0] == '\0') {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_SELECT, "select_missing_options");
         }
         return 1;
@@ -1180,8 +1293,11 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             cmd->enabled = enabled ? 1u : 0u;
         }
         p = orbit_skip_spaces(p);
-        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
-        if (cmd->text[0] == '\0') {
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "context_menu_text_alloc_failed");
+            return 1;
+        }
+        if (!cmd->text || cmd->text[0] == '\0') {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CONTEXT, "context_menu_missing_options");
         }
         return 1;
@@ -1206,10 +1322,17 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             cmd->enabled = enabled ? 1u : 0u;
         }
         if (cmd->max_v < 1u) cmd->max_v = 1u;
-        if (cmd->max_v >= ORBIT_UI_TEXT_CHARS) cmd->max_v = ORBIT_UI_TEXT_CHARS - 1u;
         p = orbit_skip_spaces(p);
-        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
-        cmd->text[cmd->max_v] = '\0';
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "text_input_alloc_failed");
+            return 1;
+        }
+        if (cmd->text && cmd->max_v < 0xFFFFFFFFu) {
+            size_t max_idx = (size_t)cmd->max_v;
+            if (max_idx + 1u < cmd->text_cap) {
+                cmd->text[max_idx] = '\0';
+            }
+        }
         return 1;
     }
 
@@ -1232,10 +1355,17 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             cmd->enabled = enabled ? 1u : 0u;
         }
         if (cmd->max_v < 1u) cmd->max_v = 1u;
-        if (cmd->max_v >= ORBIT_UI_TEXT_CHARS) cmd->max_v = ORBIT_UI_TEXT_CHARS - 1u;
         p = orbit_skip_spaces(p);
-        orbit_copy_unescaped(cmd->text, sizeof(cmd->text), p);
-        cmd->text[cmd->max_v] = '\0';
+        if (!orbit_cmd_set_text_unescaped(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "text_area_alloc_failed");
+            return 1;
+        }
+        if (cmd->text && cmd->max_v < 0xFFFFFFFFu) {
+            size_t max_idx = (size_t)cmd->max_v;
+            if (max_idx + 1u < cmd->text_cap) {
+                cmd->text[max_idx] = '\0';
+            }
+        }
         return 1;
     }
 
@@ -1300,7 +1430,10 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         }
         cmd->enabled = enabled ? 1u : 0u;
         p = orbit_skip_spaces(p);
-        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "list_item_text_alloc_failed");
+            return 1;
+        }
         return 1;
     }
 
@@ -1427,7 +1560,10 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_IMAGE_FILE, "image_file_missing_path");
             return 1;
         }
-        orbit_copy_str(cmd->text, sizeof(cmd->text), p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "image_file_path_alloc_failed");
+            return 1;
+        }
         return 1;
     }
 
@@ -1451,8 +1587,7 @@ static void orbit_clear_text_buffer(orbit_shell_t *shell) {
     if (!shell) return;
     shell->line_head = 0u;
     shell->line_count = 0u;
-    shell->pending_len = 0u;
-    shell->pending_line[0] = '\0';
+    orbit_pending_line_reset(shell);
 }
 
 static uint32_t orbit_parse_csi_first_param(const char *buf, size_t len) {
@@ -1533,6 +1668,7 @@ static int orbit_feed_ansi(orbit_shell_t *shell, char c) {
 static void orbit_reset_buffer(orbit_shell_t *shell) {
     if (!shell) return;
     orbit_ui_storage_free(&shell->ui);
+    (void)orbit_pending_line_reserve(shell, ORBIT_PENDING_LINE_INITIAL_CHARS);
     orbit_clear_text_buffer(shell);
     shell->esc_active = 0u;
     shell->csi_active = 0u;
@@ -1566,28 +1702,31 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
     }
 
     if (c == '\n') {
-        shell->pending_line[shell->pending_len] = '\0';
-        if (!orbit_ui_handle_line(shell, shell->pending_line)) {
-            orbit_push_line(shell, shell->pending_line);
+        const char *line = (shell->pending_line) ? shell->pending_line : "";
+        if (shell->pending_line) shell->pending_line[shell->pending_len] = '\0';
+        if (!orbit_ui_handle_line(shell, line)) {
+            orbit_push_line(shell, line);
         }
-        shell->pending_len = 0u;
-        shell->pending_line[0] = '\0';
+        orbit_pending_line_reset(shell);
         return;
     }
 
     if (c == '\b') {
         if (shell->pending_len > 0u) {
             shell->pending_len--;
-            shell->pending_line[shell->pending_len] = '\0';
+            if (shell->pending_line) shell->pending_line[shell->pending_len] = '\0';
         }
         return;
     }
 
     if ((uint8_t)c < 32u) return;
-    if (shell->pending_len + 1u >= sizeof(shell->pending_line)) {
-        shell->pending_line[shell->pending_len] = '\0';
-        orbit_push_line(shell, shell->pending_line);
-        shell->pending_len = 0u;
+    if (!orbit_pending_line_reserve(shell, shell->pending_len + 2u)) {
+        if (shell->pending_line && shell->pending_len > 0u) {
+            shell->pending_line[shell->pending_len] = '\0';
+            orbit_push_line(shell, shell->pending_line);
+        }
+        orbit_pending_line_reset(shell);
+        return;
     }
     shell->pending_line[shell->pending_len++] = c;
     shell->pending_line[shell->pending_len] = '\0';
@@ -1963,7 +2102,7 @@ static int orbit_context_find_zone_by_id(const orbit_shell_t *shell, uint32_t id
         const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
         if (cmd->type != ORBIT_UI_CMD_CONTEXT_MENU) continue;
         if (cmd->id != id) continue;
-        if (!cmd->enabled || cmd->min_v == 0u || cmd->text[0] == '\0') return 0;
+        if (!cmd->enabled || cmd->min_v == 0u || !cmd->text || cmd->text[0] == '\0') return 0;
         *out_idx = i;
         return 1;
     }
@@ -2032,29 +2171,6 @@ static void orbit_context_compute_popup(const orbit_shell_t *shell, const orbit_
     *out_row_h = row_h;
     *out_visible = visible_items;
     *out_max_start = max_start;
-}
-
-static void orbit_split_list_item_text(const char *in, char *title, size_t title_cap,
-                                       char *subtitle, size_t subtitle_cap) {
-    if (title && title_cap > 0u) title[0] = '\0';
-    if (subtitle && subtitle_cap > 0u) subtitle[0] = '\0';
-    if (!in) return;
-
-    const char *sep = in;
-    while (*sep && *sep != '|') sep++;
-
-    if (title && title_cap > 0u) {
-        size_t n = 0u;
-        while (in[n] && (in + n) < sep && n + 1u < title_cap) {
-            title[n] = in[n];
-            n++;
-        }
-        title[n] = '\0';
-    }
-
-    if (*sep == '|' && subtitle && subtitle_cap > 0u) {
-        orbit_copy_str(subtitle, subtitle_cap, sep + 1);
-    }
 }
 
 static uint8_t orbit_clip_intersect(uint32_t ax, uint32_t ay, uint32_t aw, uint32_t ah,
@@ -3008,22 +3124,34 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     cmd->value = v;
                 }
             } else if (cmd->type == ORBIT_UI_CMD_SELECT) {
-                char current[ORBIT_UI_TEXT_CHARS];
-                orbit_select_option_text(cmd->text, cmd->value, current, sizeof(current));
+                char current[256];
+                orbit_select_option_text(cmd->text ? cmd->text : "", cmd->value, current, sizeof(current));
                 uint8_t en = cmd_enabled;
                 if (sl_ui_select_cycle_state_ex(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
-                                                cmd->min_v, &cmd->value, current, cmd->text,
+                                                cmd->min_v, &cmd->value, current, cmd->text ? cmd->text : "",
                                                 shell->ui.key_events, shell->ui.key_event_count, en)) {
                     orbit_send_ui_event_select(shell, cmd->id, cmd->value);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_TEXT_INPUT) {
                 uint32_t max_chars = cmd->max_v;
                 if (max_chars < 1u) max_chars = 1u;
-                if (max_chars >= ORBIT_UI_TEXT_CHARS) max_chars = ORBIT_UI_TEXT_CHARS - 1u;
-                cmd->text[max_chars] = '\0';
+                if (!orbit_cmd_text_reserve(cmd, 2u)) {
+                    orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "text_input_alloc_failed");
+                    continue;
+                }
+                if ((size_t)max_chars + 1u > cmd->text_cap) {
+                    (void)orbit_cmd_text_reserve(cmd, (size_t)max_chars + 1u);
+                }
+                if (!cmd->text) continue;
+                size_t cap_sz = cmd->text_cap;
+                size_t max_cap = (size_t)max_chars + 1u;
+                if (cap_sz > max_cap) cap_sz = max_cap;
+                if (cap_sz < 2u) cap_sz = 2u;
+                if (cap_sz > UINT32_MAX) cap_sz = UINT32_MAX;
+                cmd->text[cap_sz - 1u] = '\0';
                 uint8_t en = cmd_enabled;
                 if (sl_ui_text_input_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
-                                           cmd->text, max_chars + 1u,
+                                           cmd->text, (uint32_t)cap_sz,
                                            shell->ui.key_events, shell->ui.key_event_count,
                                            en)) {
                     orbit_send_ui_event_text_input(shell, cmd->id, cmd->text);
@@ -3031,11 +3159,23 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             } else if (cmd->type == ORBIT_UI_CMD_TEXT_AREA) {
                 uint32_t max_chars = cmd->max_v;
                 if (max_chars < 1u) max_chars = 1u;
-                if (max_chars >= ORBIT_UI_TEXT_CHARS) max_chars = ORBIT_UI_TEXT_CHARS - 1u;
-                cmd->text[max_chars] = '\0';
+                if (!orbit_cmd_text_reserve(cmd, 2u)) {
+                    orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "text_area_alloc_failed");
+                    continue;
+                }
+                if ((size_t)max_chars + 1u > cmd->text_cap) {
+                    (void)orbit_cmd_text_reserve(cmd, (size_t)max_chars + 1u);
+                }
+                if (!cmd->text) continue;
+                size_t cap_sz = cmd->text_cap;
+                size_t max_cap = (size_t)max_chars + 1u;
+                if (cap_sz > max_cap) cap_sz = max_cap;
+                if (cap_sz < 2u) cap_sz = 2u;
+                if (cap_sz > UINT32_MAX) cap_sz = UINT32_MAX;
+                cmd->text[cap_sz - 1u] = '\0';
                 uint8_t en = cmd_enabled;
                 if (sl_ui_text_area_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
-                                          cmd->text, max_chars + 1u,
+                                          cmd->text, (uint32_t)cap_sz,
                                           shell->ui.key_events, shell->ui.key_event_count,
                                           en)) {
                     orbit_send_ui_event_text_area(shell, cmd->id, cmd->text);
@@ -3110,14 +3250,34 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             } else if (cmd->type == ORBIT_UI_CMD_SEPARATOR) {
                 sl_ui_separator(&shell->ui.ui, x, y, cmd->w);
             } else if (cmd->type == ORBIT_UI_CMD_LIST_ITEM) {
-                char title[ORBIT_UI_TEXT_CHARS];
-                char subtitle[ORBIT_UI_TEXT_CHARS];
-                orbit_split_list_item_text(cmd->text, title, sizeof(title), subtitle, sizeof(subtitle));
+                const char *src = cmd->text ? cmd->text : "";
+                const char *sep = src;
+                char *title = NULL;
+                char *subtitle = NULL;
+                while (*sep && *sep != '|') sep++;
+                {
+                    size_t title_len = (size_t)(sep - src);
+                    title = (char *)malloc(title_len + 1u);
+                    if (title) {
+                        if (title_len > 0u) peos_memcpy(title, src, title_len);
+                        title[title_len] = '\0';
+                    }
+                    if (*sep == '|') {
+                        size_t subtitle_len = peos_strlen(sep + 1u);
+                        subtitle = (char *)malloc(subtitle_len + 1u);
+                        if (subtitle) {
+                            if (subtitle_len > 0u) peos_memcpy(subtitle, sep + 1u, subtitle_len);
+                            subtitle[subtitle_len] = '\0';
+                        }
+                    }
+                }
                 uint8_t en = cmd_enabled;
                 if (sl_ui_list_item(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h,
-                                    title, subtitle, en)) {
+                                    title ? title : "", subtitle ? subtitle : "", en)) {
                     orbit_emit_click_events(shell, cmd->id, 1u);
                 }
+                if (title) free(title);
+                if (subtitle) free(subtitle);
             } else if (cmd->type == ORBIT_UI_CMD_RECT) {
                 sl_ui_rect_rgb(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->r, cmd->g, cmd->b);
             } else if (cmd->type == ORBIT_UI_CMD_RECTA) {
@@ -3132,7 +3292,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 // Registration-only control: rendered by host overlay on right click.
             } else if (cmd->type == ORBIT_UI_CMD_IMAGE_FILE) {
                 if (!cmd->image_loaded && !cmd->image_failed) {
-                    if (sl_decode_image_file(cmd->text, &cmd->image)) {
+                    if (cmd->text && sl_decode_image_file(cmd->text, &cmd->image)) {
                         cmd->image_loaded = 1u;
                     } else {
                         cmd->image_failed = 1u;
@@ -3254,7 +3414,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         if (idx < shell->line_count) {
             src = orbit_get_line(shell, idx);
         } else {
-            orbit_copy_str(line_buf, sizeof(line_buf), shell->pending_line);
+            orbit_copy_str(line_buf, sizeof(line_buf), shell->pending_line ? shell->pending_line : "");
             uint64_t blink = (peos_time_ns() / 500000000ull) & 1ull;
             size_t n = peos_strlen(line_buf);
             if (win->focused && blink && n + 1u < sizeof(line_buf)) {
@@ -3386,6 +3546,7 @@ void sl_app_host_reset(void) {
     for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
         orbit_stop_process(&g_orbit[i]);
         orbit_ui_storage_free(&g_orbit[i].ui);
+        orbit_pending_line_free(&g_orbit[i]);
         peos_memset(&g_orbit[i], 0, sizeof(g_orbit[i]));
         orbit_cfg_apply_to_shell(i);
         g_orbit[i].child_pid = -1;
@@ -3420,6 +3581,7 @@ app_instance_t *sl_app_host_instance_at(size_t index) {
     if (!g_orbit_cfg[index].enabled) return NULL;
     if (!g_orbit[index].initialized) {
         orbit_ui_storage_free(&g_orbit[index].ui);
+        orbit_pending_line_free(&g_orbit[index]);
         peos_memset(&g_orbit[index], 0, sizeof(g_orbit[index]));
         orbit_cfg_apply_to_shell(index);
         g_orbit[index].child_pid = -1;
