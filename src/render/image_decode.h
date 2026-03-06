@@ -3,12 +3,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define SL_IMAGE_MIP_MAX 12u
+
 typedef struct {
     uint32_t width;
     uint32_t height;
     uint32_t channels;
     uint32_t stride;
     uint8_t *data; // decoded pixel data (typically RGBA8)
+    uint32_t mip_count;
+    uint32_t mip_width[SL_IMAGE_MIP_MAX];
+    uint32_t mip_height[SL_IMAGE_MIP_MAX];
+    uint32_t mip_stride[SL_IMAGE_MIP_MAX];
+    uint8_t *mip_data[SL_IMAGE_MIP_MAX];
 } sl_image_t;
 
 // Decode a PNG image from memory. Returns 1 on success, 0 on failure.

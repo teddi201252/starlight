@@ -3300,11 +3300,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     }
                 }
                 if (cmd->image_loaded && cmd->image.data) {
-                    sl_ui_image_rgba(&shell->ui.ui, x, y, cmd->w, cmd->h,
-                                     cmd->image.data,
-                                     cmd->image.width,
-                                     cmd->image.height,
-                                     cmd->image.stride);
+                    sl_ui_image(&shell->ui.ui, x, y, cmd->w, cmd->h, &cmd->image);
                 }
             }
 

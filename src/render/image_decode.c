@@ -34,6 +34,108 @@ static void *sl_stbi_memmove(void *dst, const void *src, size_t n) {
 #define STBI_MEMMOVE sl_stbi_memmove
 #include "../../third_party/stb/stb_image.h"
 
+static inline uint8_t sl_mip_u8_from_float(float v) {
+    if (v <= 0.0f) return 0u;
+    if (v >= 255.0f) return 255u;
+    return (uint8_t)(v + 0.5f);
+}
+
+static int sl_image_build_mips(sl_image_t *image) {
+    uint32_t prev_w = 0u;
+    uint32_t prev_h = 0u;
+    uint32_t prev_stride = 0u;
+    const uint8_t *prev_data = NULL;
+
+    if (!image || !image->data || image->channels != 4u) return 0;
+
+    prev_w = image->width;
+    prev_h = image->height;
+    prev_stride = image->stride;
+    prev_data = image->data;
+
+    while ((prev_w > 1u || prev_h > 1u) && image->mip_count < SL_IMAGE_MIP_MAX) {
+        uint32_t level = image->mip_count;
+        uint32_t next_w = (prev_w > 1u) ? (prev_w / 2u) : 1u;
+        uint32_t next_h = (prev_h > 1u) ? (prev_h / 2u) : 1u;
+        uint32_t next_stride = next_w * 4u;
+        uint8_t *next_data = (uint8_t *)malloc((size_t)next_stride * (size_t)next_h);
+        if (!next_data) return 0;
+
+        for (uint32_t y = 0u; y < next_h; y++) {
+            for (uint32_t x = 0u; x < next_w; x++) {
+                uint32_t sx0 = x * 2u;
+                uint32_t sy0 = y * 2u;
+                uint32_t sx1 = (sx0 + 1u < prev_w) ? (sx0 + 1u) : sx0;
+                uint32_t sy1 = (sy0 + 1u < prev_h) ? (sy0 + 1u) : sy0;
+                const uint8_t *p00 = prev_data + ((size_t)sy0 * (size_t)prev_stride) + ((size_t)sx0 * 4u);
+                const uint8_t *p10 = prev_data + ((size_t)sy0 * (size_t)prev_stride) + ((size_t)sx1 * 4u);
+                const uint8_t *p01 = prev_data + ((size_t)sy1 * (size_t)prev_stride) + ((size_t)sx0 * 4u);
+                const uint8_t *p11 = prev_data + ((size_t)sy1 * (size_t)prev_stride) + ((size_t)sx1 * 4u);
+                uint8_t *dst = next_data + ((size_t)y * (size_t)next_stride) + ((size_t)x * 4u);
+                float acc_r = 0.0f;
+                float acc_g = 0.0f;
+                float acc_b = 0.0f;
+                float acc_a = 0.0f;
+
+                {
+                    float a = (float)p00[3] / 255.0f;
+                    acc_r += (float)p00[0] * a;
+                    acc_g += (float)p00[1] * a;
+                    acc_b += (float)p00[2] * a;
+                    acc_a += a;
+                }
+                {
+                    float a = (float)p10[3] / 255.0f;
+                    acc_r += (float)p10[0] * a;
+                    acc_g += (float)p10[1] * a;
+                    acc_b += (float)p10[2] * a;
+                    acc_a += a;
+                }
+                {
+                    float a = (float)p01[3] / 255.0f;
+                    acc_r += (float)p01[0] * a;
+                    acc_g += (float)p01[1] * a;
+                    acc_b += (float)p01[2] * a;
+                    acc_a += a;
+                }
+                {
+                    float a = (float)p11[3] / 255.0f;
+                    acc_r += (float)p11[0] * a;
+                    acc_g += (float)p11[1] * a;
+                    acc_b += (float)p11[2] * a;
+                    acc_a += a;
+                }
+
+                acc_a *= 0.25f;
+                if (acc_a <= 0.0f) {
+                    dst[0] = 0u;
+                    dst[1] = 0u;
+                    dst[2] = 0u;
+                    dst[3] = 0u;
+                } else {
+                    dst[3] = sl_mip_u8_from_float(acc_a * 255.0f);
+                    dst[0] = sl_mip_u8_from_float((acc_r * 0.25f) / acc_a);
+                    dst[1] = sl_mip_u8_from_float((acc_g * 0.25f) / acc_a);
+                    dst[2] = sl_mip_u8_from_float((acc_b * 0.25f) / acc_a);
+                }
+            }
+        }
+
+        image->mip_width[level] = next_w;
+        image->mip_height[level] = next_h;
+        image->mip_stride[level] = next_stride;
+        image->mip_data[level] = next_data;
+        image->mip_count++;
+
+        prev_w = next_w;
+        prev_h = next_h;
+        prev_stride = next_stride;
+        prev_data = next_data;
+    }
+
+    return 1;
+}
+
 static int sl_decode_internal(const uint8_t *data, size_t len, sl_image_t *out_image) {
     if (!data || !out_image || len == 0) return 0;
     if (len > 0x7fffffffU) return 0;
@@ -50,6 +152,10 @@ static int sl_decode_internal(const uint8_t *data, size_t len, sl_image_t *out_i
     out_image->channels = 4u;
     out_image->stride = (uint32_t)w * 4u;
     out_image->data = decoded;
+    if (!sl_image_build_mips(out_image)) {
+        sl_image_free(out_image);
+        return 0;
+    }
     return 1;
 }
 
@@ -104,6 +210,9 @@ int sl_decode_jpeg(const uint8_t *jpeg_data, size_t jpeg_size, sl_image_t *out_i
 
 void sl_image_free(sl_image_t *image) {
     if (!image) return;
+    for (uint32_t i = 0u; i < image->mip_count; i++) {
+        if (image->mip_data[i]) free(image->mip_data[i]);
+    }
     if (image->data) stbi_image_free(image->data);
     peos_memset(image, 0, sizeof(*image));
 }

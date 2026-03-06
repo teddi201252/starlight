@@ -1018,68 +1018,31 @@ int sl_handle_input(sl_ctx_t *ctx) {
 void sl_render_full(sl_ctx_t *ctx) {
     if (!ctx || !ctx->frame || !ctx->bg_loaded) return;
     if (ctx->bg_image.data && ctx->bg_image.channels >= 3u) {
-        sl_blit_rgba_stretch(ctx, 0, 0, ctx->fb.width, ctx->fb.height,
-                             ctx->bg_image.data, ctx->bg_image.width,
-                             ctx->bg_image.height, ctx->bg_image.stride);
+        sl_blit_image_stretch(ctx, 0, 0, ctx->fb.width, ctx->fb.height, &ctx->bg_image);
     }
 }
 
 static void sl_render_bg_rect(sl_ctx_t *ctx, const sl_rect_t *r) {
+    uint8_t clip_enabled = 0u;
+    uint32_t clip_x = 0u;
+    uint32_t clip_y = 0u;
+    uint32_t clip_w = 0u;
+    uint32_t clip_h = 0u;
     if (!ctx || !r || !ctx->frame || !ctx->bg_image.data) return;
     if (ctx->bg_image.channels < 3u) return;
-    if (ctx->bytespp != 3u && ctx->bytespp != 4u) return;
     if (r->w == 0u || r->h == 0u) return;
 
-    uint32_t x0 = r->x;
-    uint32_t y0 = r->y;
-    uint32_t w = r->w;
-    uint32_t h = r->h;
+    clip_enabled = ctx->clip_enabled;
+    clip_x = ctx->clip_x;
+    clip_y = ctx->clip_y;
+    clip_w = ctx->clip_w;
+    clip_h = ctx->clip_h;
 
-    if (x0 >= ctx->fb.width || y0 >= ctx->fb.height) return;
-    if (x0 + w > ctx->fb.width) w = ctx->fb.width - x0;
-    if (y0 + h > ctx->fb.height) h = ctx->fb.height - y0;
-    if (w == 0u || h == 0u) return;
+    sl_clip_set(ctx, r->x, r->y, r->w, r->h);
+    sl_blit_image_stretch(ctx, 0, 0, ctx->fb.width, ctx->fb.height, &ctx->bg_image);
 
-    const uint8_t *src_base = (const uint8_t *)ctx->bg_image.data;
-    uint32_t src_w = ctx->bg_image.width;
-    uint32_t src_h = ctx->bg_image.height;
-    uint32_t src_stride = ctx->bg_image.stride;
-    uint32_t src_ch = ctx->bg_image.channels;
-
-    for (uint32_t dy = 0; dy < h; dy++) {
-        uint32_t fb_y = y0 + dy;
-        uint32_t sy = (uint32_t)(((uint64_t)fb_y * (uint64_t)src_h) / (uint64_t)ctx->fb.height);
-        if (sy >= src_h) sy = src_h - 1u;
-
-        uint8_t *dst = ctx->frame + ((size_t)fb_y * ctx->row_stride) +
-                       ((size_t)x0 * (size_t)ctx->bytespp);
-        const uint8_t *srow = src_base + ((size_t)sy * (size_t)src_stride);
-
-        for (uint32_t dx = 0; dx < w; dx++) {
-            uint32_t fb_x = x0 + dx;
-            uint32_t sx = (uint32_t)(((uint64_t)fb_x * (uint64_t)src_w) / (uint64_t)ctx->fb.width);
-            if (sx >= src_w) sx = src_w - 1u;
-
-            const uint8_t *s = srow + ((size_t)sx * (size_t)src_ch);
-            uint8_t sr = s[0];
-            uint8_t sg = s[1];
-            uint8_t sb = s[2];
-            uint8_t sa = (src_ch >= 4u) ? s[3] : 255u;
-
-            if (sa == 255u) {
-                dst[0] = sb;
-                dst[1] = sg;
-                dst[2] = sr;
-            } else if (sa != 0u) {
-                dst[0] = (uint8_t)((((uint32_t)sb * (uint32_t)sa) + ((uint32_t)dst[0] * (255u - (uint32_t)sa)) + 127u) / 255u);
-                dst[1] = (uint8_t)((((uint32_t)sg * (uint32_t)sa) + ((uint32_t)dst[1] * (255u - (uint32_t)sa)) + 127u) / 255u);
-                dst[2] = (uint8_t)((((uint32_t)sr * (uint32_t)sa) + ((uint32_t)dst[2] * (255u - (uint32_t)sa)) + 127u) / 255u);
-            }
-
-            if (ctx->bytespp == 4u) dst[3] = 0xFFu;
-            dst += ctx->bytespp;
-        }
-    }
+    if (clip_enabled) sl_clip_set(ctx, clip_x, clip_y, clip_w, clip_h);
+    else sl_clip_clear(ctx);
 }
 
 void sl_render_dirty_background(sl_ctx_t *ctx) {

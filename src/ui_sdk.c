@@ -1399,6 +1399,12 @@ void sl_ui_image_rgba(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint3
     sl_blit_rgba_stretch(ui->ctx, x, y, w, h, rgba, src_w, src_h, src_stride);
 }
 
+void sl_ui_image(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                 const sl_image_t *image) {
+    if (!ui || !ui->ctx || !image || !image->data || w == 0u || h == 0u) return;
+    sl_blit_image_stretch(ui->ctx, x, y, w, h, image);
+}
+
 void sl_ui_rect(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                 sl_ui_color_token_t token) {
     if (!ui || !ui->ctx || w == 0u || h == 0u) return;
