@@ -66,6 +66,14 @@ typedef struct {
     float opacity;
 } sl_window_anim_t;
 
+typedef struct {
+    uint32_t x;
+    uint32_t y;
+    uint32_t w;
+    uint32_t h;
+    uint8_t valid;
+} sl_window_rect_snapshot_t;
+
 static sl_window_t *g_windows = NULL;
 static size_t g_window_count = 0;
 static size_t g_focused_window = (size_t)-1;
@@ -92,6 +100,30 @@ static void sl_focus_window(size_t index);
 static int sl_window_is_closing(const sl_window_t *win);
 static void sl_anim_start_close(app_instance_t *task, int32_t current_y);
 static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index);
+
+static sl_window_rect_snapshot_t sl_window_snapshot(const sl_window_t *win) {
+    sl_window_rect_snapshot_t snap = {0u, 0u, 0u, 0u, 0u};
+    if (!win || win->width == 0u || win->height == 0u) return snap;
+    snap.x = win->x;
+    snap.y = win->y;
+    snap.w = win->width;
+    snap.h = win->height;
+    snap.valid = 1u;
+    return snap;
+}
+
+static sl_window_rect_snapshot_t sl_window_snapshot_index(size_t index) {
+    if (!g_windows || index >= g_window_count) {
+        sl_window_rect_snapshot_t empty = {0u, 0u, 0u, 0u, 0u};
+        return empty;
+    }
+    return sl_window_snapshot(&g_windows[index]);
+}
+
+static void sl_dirty_add_snapshot(const sl_ctx_t *ctx, const sl_window_rect_snapshot_t *snap) {
+    if (!ctx || !snap || !snap->valid) return;
+    sl_dirty_add(ctx, snap->x, snap->y, snap->w, snap->h);
+}
 
 #define SL_LAUNCHER_CTX_ROW_H 20u
 #define SL_LAUNCHER_CTX_MIN_W 108u
@@ -730,16 +762,20 @@ static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint32
     size_t existing = sl_window_index_for_task(app);
     if (existing != (size_t)-1) {
         if (action == 0u) {
+            sl_window_rect_snapshot_t prev_focus = sl_window_snapshot_index(g_focused_window);
+            sl_window_rect_snapshot_t target = sl_window_snapshot_index(existing);
             sl_focus_window(existing);
             sl_windows_mark_focused_activity();
-            sl_dirty_mark_full();
+            sl_dirty_add_snapshot(ctx, &prev_focus);
+            sl_dirty_add_snapshot(ctx, &target);
             return 1;
         }
         if (action == 1u) {
             if (!sl_window_is_closing(&g_windows[existing])) {
+                sl_window_rect_snapshot_t closing = sl_window_snapshot_index(existing);
                 sl_anim_start_close(g_windows[existing].task, (int32_t)g_windows[existing].y);
                 sl_windows_mark_focused_activity();
-                sl_dirty_mark_full();
+                sl_dirty_add_snapshot(ctx, &closing);
             }
             return 1;
         }
@@ -975,11 +1011,16 @@ static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index) {
 
     size_t existing = sl_window_index_for_task(app);
     if (existing != (size_t)-1) {
+        sl_window_rect_snapshot_t prev_focus = sl_window_snapshot_index(g_focused_window);
+        sl_window_rect_snapshot_t target = sl_window_snapshot_index(existing);
         sl_focus_window(existing);
         sl_windows_mark_focused_activity();
-        sl_dirty_mark_full();
+        sl_dirty_add_snapshot(ctx, &prev_focus);
+        sl_dirty_add_snapshot(ctx, &target);
         return 1;
     }
+
+    sl_window_rect_snapshot_t prev_focus = sl_window_snapshot_index(g_focused_window);
 
     uint32_t x = 0u, y = 0u, w = 0u, h = 0u;
     sl_launcher_pick_window_rect(ctx, item, &x, &y, &w, &h);
@@ -1004,7 +1045,11 @@ static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index) {
     sl_window_refresh_zorder();
     sl_anim_start_open(&g_windows[g_window_count - 1u], g_windows[g_window_count - 1u].task,
                        (int32_t)g_windows[g_window_count - 1u].y);
-    sl_dirty_mark_full();
+    sl_dirty_add_snapshot(ctx, &prev_focus);
+    {
+        sl_window_rect_snapshot_t opened = sl_window_snapshot(&g_windows[g_window_count - 1u]);
+        sl_dirty_add_snapshot(ctx, &opened);
+    }
     return 1;
 }
 
@@ -1084,9 +1129,10 @@ int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
         size_t idx = i - 1u;
         if (sl_window_is_closing(&g_windows[idx])) continue;
         if (!sl_window_close_btn_hit(&g_windows[idx], x, y)) continue;
+        sl_window_rect_snapshot_t closing = sl_window_snapshot_index(idx);
         sl_anim_start_close(g_windows[idx].task, (int32_t)g_windows[idx].y);
         sl_windows_mark_focused_activity();
-        sl_dirty_mark_full();
+        sl_dirty_add_snapshot(ctx, &closing);
         return 1;
     }
     return 0;
@@ -1181,8 +1227,13 @@ void sl_windows_tick_animations(sl_ctx_t *ctx) {
         sl_dirty_add(ctx, win->x, win->y, win->width, win->height);
 
         if (anim->close_ready) {
+            sl_window_rect_snapshot_t closing = sl_window_snapshot(win);
             sl_window_close_index(i);
-            sl_dirty_mark_full();
+            sl_dirty_add_snapshot(ctx, &closing);
+            {
+                sl_window_rect_snapshot_t focused_now = sl_window_snapshot_index(g_focused_window);
+                sl_dirty_add_snapshot(ctx, &focused_now);
+            }
             continue;
         }
 
@@ -1190,9 +1241,14 @@ void sl_windows_tick_animations(sl_ctx_t *ctx) {
             !sl_tween_is_active_id(sl_anim_tween_id((size_t)anim_idx, 0u)) &&
             !sl_tween_is_active_id(sl_anim_tween_id((size_t)anim_idx, 1u))) {
             /* Handles runtime disable/reset of tween system while a close animation is in-flight. */
+            sl_window_rect_snapshot_t closing = sl_window_snapshot(win);
             anim->close_ready = 1u;
             sl_window_close_index(i);
-            sl_dirty_mark_full();
+            sl_dirty_add_snapshot(ctx, &closing);
+            {
+                sl_window_rect_snapshot_t focused_now = sl_window_snapshot_index(g_focused_window);
+                sl_dirty_add_snapshot(ctx, &focused_now);
+            }
             continue;
         }
 

@@ -76,14 +76,6 @@ static uint64_t sl_rect_area(const sl_rect_t *r) {
     return (uint64_t)r->w * (uint64_t)r->h;
 }
 
-static uint64_t sl_dirty_total_area(void) {
-    uint64_t total = 0ull;
-    for (size_t i = 0; i < g_dirty.count; i++) {
-        total += sl_rect_area(&g_dirty.rects[i]);
-    }
-    return total;
-}
-
 int sl_dirty_intersects_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (w == 0u || h == 0u) return 0;
     if (g_dirty.full) return 1;
@@ -145,15 +137,9 @@ static sl_rect_t sl_rect_union(const sl_rect_t *a, const sl_rect_t *b) {
 }
 
 static int sl_dirty_should_mark_full(const sl_ctx_t *ctx) {
-    if (!ctx) return 0;
-    if (ctx->fb.width == 0u || ctx->fb.height == 0u) return 0;
-    if (g_dirty.count == 0u) return 0;
-
-    uint64_t fb_area = (uint64_t)ctx->fb.width * (uint64_t)ctx->fb.height;
-    if (fb_area == 0ull) return 0;
-
-    uint64_t dirty_area = sl_dirty_total_area();
-    return (dirty_area * 100ull) >= (fb_area * (uint64_t)SL_DIRTY_FULL_AREA_THRESHOLD_PCT);
+    (void)ctx;
+    // Keep compositor strictly in partial-update mode during normal runtime.
+    return 0;
 }
 
 static int sl_dirty_coalesce_best_pair(void) {
