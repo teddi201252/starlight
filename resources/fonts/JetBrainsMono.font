@@ -1,0 +1,9 @@
+# Starlight vector font manifest
+backend=vector
+file=/starlight/fonts/JetBrainsMono-Regular.ttf
+size_px=14
+cache_glyphs=768
+fallback_char=63
+kerning=1
+line_gap=0
+baseline_shift=-2
