@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.9.0] - 2026-05-25
+- Add TrueType/OpenType vector font rendering
+
 ## [0.8.2] - 2026-05-25
 - Add SLUI focus requests and new desktop backgrounds
 
