@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.8.2] - 2026-05-25
+- Add SLUI focus requests and new desktop backgrounds
+
 ## [0.8.1] - 2026-03-06
 - Add mipmapped bilinear image downscaling for higher-quality UI icons
 

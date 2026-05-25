@@ -54,6 +54,7 @@
 #define ORBIT_SLUI_CAP_EVENT_DOUBLE_CLICK (1u << 27)
 #define ORBIT_SLUI_CAP_CONTEXT_MENU       (1u << 28)
 #define ORBIT_SLUI_CAP_EVENT_CONTEXT_MENU (1u << 29)
+#define ORBIT_SLUI_CAP_FOCUS              (1u << 30)
 
 #define ORBIT_UI_DOUBLE_CLICK_MS_DEFAULT 300u
 #define ORBIT_UI_DOUBLE_CLICK_MS_MIN      80u
@@ -450,6 +451,7 @@ static uint32_t orbit_parse_cap_token(const char *tok, size_t tok_len) {
     if (orbit_token_is(tok, tok_len, "EVENT_DOUBLE_CLICK")) return ORBIT_SLUI_CAP_EVENT_DOUBLE_CLICK;
     if (orbit_token_is(tok, tok_len, "CONTEXT_MENU")) return ORBIT_SLUI_CAP_CONTEXT_MENU;
     if (orbit_token_is(tok, tok_len, "EVENT_CONTEXT_MENU")) return ORBIT_SLUI_CAP_EVENT_CONTEXT_MENU;
+    if (orbit_token_is(tok, tok_len, "FOCUS")) return ORBIT_SLUI_CAP_FOCUS;
     return 0u;
 }
 
@@ -491,7 +493,7 @@ static void orbit_send_ui_error(orbit_shell_t *shell, uint32_t code, const char 
 static void orbit_send_host_hello(orbit_shell_t *shell) {
     if (!shell || shell->child_stdin_fd < 0) return;
     const char *msg =
-        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT FONT_SIZE EVENT_DOUBLE_CLICK CONTEXT_MENU EVENT_CONTEXT_MENU\n";
+        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT FONT_SIZE EVENT_DOUBLE_CLICK CONTEXT_MENU EVENT_CONTEXT_MENU FOCUS\n";
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, peos_strlen(msg));
     shell->ui.host_hello_sent = 1u;
 }
@@ -1058,6 +1060,18 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         shell->ui.staged_count = 0u;
         shell->ui.cmd_limit_reached = 0u;
         shell->ui.committed = 1u;
+        return 1;
+    }
+
+    if (orbit_token_is(cmd_tok, cmd_len, "FOCUS")) {
+        uint32_t id = 0u;
+        if (!orbit_parse_u32(&p, &id)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "focus_missing_id");
+            return 1;
+        }
+        shell->ui.nav_focus_id = id;
+        shell->ui.ui.focused_id = id;
+        shell->ui.keyboard_nav_active = 1u;
         return 1;
     }
 
