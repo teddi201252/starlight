@@ -1,5 +1,7 @@
 #include "ui_sdk.h"
 
+#include "keyboard_layout.h"
+
 static sl_ui_theme_t g_runtime_theme;
 static uint32_t g_runtime_theme_version = 1u;
 static uint8_t g_runtime_theme_initialized = 0u;
@@ -305,58 +307,40 @@ static uint32_t sl_ui_strlen(const char *s) {
     return n;
 }
 
-static char sl_ui_key_to_char(uint16_t code, uint8_t shift) {
-    switch (code) {
-        case PEOS_KEY_A: return shift ? 'A' : 'a';
-        case PEOS_KEY_B: return shift ? 'B' : 'b';
-        case PEOS_KEY_C: return shift ? 'C' : 'c';
-        case PEOS_KEY_D: return shift ? 'D' : 'd';
-        case PEOS_KEY_E: return shift ? 'E' : 'e';
-        case PEOS_KEY_F: return shift ? 'F' : 'f';
-        case PEOS_KEY_G: return shift ? 'G' : 'g';
-        case PEOS_KEY_H: return shift ? 'H' : 'h';
-        case PEOS_KEY_I: return shift ? 'I' : 'i';
-        case PEOS_KEY_J: return shift ? 'J' : 'j';
-        case PEOS_KEY_K: return shift ? 'K' : 'k';
-        case PEOS_KEY_L: return shift ? 'L' : 'l';
-        case PEOS_KEY_M: return shift ? 'M' : 'm';
-        case PEOS_KEY_N: return shift ? 'N' : 'n';
-        case PEOS_KEY_O: return shift ? 'O' : 'o';
-        case PEOS_KEY_P: return shift ? 'P' : 'p';
-        case PEOS_KEY_Q: return shift ? 'Q' : 'q';
-        case PEOS_KEY_R: return shift ? 'R' : 'r';
-        case PEOS_KEY_S: return shift ? 'S' : 's';
-        case PEOS_KEY_T: return shift ? 'T' : 't';
-        case PEOS_KEY_U: return shift ? 'U' : 'u';
-        case PEOS_KEY_V: return shift ? 'V' : 'v';
-        case PEOS_KEY_W: return shift ? 'W' : 'w';
-        case PEOS_KEY_X: return shift ? 'X' : 'x';
-        case PEOS_KEY_Y: return shift ? 'Y' : 'y';
-        case PEOS_KEY_Z: return shift ? 'Z' : 'z';
-        case PEOS_KEY_SPACE: return ' ';
-        case 0x0002u: return shift ? '!' : '1';
-        case 0x0003u: return shift ? '@' : '2';
-        case 0x0004u: return shift ? '#' : '3';
-        case 0x0005u: return shift ? '$' : '4';
-        case 0x0006u: return shift ? '%' : '5';
-        case 0x0007u: return shift ? '^' : '6';
-        case 0x0008u: return shift ? '&' : '7';
-        case 0x0009u: return shift ? '*' : '8';
-        case 0x000Au: return shift ? '(' : '9';
-        case 0x000Bu: return shift ? ')' : '0';
-        case 0x000Cu: return shift ? '_' : '-';
-        case 0x000Du: return shift ? '+' : '=';
-        case 0x001Au: return shift ? '{' : '[';
-        case 0x001Bu: return shift ? '}' : ']';
-        case 0x0027u: return shift ? ':' : ';';
-        case 0x0028u: return shift ? '"' : '\'';
-        case 0x0029u: return shift ? '~' : '`';
-        case 0x002Bu: return shift ? '|' : '\\';
-        case 0x0033u: return shift ? '<' : ',';
-        case 0x0034u: return shift ? '>' : '.';
-        case 0x0035u: return shift ? '?' : '/';
-        default: return '\0';
+static uint8_t sl_ui_utf8_is_cont(char c) {
+    return (((uint8_t)c & 0xC0u) == 0x80u) ? 1u : 0u;
+}
+
+static uint32_t sl_ui_utf8_prev_pos(const char *text, uint32_t pos) {
+    if (!text || pos == 0u) return 0u;
+    pos--;
+    while (pos > 0u && sl_ui_utf8_is_cont(text[pos])) pos--;
+    return pos;
+}
+
+static uint32_t sl_ui_utf8_next_pos(const char *text, uint32_t pos, uint32_t len) {
+    if (!text || pos >= len) return len;
+    pos++;
+    while (pos < len && sl_ui_utf8_is_cont(text[pos])) pos++;
+    return pos;
+}
+
+static uint32_t sl_ui_utf8_count_between(const char *text, uint32_t start, uint32_t end) {
+    uint32_t count = 0u;
+    if (!text) return 0u;
+    while (start < end && text[start]) {
+        start = sl_ui_utf8_next_pos(text, start, end);
+        count++;
     }
+    return count;
+}
+
+static uint32_t sl_ui_utf8_advance_cols(const char *text, uint32_t pos, uint32_t len, uint32_t cols) {
+    while (cols > 0u && pos < len && text[pos]) {
+        pos = sl_ui_utf8_next_pos(text, pos, len);
+        cols--;
+    }
+    return pos;
 }
 
 uint8_t sl_ui_toggle(sl_ui_ctx_t *ui, uint32_t id,
@@ -809,6 +793,10 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         ui->text_input_scroll_col = 0u;
     }
     if (ui->text_caret_id == id && ui->text_caret_pos > len) ui->text_caret_pos = len;
+    if (ui->text_caret_id == id && ui->text_caret_pos > 0u &&
+        sl_ui_utf8_is_cont(text[ui->text_caret_pos])) {
+        ui->text_caret_pos = sl_ui_utf8_prev_pos(text, ui->text_caret_pos);
+    }
 
     if (enabled && ui->mouse_pressed && hovered && was_focused) {
         uint32_t fw = sl_ui_font_w(ui);
@@ -816,13 +804,14 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         uint32_t start = ui->text_input_scroll_col;
         uint32_t max_scroll_col = (len > vis_chars) ? (len - vis_chars) : 0u;
         if (start > max_scroll_col) start = max_scroll_col;
+        if (start > 0u && sl_ui_utf8_is_cont(text[start])) start = sl_ui_utf8_prev_pos(text, start);
         if (ui->cursor_x <= x + 6u) {
             ui->text_caret_pos = start;
         } else if (vis_chars > 0u) {
             uint32_t rel = ui->cursor_x - (x + 6u);
             uint32_t col = rel / fw;
             if (col > vis_chars) col = vis_chars;
-            ui->text_caret_pos = start + col;
+            ui->text_caret_pos = sl_ui_utf8_advance_cols(text, start, len, col);
         }
         if (ui->text_caret_pos > len) ui->text_caret_pos = len;
     }
@@ -830,6 +819,10 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     uint8_t changed = 0u;
     for (uint8_t i = 0u; i < event_count; i++) {
         uint16_t code = sl_ui_norm_keycode(events[i].code);
+        if (sl_keyboard_event_is_altgr(&events[i])) {
+            ui->altgr_down = events[i].pressed ? 1u : 0u;
+            continue;
+        }
         if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) {
             ui->shift_down = events[i].pressed ? 1u : 0u;
             continue;
@@ -838,7 +831,7 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             ui->ctrl_down = events[i].pressed ? 1u : 0u;
             continue;
         }
-        if (code == PEOS_KEY_LALT || code == PEOS_KEY_RALT_NORM) {
+        if (code == PEOS_KEY_LALT) {
             ui->alt_down = events[i].pressed ? 1u : 0u;
             continue;
         }
@@ -849,21 +842,23 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         if (!enabled || !focused || !events[i].pressed) continue;
         if (code == PEOS_KEY_BACKSPACE) {
             if (ui->text_caret_pos > 0u && len > 0u) {
-                for (uint32_t j = ui->text_caret_pos - 1u; j < len; j++) {
-                    text[j] = text[j + 1u];
+                uint32_t prev = sl_ui_utf8_prev_pos(text, ui->text_caret_pos);
+                uint32_t removed = ui->text_caret_pos - prev;
+                for (uint32_t j = prev; j + removed <= len; j++) {
+                    text[j] = text[j + removed];
                 }
-                ui->text_caret_pos--;
-                len--;
+                ui->text_caret_pos = prev;
+                len -= removed;
                 changed = 1u;
             }
             continue;
         }
         if (code == PEOS_KEY_LEFT_NORM) {
-            if (ui->text_caret_pos > 0u) ui->text_caret_pos--;
+            if (ui->text_caret_pos > 0u) ui->text_caret_pos = sl_ui_utf8_prev_pos(text, ui->text_caret_pos);
             continue;
         }
         if (code == PEOS_KEY_RIGHT_NORM) {
-            if (ui->text_caret_pos < len) ui->text_caret_pos++;
+            if (ui->text_caret_pos < len) ui->text_caret_pos = sl_ui_utf8_next_pos(text, ui->text_caret_pos, len);
             continue;
         }
         if (code == PEOS_KEY_HOME_NORM) {
@@ -888,14 +883,19 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             continue;
         }
 
-        char c = sl_ui_key_to_char(code, ui->shift_down);
-        if (c && (len + 1u < text_cap)) {
+        char input[8];
+        size_t input_len = sl_keyboard_translate_event(&events[i], ui->shift_down,
+                                                       ui->altgr_down,
+                                                       input, sizeof(input));
+        if (input_len > 0u && len + input_len < text_cap) {
             for (uint32_t j = len + 1u; j > ui->text_caret_pos; j--) {
-                text[j] = text[j - 1u];
+                text[j + (uint32_t)input_len - 1u] = text[j - 1u];
             }
-            text[ui->text_caret_pos] = c;
-            ui->text_caret_pos++;
-            len++;
+            for (uint32_t j = 0u; j < (uint32_t)input_len; j++) {
+                text[ui->text_caret_pos + j] = input[j];
+            }
+            ui->text_caret_pos += (uint32_t)input_len;
+            len += (uint32_t)input_len;
             changed = 1u;
         }
     }
@@ -917,25 +917,31 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         uint8_t caret_visible = (enabled && focused &&
                                  ((peos_time_ns() / 500000000ull) & 1ull)) ? 1u : 0u;
         uint32_t input_caret_pos = (ui->text_caret_id == id) ? ui->text_caret_pos : len;
-        uint32_t max_scroll_col = (len > vis_chars) ? (len - vis_chars) : 0u;
-        if (ui->text_input_scroll_col > max_scroll_col) ui->text_input_scroll_col = max_scroll_col;
+        if (ui->text_input_scroll_col > len) ui->text_input_scroll_col = len;
+        if (ui->text_input_scroll_col > 0u && sl_ui_utf8_is_cont(text[ui->text_input_scroll_col])) {
+            ui->text_input_scroll_col = sl_ui_utf8_prev_pos(text, ui->text_input_scroll_col);
+        }
         if (focused) {
             if (input_caret_pos < ui->text_input_scroll_col) ui->text_input_scroll_col = input_caret_pos;
-            if (input_caret_pos >= ui->text_input_scroll_col + vis_chars) {
-                ui->text_input_scroll_col = input_caret_pos - vis_chars + 1u;
+            while (sl_ui_utf8_count_between(text, ui->text_input_scroll_col, input_caret_pos) >= vis_chars &&
+                   ui->text_input_scroll_col < input_caret_pos) {
+                ui->text_input_scroll_col = sl_ui_utf8_next_pos(text, ui->text_input_scroll_col, len);
             }
-            if (ui->text_input_scroll_col > max_scroll_col) ui->text_input_scroll_col = max_scroll_col;
         }
         uint32_t start = focused ? ui->text_input_scroll_col : 0u;
         char draw_buf[192];
         uint32_t n = 0u;
-        while (text[start + n] &&
-               n + 2u < (uint32_t)sizeof(draw_buf) &&
-               n < vis_chars) {
-            draw_buf[n] = text[start + n];
-            n++;
+        uint32_t pos = start;
+        uint32_t cols = 0u;
+        while (text[pos] && n + 5u < (uint32_t)sizeof(draw_buf) && cols < vis_chars) {
+            uint32_t next = sl_ui_utf8_next_pos(text, pos, len);
+            while (pos < next && n + 1u < (uint32_t)sizeof(draw_buf)) {
+                draw_buf[n++] = text[pos++];
+            }
+            cols++;
         }
-        uint32_t caret_draw = (input_caret_pos >= start) ? (input_caret_pos - start) : 0u;
+        uint32_t caret_draw = (input_caret_pos >= start) ?
+            sl_ui_utf8_count_between(text, start, input_caret_pos) : 0u;
         if (caret_draw > vis_chars) caret_draw = vis_chars;
         draw_buf[n] = '\0';
         uint32_t text_x = x + 6u;
@@ -982,14 +988,16 @@ static uint32_t sl_ui_text_max_line_len(const char *text) {
     if (!text) return 0u;
     uint32_t max_len = 0u;
     uint32_t cur_len = 0u;
-    for (uint32_t i = 0u;; i++) {
+    for (uint32_t i = 0u;;) {
         char c = text[i];
         if (c == '\0' || c == '\n') {
             if (cur_len > max_len) max_len = cur_len;
             if (c == '\0') break;
             cur_len = 0u;
+            i++;
             continue;
         }
+        i = sl_ui_utf8_next_pos(text, i, sl_ui_strlen(text));
         cur_len++;
     }
     return max_len;
@@ -998,11 +1006,14 @@ static uint32_t sl_ui_text_max_line_len(const char *text) {
 static uint32_t sl_ui_text_line_col_at(const char *text, uint32_t pos, uint32_t *col_out) {
     uint32_t line = 0u;
     uint32_t col = 0u;
-    for (uint32_t i = 0u; i < pos && text[i]; i++) {
+    uint32_t len = sl_ui_strlen(text);
+    for (uint32_t i = 0u; i < pos && text[i];) {
         if (text[i] == '\n') {
             line++;
             col = 0u;
+            i++;
         } else {
+            i = sl_ui_utf8_next_pos(text, i, len);
             col++;
         }
     }
@@ -1023,28 +1034,35 @@ static uint32_t sl_ui_text_pos_from_line_col(const char *text, uint32_t target_l
 
     uint32_t line_start = i;
     uint32_t line_end = sl_ui_text_line_end(text, line_start);
-    uint32_t line_len = line_end - line_start;
+    uint32_t line_len = sl_ui_utf8_count_between(text, line_start, line_end);
     if (target_col > line_len) target_col = line_len;
-    return line_start + target_col;
+    return sl_ui_utf8_advance_cols(text, line_start, line_end, target_col);
+}
+
+static void sl_ui_text_insert_bytes(char *text, uint32_t *len, uint32_t cap,
+                                    uint32_t *caret, const char *bytes, uint32_t byte_len) {
+    if (!text || !len || !caret || !bytes || byte_len == 0u || *len + byte_len >= cap) return;
+    for (uint32_t i = *len + 1u; i > *caret; i--) {
+        text[i + byte_len - 1u] = text[i - 1u];
+    }
+    for (uint32_t i = 0u; i < byte_len; i++) text[*caret + i] = bytes[i];
+    *len += byte_len;
+    *caret += byte_len;
 }
 
 static void sl_ui_text_insert_char(char *text, uint32_t *len, uint32_t cap, uint32_t *caret, char c) {
-    if (!text || !len || !caret || *len + 1u >= cap) return;
-    for (uint32_t i = *len + 1u; i > *caret; i--) {
-        text[i] = text[i - 1u];
-    }
-    text[*caret] = c;
-    (*len)++;
-    (*caret)++;
+    sl_ui_text_insert_bytes(text, len, cap, caret, &c, 1u);
 }
 
 static void sl_ui_text_backspace(char *text, uint32_t *len, uint32_t *caret) {
     if (!text || !len || !caret || *caret == 0u || *len == 0u) return;
-    for (uint32_t i = *caret - 1u; i < *len; i++) {
-        text[i] = text[i + 1u];
+    uint32_t prev = sl_ui_utf8_prev_pos(text, *caret);
+    uint32_t removed = *caret - prev;
+    for (uint32_t i = prev; i + removed <= *len; i++) {
+        text[i] = text[i + removed];
     }
-    (*caret)--;
-    (*len)--;
+    *caret = prev;
+    *len -= removed;
 }
 
 uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
@@ -1076,10 +1094,18 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         ui->text_area_scroll_col = 0u;
     }
     if (ui->text_caret_id == id && ui->text_caret_pos > len) ui->text_caret_pos = len;
+    if (ui->text_caret_id == id && ui->text_caret_pos > 0u &&
+        sl_ui_utf8_is_cont(text[ui->text_caret_pos])) {
+        ui->text_caret_pos = sl_ui_utf8_prev_pos(text, ui->text_caret_pos);
+    }
 
     uint8_t changed = 0u;
     for (uint8_t i = 0u; i < event_count; i++) {
         uint16_t code = sl_ui_norm_keycode(events[i].code);
+        if (sl_keyboard_event_is_altgr(&events[i])) {
+            ui->altgr_down = events[i].pressed ? 1u : 0u;
+            continue;
+        }
         if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) {
             ui->shift_down = events[i].pressed ? 1u : 0u;
             continue;
@@ -1088,7 +1114,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             ui->ctrl_down = events[i].pressed ? 1u : 0u;
             continue;
         }
-        if (code == PEOS_KEY_LALT || code == PEOS_KEY_RALT_NORM) {
+        if (code == PEOS_KEY_LALT) {
             ui->alt_down = events[i].pressed ? 1u : 0u;
             continue;
         }
@@ -1116,30 +1142,32 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             continue;
         }
         if (code == PEOS_KEY_LEFT_NORM) {
-            if (ui->text_caret_pos > 0u) ui->text_caret_pos--;
+            if (ui->text_caret_pos > 0u) ui->text_caret_pos = sl_ui_utf8_prev_pos(text, ui->text_caret_pos);
             continue;
         }
         if (code == PEOS_KEY_RIGHT_NORM) {
-            if (ui->text_caret_pos < len) ui->text_caret_pos++;
+            if (ui->text_caret_pos < len) ui->text_caret_pos = sl_ui_utf8_next_pos(text, ui->text_caret_pos, len);
             continue;
         }
         if (code == PEOS_KEY_UP_NORM || code == PEOS_KEY_DOWN_NORM) {
             uint32_t line_start = sl_ui_text_line_start(text, ui->text_caret_pos);
-            uint32_t col = ui->text_caret_pos - line_start;
+            uint32_t col = sl_ui_utf8_count_between(text, line_start, ui->text_caret_pos);
             if (code == PEOS_KEY_UP_NORM) {
                 if (line_start > 0u) {
                     uint32_t prev_end = line_start - 1u;
                     uint32_t prev_start = sl_ui_text_line_start(text, prev_end);
-                    uint32_t prev_len = prev_end - prev_start;
-                    ui->text_caret_pos = prev_start + ((col < prev_len) ? col : prev_len);
+                    uint32_t prev_len = sl_ui_utf8_count_between(text, prev_start, prev_end);
+                    ui->text_caret_pos = sl_ui_utf8_advance_cols(text, prev_start, prev_end,
+                                                                 (col < prev_len) ? col : prev_len);
                 }
             } else {
                 uint32_t line_end = sl_ui_text_line_end(text, line_start);
                 if (text[line_end] == '\n') {
                     uint32_t next_start = line_end + 1u;
                     uint32_t next_end = sl_ui_text_line_end(text, next_start);
-                    uint32_t next_len = next_end - next_start;
-                    ui->text_caret_pos = next_start + ((col < next_len) ? col : next_len);
+                    uint32_t next_len = sl_ui_utf8_count_between(text, next_start, next_end);
+                    ui->text_caret_pos = sl_ui_utf8_advance_cols(text, next_start, next_end,
+                                                                 (col < next_len) ? col : next_len);
                 }
             }
             continue;
@@ -1154,10 +1182,14 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             continue;
         }
 
-        char c = sl_ui_key_to_char(code, ui->shift_down);
-        if (c) {
+        char input[8];
+        size_t input_len = sl_keyboard_translate_event(&events[i], ui->shift_down,
+                                                       ui->altgr_down,
+                                                       input, sizeof(input));
+        if (input_len > 0u) {
             uint32_t old_len = len;
-            sl_ui_text_insert_char(text, &len, text_cap, &ui->text_caret_pos, c);
+            sl_ui_text_insert_bytes(text, &len, text_cap, &ui->text_caret_pos,
+                                    input, (uint32_t)input_len);
             if (len != old_len) changed = 1u;
         }
     }
@@ -1248,13 +1280,20 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         uint32_t i = start;
         uint32_t col = 0u;
         while (i < end && col < ui->text_area_scroll_col) {
-            i++;
+            i = sl_ui_utf8_next_pos(text, i, end);
             col++;
         }
-        while (i < end && dn + 1u < (uint32_t)sizeof(draw_buf) && dn < vis_cols) {
-            char c = text[i++];
-            if (c == '\t') c = ' ';
-            draw_buf[dn++] = c;
+        while (i < end && dn + 5u < (uint32_t)sizeof(draw_buf) && col < ui->text_area_scroll_col + vis_cols) {
+            uint32_t next = sl_ui_utf8_next_pos(text, i, end);
+            if (text[i] == '\t') {
+                draw_buf[dn++] = ' ';
+            } else {
+                while (i < next && dn + 1u < (uint32_t)sizeof(draw_buf)) {
+                    draw_buf[dn++] = text[i++];
+                }
+            }
+            i = next;
+            col++;
         }
 
         draw_buf[dn] = '\0';

@@ -34,6 +34,7 @@ typedef struct {
     char cursor_path[160];
     char background_path[160];
     char font_manifest_path[160];
+    char keyboard_layout_path[160];
     uint32_t display_width;
     uint32_t display_height;
     uint8_t animations_enabled;

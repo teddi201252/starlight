@@ -8,5 +8,6 @@ During image build, files from this folder are copied recursively under root:
 - `starlight/resources/config/settings.cfg` -> `/starlight/config/settings.cfg`
 - `starlight/resources/config/theme.cfg` -> `/starlight/config/theme.cfg`
 - `starlight/resources/fonts/default.font` -> `/starlight/fonts/default.font`
+- `starlight/resources/keymaps/*.keymap` -> `/starlight/keymaps/*.keymap`
 
 So Starlight can load both assets and config by filesystem path from `/starlight/...`.

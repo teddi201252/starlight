@@ -1,4 +1,5 @@
 #include "starlight_internal.h"
+#include "keyboard_layout.h"
 #include "starlight_input.h"
 #include "ui_sdk.h"
 #include "render/font.h"
@@ -397,6 +398,7 @@ static void sl_ensure_config_dirs(void) {
     (void)mkdir(SL_RESOURCE_ROOT, 0755);
     (void)mkdir(SL_RESOURCE_CONFIG_DIR, 0755);
     (void)mkdir(SL_RESOURCE_FONT_DIR, 0755);
+    (void)mkdir(SL_RESOURCE_KEYMAP_DIR, 0755);
 }
 
 static char *sl_load_text_file(const char *path, size_t max_bytes) {
@@ -454,6 +456,7 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "animations_enabled=1\n");
     (void)fprintf(f, "animation_speed_pct=100\n");
     (void)fprintf(f, "double_click_ms=300\n");
+    (void)fprintf(f, "keyboard_layout=us\n");
     (void)fprintf(f, "keyboard_repeat_delay_ms=250\n");
     (void)fprintf(f, "keyboard_repeat_rate_hz=30\n");
     (void)fclose(f);
@@ -554,6 +557,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     sl_copy_text(ctx->background_path, sizeof(ctx->background_path), SL_RESOURCE_BACKGROUND_ALT);
     sl_copy_text(ctx->cursor_path, sizeof(ctx->cursor_path), SL_RESOURCE_CURSOR);
     sl_copy_text(ctx->font_manifest_path, sizeof(ctx->font_manifest_path), SL_RESOURCE_FONT_DEFAULT);
+    sl_copy_text(ctx->keyboard_layout_path, sizeof(ctx->keyboard_layout_path), "us");
     ctx->hw_cursor_scale_pct = SL_HW_CURSOR_SCALE_DEFAULT;
     ctx->animations_enabled = SL_ANIMATIONS_ENABLED_DEFAULT;
     ctx->animation_speed_pct = SL_ANIMATION_SPEED_DEFAULT;
@@ -618,6 +622,8 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                         if (n > SL_DOUBLE_CLICK_MS_MAX) n = SL_DOUBLE_CLICK_MS_MAX;
                         ctx->double_click_ms = n;
                     }
+                } else if (strcmp(key, "keyboard_layout") == 0 && val[0]) {
+                    sl_copy_text(ctx->keyboard_layout_path, sizeof(ctx->keyboard_layout_path), val);
                 } else if (strcmp(key, "keyboard_repeat_delay_ms") == 0) {
                     uint32_t n = 0;
                     if (sl_parse_u32(val, &n)) {
@@ -710,6 +716,7 @@ static void sl_apply_keyboard_config(const sl_ctx_t *ctx) {
     if (delay_ms > SL_KEY_REPEAT_DELAY_MS_MAX) delay_ms = SL_KEY_REPEAT_DELAY_MS_MAX;
     if (rate_hz < SL_KEY_REPEAT_RATE_HZ_MIN) rate_hz = SL_KEY_REPEAT_RATE_HZ_MIN;
     if (rate_hz > SL_KEY_REPEAT_RATE_HZ_MAX) rate_hz = SL_KEY_REPEAT_RATE_HZ_MAX;
+    (void)sl_keyboard_layout_load(ctx->keyboard_layout_path);
     sl_input_set_key_repeat_config(delay_ms, rate_hz);
 }
 

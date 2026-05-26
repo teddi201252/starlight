@@ -50,6 +50,7 @@ typedef struct {
     uint8_t shift_down;
     uint8_t ctrl_down;
     uint8_t alt_down;
+    uint8_t altgr_down;
     uint8_t super_down;
     uint32_t text_caret_id;
     uint32_t text_caret_pos;
