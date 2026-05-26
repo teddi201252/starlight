@@ -1,6 +1,7 @@
 #include "app_host.h"
 #include "starlight_internal.h"
 #include "context_menu_renderer.h"
+#include "keyboard_layout.h"
 #include "ui_sdk.h"
 #include "render/image_decode.h"
 
@@ -200,6 +201,7 @@ typedef struct {
     uint8_t shift_down;
     uint8_t ctrl_down;
     uint8_t alt_down;
+    uint8_t altgr_down;
     uint8_t super_down;
     uint8_t initialized;
     int64_t child_pid;
@@ -1906,60 +1908,6 @@ static void orbit_send_input(orbit_shell_t *shell, const char *buf, size_t len) 
     }
 }
 
-static char orbit_key_to_char(uint16_t code, uint8_t shift) {
-    switch (code) {
-        case PEOS_KEY_A: return shift ? 'A' : 'a';
-        case PEOS_KEY_B: return shift ? 'B' : 'b';
-        case PEOS_KEY_C: return shift ? 'C' : 'c';
-        case PEOS_KEY_D: return shift ? 'D' : 'd';
-        case PEOS_KEY_E: return shift ? 'E' : 'e';
-        case PEOS_KEY_F: return shift ? 'F' : 'f';
-        case PEOS_KEY_G: return shift ? 'G' : 'g';
-        case PEOS_KEY_H: return shift ? 'H' : 'h';
-        case PEOS_KEY_I: return shift ? 'I' : 'i';
-        case PEOS_KEY_J: return shift ? 'J' : 'j';
-        case PEOS_KEY_K: return shift ? 'K' : 'k';
-        case PEOS_KEY_L: return shift ? 'L' : 'l';
-        case PEOS_KEY_M: return shift ? 'M' : 'm';
-        case PEOS_KEY_N: return shift ? 'N' : 'n';
-        case PEOS_KEY_O: return shift ? 'O' : 'o';
-        case PEOS_KEY_P: return shift ? 'P' : 'p';
-        case PEOS_KEY_Q: return shift ? 'Q' : 'q';
-        case PEOS_KEY_R: return shift ? 'R' : 'r';
-        case PEOS_KEY_S: return shift ? 'S' : 's';
-        case PEOS_KEY_T: return shift ? 'T' : 't';
-        case PEOS_KEY_U: return shift ? 'U' : 'u';
-        case PEOS_KEY_V: return shift ? 'V' : 'v';
-        case PEOS_KEY_W: return shift ? 'W' : 'w';
-        case PEOS_KEY_X: return shift ? 'X' : 'x';
-        case PEOS_KEY_Y: return shift ? 'Y' : 'y';
-        case PEOS_KEY_Z: return shift ? 'Z' : 'z';
-        case PEOS_KEY_SPACE: return ' ';
-        case 0x0002u: return shift ? '!' : '1';
-        case 0x0003u: return shift ? '@' : '2';
-        case 0x0004u: return shift ? '#' : '3';
-        case 0x0005u: return shift ? '$' : '4';
-        case 0x0006u: return shift ? '%' : '5';
-        case 0x0007u: return shift ? '^' : '6';
-        case 0x0008u: return shift ? '&' : '7';
-        case 0x0009u: return shift ? '*' : '8';
-        case 0x000Au: return shift ? '(' : '9';
-        case 0x000Bu: return shift ? ')' : '0';
-        case 0x000Cu: return shift ? '_' : '-';
-        case 0x000Du: return shift ? '+' : '=';
-        case 0x001Au: return shift ? '{' : '[';
-        case 0x001Bu: return shift ? '}' : ']';
-        case 0x0027u: return shift ? ':' : ';';
-        case 0x0028u: return shift ? '"' : '\'';
-        case 0x0029u: return shift ? '~' : '`';
-        case 0x002Bu: return shift ? '|' : '\\';
-        case 0x0033u: return shift ? '<' : ',';
-        case 0x0034u: return shift ? '>' : '.';
-        case 0x0035u: return shift ? '?' : '/';
-        default: return '\0';
-    }
-}
-
 static uint16_t orbit_norm_keycode(uint16_t code) {
     if ((code & 0xFF00u) == 0xE000u) {
         return (uint16_t)(code & 0x00FFu);
@@ -1994,11 +1942,13 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
     uint16_t code = orbit_norm_keycode(event->code);
     uint8_t key_ix = (uint8_t)(code & 0xFFu);
 
-    if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) {
+    if (sl_keyboard_event_is_altgr(event)) {
+        shell->altgr_down = event->pressed ? 1u : 0u;
+    } else if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) {
         shell->shift_down = event->pressed ? 1u : 0u;
     } else if (code == PEOS_KEY_LCTRL || code == PEOS_KEY_RCTRL_NORM) {
         shell->ctrl_down = event->pressed ? 1u : 0u;
-    } else if (code == PEOS_KEY_LALT || code == PEOS_KEY_RALT_NORM) {
+    } else if (code == PEOS_KEY_LALT) {
         shell->alt_down = event->pressed ? 1u : 0u;
     } else if (code == PEOS_KEY_LSUPER_NORM || code == PEOS_KEY_RSUPER_NORM) {
         shell->super_down = event->pressed ? 1u : 0u;
@@ -2023,7 +1973,7 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
 
     if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT ||
         code == PEOS_KEY_LCTRL || code == PEOS_KEY_RCTRL_NORM ||
-        code == PEOS_KEY_LALT || code == PEOS_KEY_RALT_NORM ||
+        code == PEOS_KEY_LALT || sl_keyboard_event_is_altgr(event) ||
         code == PEOS_KEY_LSUPER_NORM || code == PEOS_KEY_RSUPER_NORM) {
         return;
     }
@@ -2046,13 +1996,13 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         return;
     }
 
-    char c = orbit_key_to_char(code, shell->shift_down);
-    if (!c && code >= 32u && code <= 126u) {
-        c = (char)code;
-    }
-    if (!c) return;
+    char input[8];
+    size_t input_len = sl_keyboard_translate_event(event, shell->shift_down,
+                                                   shell->altgr_down,
+                                                   input, sizeof(input));
+    if (input_len == 0u) return;
 
-    orbit_send_input(shell, &c, 1u);
+    orbit_send_input(shell, input, input_len);
 }
 
 static void orbit_select_option_text(const char *options_pipe, uint32_t selected,
