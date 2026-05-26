@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.10.0] - 2026-05-26
+- Add configurable keyboard layouts
+
 ## [0.9.0] - 2026-05-25
 - Add TrueType/OpenType vector font rendering
 
