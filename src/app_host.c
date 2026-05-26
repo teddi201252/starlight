@@ -7,6 +7,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #define ORBIT_MAX_LINES 256u
@@ -17,13 +18,18 @@
 #define ORBIT_ARGS_CHARS 160u
 #define ORBIT_KEY_BACKSPACE PEOS_KEY_BACKSPACE
 #define ORBIT_APP_SLOTS 8u
-#define ORBIT_MAX_POLL_READS 8u
+#define ORBIT_MAX_POLL_READS 32u
 #define ORBIT_POLL_INTERVAL_ACTIVE_NS 2000000ull
 #define ORBIT_POLL_INTERVAL_BUSY_NS   4000000ull
 #define ORBIT_POLL_INTERVAL_IDLE_NS  16000000ull
 #define ORBIT_UI_CMD_SOFT_CHUNK 64u
 #define ORBIT_UI_CMD_HARD_MAX 1024u
 #define ORBIT_SLUI_PROTO_VERSION 1u
+#define ORBIT_FB_MAX_WIDTH 4096u
+#define ORBIT_FB_MAX_HEIGHT 4096u
+#define ORBIT_FB_MAX_BYTES (32u * 1024u * 1024u)
+#define ORBIT_FB_FORMAT_XRGB8888 1u
+#define ORBIT_FB_FORMAT_RGB565 2u
 
 #define ORBIT_SLUI_CAP_LABEL        (1u << 0)
 #define ORBIT_SLUI_CAP_BUTTON       (1u << 1)
@@ -192,6 +198,25 @@ typedef struct {
 } orbit_slot_cfg_t;
 
 typedef struct {
+    uint8_t active;
+    uint8_t receiving;
+    uint8_t discard;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint8_t format;
+    uint8_t *pixels;
+    size_t pixels_len;
+    size_t pixels_cap;
+    uint32_t pending_width;
+    uint32_t pending_height;
+    uint32_t pending_pitch;
+    uint8_t pending_format;
+    size_t pending_len;
+    size_t pending_off;
+} orbit_surface_t;
+
+typedef struct {
     char lines[ORBIT_MAX_LINES][ORBIT_LINE_CHARS];
     size_t line_head;
     size_t line_count;
@@ -213,6 +238,7 @@ typedef struct {
     char exec_path[ORBIT_EXEC_CHARS];
     char exec_args[ORBIT_ARGS_CHARS];
     orbit_ui_state_t ui;
+    orbit_surface_t surface;
     uint8_t esc_active;
     uint8_t csi_active;
     char csi_buf[16];
@@ -270,6 +296,34 @@ static void orbit_pending_line_free(orbit_shell_t *shell) {
     }
     shell->pending_cap = 0u;
     shell->pending_len = 0u;
+}
+
+static void orbit_surface_reset(orbit_shell_t *shell) {
+    if (!shell) return;
+    shell->surface.active = 0u;
+    shell->surface.receiving = 0u;
+    shell->surface.discard = 0u;
+    shell->surface.width = 0u;
+    shell->surface.height = 0u;
+    shell->surface.pitch = 0u;
+    shell->surface.format = 0u;
+    shell->surface.pixels_len = 0u;
+    shell->surface.pending_width = 0u;
+    shell->surface.pending_height = 0u;
+    shell->surface.pending_pitch = 0u;
+    shell->surface.pending_format = 0u;
+    shell->surface.pending_len = 0u;
+    shell->surface.pending_off = 0u;
+}
+
+static void orbit_surface_free(orbit_shell_t *shell) {
+    if (!shell) return;
+    if (shell->surface.pixels) {
+        free(shell->surface.pixels);
+        shell->surface.pixels = NULL;
+    }
+    shell->surface.pixels_cap = 0u;
+    orbit_surface_reset(shell);
 }
 
 static void orbit_copy_str(char *dst, size_t cap, const char *src) {
@@ -400,6 +454,22 @@ static int orbit_parse_u32(const char **ps, uint32_t *out) {
     return 1;
 }
 
+static int orbit_parse_size(const char **ps, size_t *out) {
+    if (!ps || !*ps || !out) return 0;
+    const char *s = orbit_skip_spaces(*ps);
+    if (!s || *s < '0' || *s > '9') return 0;
+    size_t v = 0u;
+    while (*s >= '0' && *s <= '9') {
+        size_t digit = (size_t)(*s - '0');
+        if (v > ((SIZE_MAX - digit) / 10u)) return 0;
+        v = (v * 10u) + digit;
+        s++;
+    }
+    *out = v;
+    *ps = s;
+    return 1;
+}
+
 static int orbit_token_is(const char *tok, size_t tok_len, const char *lit) {
     if (!tok || !lit) return 0;
     size_t i = 0u;
@@ -498,6 +568,123 @@ static void orbit_send_host_hello(orbit_shell_t *shell) {
         "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT FONT_SIZE EVENT_DOUBLE_CLICK CONTEXT_MENU EVENT_CONTEXT_MENU FOCUS\n";
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, peos_strlen(msg));
     shell->ui.host_hello_sent = 1u;
+}
+
+static void orbit_send_fb_host_windowed(orbit_shell_t *shell) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    static const char msg[] = "@ORBITFB HOST WINDOWED\n";
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, sizeof(msg) - 1u);
+}
+
+static void orbit_send_fb_key(orbit_shell_t *shell, uint16_t code, uint8_t pressed) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[64];
+    int n = snprintf(msg, sizeof(msg), "@ORBITFB KEY %u %u\n",
+                     (unsigned)code, pressed ? 1u : 0u);
+    if (n <= 0 || (size_t)n >= sizeof(msg)) return;
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
+}
+
+static int orbit_surface_reserve(orbit_shell_t *shell, size_t need) {
+    if (!shell) return 0;
+    if (need == 0u) return 0;
+    if (need > ORBIT_FB_MAX_BYTES) return 0;
+    if (shell->surface.pixels && shell->surface.pixels_cap >= need) return 1;
+    uint8_t *buf = (uint8_t *)realloc(shell->surface.pixels, need);
+    if (!buf) return 0;
+    shell->surface.pixels = buf;
+    shell->surface.pixels_cap = need;
+    return 1;
+}
+
+static int orbit_fb_handle_line(orbit_shell_t *shell, const char *line) {
+    if (!shell || !line) return 0;
+    const char *p = line;
+    const char *token = "@ORBITFB";
+    size_t pos = 0u;
+    uint8_t found = 0u;
+    while (p[pos]) {
+        size_t i = 0u;
+        while (token[i] && p[pos + i] == token[i]) i++;
+        if (token[i] == '\0') {
+            p = p + pos + i;
+            found = 1u;
+            break;
+        }
+        pos++;
+    }
+    if (!found) return 0;
+
+    if (*p == ':') p++;
+    p = orbit_skip_spaces(p);
+
+    const char *cmd_tok = NULL;
+    size_t cmd_len = 0u;
+    if (!orbit_next_token(&p, &cmd_tok, &cmd_len)) return 1;
+
+    if (orbit_token_is(cmd_tok, cmd_len, "HELLO")) {
+        orbit_send_fb_host_windowed(shell);
+        return 1;
+    }
+
+    if (orbit_token_is(cmd_tok, cmd_len, "FRAME")) {
+        const char *fmt_tok = NULL;
+        size_t fmt_len = 0u;
+        uint32_t w = 0u, h = 0u, pitch = 0u;
+        uint8_t format = 0u;
+        uint32_t bytespp = 0u;
+        size_t len = 0u;
+        if (!orbit_next_token(&p, &fmt_tok, &fmt_len) ||
+            !orbit_parse_u32(&p, &w) ||
+            !orbit_parse_u32(&p, &h) ||
+            !orbit_parse_u32(&p, &pitch) ||
+            !orbit_parse_size(&p, &len)) {
+            orbit_surface_reset(shell);
+            return 1;
+        }
+        if (orbit_token_is(fmt_tok, fmt_len, "XRGB8888")) {
+            format = ORBIT_FB_FORMAT_XRGB8888;
+            bytespp = 4u;
+        } else if (orbit_token_is(fmt_tok, fmt_len, "RGB565")) {
+            format = ORBIT_FB_FORMAT_RGB565;
+            bytespp = 2u;
+        } else {
+            orbit_surface_reset(shell);
+            return 1;
+        }
+
+        if (w == 0u || h == 0u ||
+            w > ORBIT_FB_MAX_WIDTH || h > ORBIT_FB_MAX_HEIGHT ||
+            pitch < (w * bytespp) || len == 0u ||
+            len > ORBIT_FB_MAX_BYTES ||
+            len != ((size_t)pitch * (size_t)h)) {
+            orbit_surface_reset(shell);
+            shell->surface.discard = 1u;
+            shell->surface.pending_len = len;
+            shell->surface.pending_off = 0u;
+            return 1;
+        }
+
+        if (!orbit_surface_reserve(shell, len)) {
+            orbit_surface_reset(shell);
+            shell->surface.discard = 1u;
+            shell->surface.pending_len = len;
+            shell->surface.pending_off = 0u;
+            return 1;
+        }
+
+        shell->surface.receiving = 1u;
+        shell->surface.discard = 0u;
+        shell->surface.pending_width = w;
+        shell->surface.pending_height = h;
+        shell->surface.pending_pitch = pitch;
+        shell->surface.pending_format = format;
+        shell->surface.pending_len = len;
+        shell->surface.pending_off = 0u;
+        return 1;
+    }
+
+    return 1;
 }
 
 static void orbit_ui_cmd_release(orbit_ui_cmd_t *cmd) {
@@ -1684,6 +1871,7 @@ static int orbit_feed_ansi(orbit_shell_t *shell, char c) {
 static void orbit_reset_buffer(orbit_shell_t *shell) {
     if (!shell) return;
     orbit_ui_storage_free(&shell->ui);
+    orbit_surface_reset(shell);
     (void)orbit_pending_line_reserve(shell, ORBIT_PENDING_LINE_INITIAL_CHARS);
     orbit_clear_text_buffer(shell);
     shell->esc_active = 0u;
@@ -1720,8 +1908,11 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
     if (c == '\n') {
         const char *line = (shell->pending_line) ? shell->pending_line : "";
         if (shell->pending_line) shell->pending_line[shell->pending_len] = '\0';
-        if (!orbit_ui_handle_line(shell, line)) {
-            orbit_push_line(shell, line);
+        if (!orbit_fb_handle_line(shell, line)) {
+            shell->surface.active = 0u;
+            if (!orbit_ui_handle_line(shell, line)) {
+                orbit_push_line(shell, line);
+            }
         }
         orbit_pending_line_reset(shell);
         return;
@@ -1736,6 +1927,9 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
     }
 
     if ((uint8_t)c < 32u) return;
+    if (shell->surface.active && shell->pending_len == 0u && c != '@') {
+        shell->surface.active = 0u;
+    }
     if (!orbit_pending_line_reserve(shell, shell->pending_len + 2u)) {
         if (shell->pending_line && shell->pending_len > 0u) {
             shell->pending_line[shell->pending_len] = '\0';
@@ -1750,8 +1944,37 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
 
 static void orbit_feed_text(orbit_shell_t *shell, const char *text, size_t len) {
     if (!shell || !text || len == 0u) return;
-    for (size_t i = 0u; i < len; i++) {
+    size_t i = 0u;
+    while (i < len) {
+        if (shell->surface.receiving || shell->surface.discard) {
+            size_t remaining = shell->surface.pending_len - shell->surface.pending_off;
+            size_t avail = len - i;
+            size_t take = (avail < remaining) ? avail : remaining;
+
+            if (take > 0u && shell->surface.receiving && shell->surface.pixels) {
+                peos_memcpy(shell->surface.pixels + shell->surface.pending_off, text + i, take);
+            }
+            shell->surface.pending_off += take;
+            i += take;
+
+            if (shell->surface.pending_off >= shell->surface.pending_len) {
+                if (shell->surface.receiving) {
+                    shell->surface.width = shell->surface.pending_width;
+                    shell->surface.height = shell->surface.pending_height;
+                    shell->surface.pitch = shell->surface.pending_pitch;
+                    shell->surface.format = shell->surface.pending_format;
+                    shell->surface.pixels_len = shell->surface.pending_len;
+                    shell->surface.active = 1u;
+                }
+                shell->surface.receiving = 0u;
+                shell->surface.discard = 0u;
+                shell->surface.pending_len = 0u;
+                shell->surface.pending_off = 0u;
+            }
+            continue;
+        }
         orbit_feed_char(shell, text[i]);
+        i++;
     }
 }
 
@@ -1851,6 +2074,7 @@ static void orbit_mark_child_exited(orbit_shell_t *shell) {
     orbit_close_fds(shell);
     shell->child_pid = -1;
     orbit_ui_storage_free(&shell->ui);
+    orbit_surface_reset(shell);
     peos_memset(&shell->ui, 0, sizeof(shell->ui));
     orbit_push_line(shell, "[app exited] Press Enter to restart.");
 }
@@ -1860,7 +2084,7 @@ static uint8_t orbit_poll_output(orbit_shell_t *shell) {
 
     uint8_t changed = 0u;
 
-    char buf[256];
+    char buf[4096];
     for (uint32_t i = 0u; i < ORBIT_MAX_POLL_READS; i++) {
         uint64_t n = peos_fread_nb((uint64_t)shell->child_stdout_fd, buf, sizeof(buf));
         if ((int64_t)n < 0) {
@@ -1975,6 +2199,14 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         code == PEOS_KEY_LCTRL || code == PEOS_KEY_RCTRL_NORM ||
         code == PEOS_KEY_LALT || sl_keyboard_event_is_altgr(event) ||
         code == PEOS_KEY_LSUPER_NORM || code == PEOS_KEY_RSUPER_NORM) {
+        if (shell->surface.active || shell->surface.receiving) {
+            orbit_send_fb_key(shell, code, event->pressed ? 1u : 0u);
+        }
+        return;
+    }
+
+    if (shell->surface.active || shell->surface.receiving) {
+        orbit_send_fb_key(shell, code, event->pressed ? 1u : 0u);
         return;
     }
 
@@ -2842,6 +3074,120 @@ static void orbit_draw_grad2d(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t 
     }
 }
 
+static uint32_t orbit_read_xrgb8888(const uint8_t *p) {
+    if (!p) return 0u;
+    return ((uint32_t)p[0]) |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static uint32_t orbit_read_rgb565(const uint8_t *p) {
+    if (!p) return 0u;
+    uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+    uint32_t r = (v >> 11) & 0x1Fu;
+    uint32_t g = (v >> 5) & 0x3Fu;
+    uint32_t b = v & 0x1Fu;
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+    return (r << 16) | (g << 8) | b;
+}
+
+static uint32_t orbit_surface_read_rgb(const orbit_surface_t *surface, const uint8_t *src_row, uint32_t sx) {
+    if (!surface || !src_row) return 0u;
+    if (surface->format == ORBIT_FB_FORMAT_RGB565) {
+        return orbit_read_rgb565(src_row + (size_t)sx * 2u);
+    }
+    return orbit_read_xrgb8888(src_row + (size_t)sx * 4u);
+}
+
+static void orbit_draw_surface(sl_ctx_t *ctx, const orbit_shell_t *shell,
+                               uint32_t body_x, uint32_t body_y,
+                               uint32_t body_w, uint32_t body_h) {
+    if (!ctx || !shell || !shell->surface.active || !shell->surface.pixels) return;
+    uint32_t src_bytespp = (shell->surface.format == ORBIT_FB_FORMAT_RGB565) ? 2u : 4u;
+    if (shell->surface.format != ORBIT_FB_FORMAT_XRGB8888 &&
+        shell->surface.format != ORBIT_FB_FORMAT_RGB565) {
+        return;
+    }
+    if (shell->surface.width == 0u || shell->surface.height == 0u ||
+        shell->surface.pitch < shell->surface.width * src_bytespp ||
+        shell->surface.pixels_len < (size_t)shell->surface.pitch * (size_t)shell->surface.height) {
+        return;
+    }
+    if (body_w == 0u || body_h == 0u) return;
+
+    uint32_t dst_w = body_w;
+    uint32_t dst_h = (uint32_t)(((uint64_t)dst_w * (uint64_t)shell->surface.height) /
+                                (uint64_t)shell->surface.width);
+    if (dst_h == 0u) dst_h = 1u;
+    if (dst_h > body_h) {
+        dst_h = body_h;
+        dst_w = (uint32_t)(((uint64_t)dst_h * (uint64_t)shell->surface.width) /
+                           (uint64_t)shell->surface.height);
+        if (dst_w == 0u) dst_w = 1u;
+    }
+
+    uint32_t dst_x = body_x + ((body_w > dst_w) ? ((body_w - dst_w) / 2u) : 0u);
+    uint32_t dst_y = body_y + ((body_h > dst_h) ? ((body_h - dst_h) / 2u) : 0u);
+
+    if (!ctx->frame || (ctx->bytespp != 3u && ctx->bytespp != 4u)) return;
+
+    uint32_t draw_x0 = dst_x;
+    uint32_t draw_y0 = dst_y;
+    uint32_t draw_x1 = dst_x + dst_w;
+    uint32_t draw_y1 = dst_y + dst_h;
+    uint32_t body_x1 = body_x + body_w;
+    uint32_t body_y1 = body_y + body_h;
+    if (draw_x0 < body_x) draw_x0 = body_x;
+    if (draw_y0 < body_y) draw_y0 = body_y;
+    if (draw_x1 > body_x1) draw_x1 = body_x1;
+    if (draw_y1 > body_y1) draw_y1 = body_y1;
+    if (draw_x1 > ctx->fb.width) draw_x1 = ctx->fb.width;
+    if (draw_y1 > ctx->fb.height) draw_y1 = ctx->fb.height;
+    if (draw_x1 <= draw_x0 || draw_y1 <= draw_y0) return;
+
+    uint32_t x_step = (uint32_t)(((uint64_t)shell->surface.width << 16) / (uint64_t)dst_w);
+    uint32_t y_step = (uint32_t)(((uint64_t)shell->surface.height << 16) / (uint64_t)dst_h);
+    if (x_step == 0u) x_step = 1u;
+    if (y_step == 0u) y_step = 1u;
+
+    uint32_t y_fp = (draw_y0 - dst_y) * y_step;
+    for (uint32_t y = draw_y0; y < draw_y1; y++) {
+        uint32_t sy = y_fp >> 16;
+        if (sy >= shell->surface.height) sy = shell->surface.height - 1u;
+        const uint8_t *src_row = shell->surface.pixels + (size_t)sy * (size_t)shell->surface.pitch;
+        uint8_t *dst_row = ctx->frame + (size_t)y * ctx->row_stride +
+                           (size_t)draw_x0 * (size_t)ctx->bytespp;
+        uint32_t x_fp = (draw_x0 - dst_x) * x_step;
+
+        if (ctx->bytespp == 4u) {
+            uint32_t *dst32 = (uint32_t *)(void *)dst_row;
+            for (uint32_t x = draw_x0; x < draw_x1; x++) {
+                uint32_t sx = x_fp >> 16;
+                if (sx >= shell->surface.width) sx = shell->surface.width - 1u;
+                uint32_t px = orbit_surface_read_rgb(&shell->surface, src_row, sx);
+                dst32[x - draw_x0] = 0xFF000000u | (px & 0x00FFFFFFu);
+                x_fp += x_step;
+            }
+        } else {
+            uint8_t *dst = dst_row;
+            for (uint32_t x = draw_x0; x < draw_x1; x++) {
+                uint32_t sx = x_fp >> 16;
+                if (sx >= shell->surface.width) sx = shell->surface.width - 1u;
+                uint32_t px = orbit_surface_read_rgb(&shell->surface, src_row, sx);
+                dst[0] = (uint8_t)(px & 0xFFu);
+                dst[1] = (uint8_t)((px >> 8) & 0xFFu);
+                dst[2] = (uint8_t)((px >> 16) & 0xFFu);
+                dst += 3u;
+                x_fp += x_step;
+            }
+        }
+        y_fp += y_step;
+    }
+}
+
 static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdata) {
     orbit_shell_t *shell = (orbit_shell_t *)userdata;
     if (!ctx || !win || !shell) return;
@@ -2856,6 +3202,11 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     sl_fill_rect(ctx, body_x, body_y, body_w, body_h, 12u, 12u, 12u);
     const char *title = shell->title[0] ? shell->title : "App";
     sl_draw_text(ctx, win->x + 6u, win->y + 6u, title, 20u, 20u, 20u);
+
+    if (shell->surface.active) {
+        orbit_draw_surface(ctx, shell, body_x, body_y, body_w, body_h);
+        return;
+    }
 
     if (shell->ui.enabled && shell->ui.committed) {
         uint32_t select_open_before = shell->ui.ui.select_open_id;
@@ -3507,6 +3858,7 @@ void sl_app_host_reset(void) {
         orbit_stop_process(&g_orbit[i]);
         orbit_ui_storage_free(&g_orbit[i].ui);
         orbit_pending_line_free(&g_orbit[i]);
+        orbit_surface_free(&g_orbit[i]);
         peos_memset(&g_orbit[i], 0, sizeof(g_orbit[i]));
         orbit_cfg_apply_to_shell(i);
         g_orbit[i].child_pid = -1;
@@ -3542,6 +3894,7 @@ app_instance_t *sl_app_host_instance_at(size_t index) {
     if (!g_orbit[index].initialized) {
         orbit_ui_storage_free(&g_orbit[index].ui);
         orbit_pending_line_free(&g_orbit[index]);
+        orbit_surface_free(&g_orbit[index]);
         peos_memset(&g_orbit[index], 0, sizeof(g_orbit[index]));
         orbit_cfg_apply_to_shell(index);
         g_orbit[index].child_pid = -1;
