@@ -4,6 +4,7 @@
 #include "keyboard_layout.h"
 #include "ui_sdk.h"
 #include "render/image_decode.h"
+#include "peos/orbitfb.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -28,8 +29,9 @@
 #define ORBIT_FB_MAX_WIDTH 4096u
 #define ORBIT_FB_MAX_HEIGHT 4096u
 #define ORBIT_FB_MAX_BYTES (32u * 1024u * 1024u)
-#define ORBIT_FB_FORMAT_XRGB8888 1u
-#define ORBIT_FB_FORMAT_RGB565 2u
+#define ORBIT_FB_SHM_BYTES (4u * 1024u * 1024u)
+#define ORBIT_FB_FORMAT_XRGB8888 PEOS_ORBITFB_FORMAT_XRGB8888
+#define ORBIT_FB_FORMAT_RGB565 PEOS_ORBITFB_FORMAT_RGB565
 
 #define ORBIT_SLUI_CAP_LABEL        (1u << 0)
 #define ORBIT_SLUI_CAP_BUTTON       (1u << 1)
@@ -205,9 +207,14 @@ typedef struct {
     uint32_t height;
     uint32_t pitch;
     uint8_t format;
+    uint8_t pixels_owned;
     uint8_t *pixels;
     size_t pixels_len;
     size_t pixels_cap;
+    uint64_t shared_id;
+    uint8_t *shared_base;
+    size_t shared_len;
+    peos_orbitfb_shm_t *shared_header;
     uint32_t pending_width;
     uint32_t pending_height;
     uint32_t pending_pitch;
@@ -300,6 +307,10 @@ static void orbit_pending_line_free(orbit_shell_t *shell) {
 
 static void orbit_surface_reset(orbit_shell_t *shell) {
     if (!shell) return;
+    if (!shell->surface.pixels_owned) {
+        shell->surface.pixels = NULL;
+        shell->surface.pixels_cap = 0u;
+    }
     shell->surface.active = 0u;
     shell->surface.receiving = 0u;
     shell->surface.discard = 0u;
@@ -318,12 +329,30 @@ static void orbit_surface_reset(orbit_shell_t *shell) {
 
 static void orbit_surface_free(orbit_shell_t *shell) {
     if (!shell) return;
-    if (shell->surface.pixels) {
+    if (shell->surface.pixels_owned && shell->surface.pixels) {
         free(shell->surface.pixels);
-        shell->surface.pixels = NULL;
     }
+    if (shell->surface.shared_base && shell->surface.shared_len) {
+        (void)peos_munmap((uint64_t)(uintptr_t)shell->surface.shared_base,
+                           (uint64_t)shell->surface.shared_len);
+    }
+    shell->surface.pixels = NULL;
     shell->surface.pixels_cap = 0u;
+    shell->surface.pixels_owned = 0u;
+    shell->surface.shared_base = NULL;
+    shell->surface.shared_len = 0u;
+    shell->surface.shared_header = NULL;
     orbit_surface_reset(shell);
+}
+
+static void orbit_surface_destroy_shared_object(orbit_shell_t *shell) {
+    if (!shell) return;
+    uint64_t id = shell->surface.shared_id;
+    orbit_surface_free(shell);
+    if (id != 0u) {
+        (void)peos_shm_destroy(id);
+    }
+    shell->surface.shared_id = 0u;
 }
 
 static void orbit_copy_str(char *dst, size_t cap, const char *src) {
@@ -585,15 +614,78 @@ static void orbit_send_fb_key(orbit_shell_t *shell, uint16_t code, uint8_t press
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
 }
 
+static int orbit_surface_setup_shared(orbit_shell_t *shell) {
+    if (!shell) return 0;
+    if (shell->surface.shared_base && shell->surface.shared_header) return 1;
+
+    peos_shm_map_t map;
+    if (shell->surface.shared_id != 0u) {
+        if (peos_shm_map(shell->surface.shared_id, &map) == 0 && map.addr != 0u &&
+            map.len >= PEOS_ORBITFB_SHM_HEADER_BYTES + 2u * 4096u) {
+            shell->surface.shared_base = (uint8_t *)(uintptr_t)map.addr;
+            shell->surface.shared_len = (size_t)map.len;
+            shell->surface.shared_header = (peos_orbitfb_shm_t *)(void *)shell->surface.shared_base;
+            return 1;
+        }
+        shell->surface.shared_id = 0u;
+    }
+
+    int64_t id = peos_shm_create(ORBIT_FB_SHM_BYTES);
+    if (id <= 0) return 0;
+
+    if (peos_shm_map((uint64_t)id, &map) != 0 || map.addr == 0u ||
+        map.len < PEOS_ORBITFB_SHM_HEADER_BYTES + 2u * 4096u) {
+        (void)peos_shm_destroy((uint64_t)id);
+        return 0;
+    }
+
+    shell->surface.shared_id = (uint64_t)id;
+    shell->surface.shared_base = (uint8_t *)(uintptr_t)map.addr;
+    shell->surface.shared_len = (size_t)map.len;
+    shell->surface.shared_header = (peos_orbitfb_shm_t *)(void *)shell->surface.shared_base;
+
+    peos_memset(shell->surface.shared_base, 0, PEOS_ORBITFB_SHM_HEADER_BYTES);
+    shell->surface.shared_header->magic = PEOS_ORBITFB_SHM_MAGIC;
+    shell->surface.shared_header->version = PEOS_ORBITFB_SHM_VERSION;
+    shell->surface.shared_header->slot_count = PEOS_ORBITFB_SHM_SLOTS;
+    shell->surface.shared_header->slot_size =
+        (uint32_t)((shell->surface.shared_len - PEOS_ORBITFB_SHM_HEADER_BYTES) /
+                   PEOS_ORBITFB_SHM_SLOTS);
+    return 1;
+}
+
+static void orbit_send_fb_host_shared(orbit_shell_t *shell) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    if (!orbit_surface_setup_shared(shell)) {
+        orbit_send_fb_host_windowed(shell);
+        return;
+    }
+
+    char msg[96];
+    int n = snprintf(msg, sizeof(msg), "@ORBITFB HOST SHM %llu %llu\n",
+                     (unsigned long long)shell->surface.shared_id,
+                     (unsigned long long)shell->surface.shared_len);
+    if (n <= 0 || (size_t)n >= sizeof(msg)) {
+        orbit_send_fb_host_windowed(shell);
+        return;
+    }
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
+}
+
 static int orbit_surface_reserve(orbit_shell_t *shell, size_t need) {
     if (!shell) return 0;
     if (need == 0u) return 0;
     if (need > ORBIT_FB_MAX_BYTES) return 0;
+    if (shell->surface.pixels && !shell->surface.pixels_owned) {
+        shell->surface.pixels = NULL;
+        shell->surface.pixels_cap = 0u;
+    }
     if (shell->surface.pixels && shell->surface.pixels_cap >= need) return 1;
     uint8_t *buf = (uint8_t *)realloc(shell->surface.pixels, need);
     if (!buf) return 0;
     shell->surface.pixels = buf;
     shell->surface.pixels_cap = need;
+    shell->surface.pixels_owned = 1u;
     return 1;
 }
 
@@ -623,7 +715,65 @@ static int orbit_fb_handle_line(orbit_shell_t *shell, const char *line) {
     if (!orbit_next_token(&p, &cmd_tok, &cmd_len)) return 1;
 
     if (orbit_token_is(cmd_tok, cmd_len, "HELLO")) {
-        orbit_send_fb_host_windowed(shell);
+        orbit_send_fb_host_shared(shell);
+        return 1;
+    }
+
+    if (orbit_token_is(cmd_tok, cmd_len, "PRESENT")) {
+        uint32_t seq = 0u;
+        (void)orbit_parse_u32(&p, &seq);
+        (void)seq;
+
+        peos_orbitfb_shm_t *shm = shell->surface.shared_header;
+        if (!shm || !shell->surface.shared_base ||
+            shm->magic != PEOS_ORBITFB_SHM_MAGIC ||
+            shm->version != PEOS_ORBITFB_SHM_VERSION ||
+            shm->slot_count == 0u ||
+            shm->slot_count > PEOS_ORBITFB_SHM_SLOTS) {
+            orbit_surface_reset(shell);
+            return 1;
+        }
+
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        uint32_t slot = shm->ready_slot;
+        uint32_t slot_size = shm->slot_size;
+        uint32_t w = shm->width;
+        uint32_t h = shm->height;
+        uint32_t pitch = shm->pitch;
+        uint32_t format = shm->format;
+        uint32_t bytespp = (format == ORBIT_FB_FORMAT_RGB565) ? 2u : 4u;
+        size_t len = (size_t)pitch * (size_t)h;
+        size_t offset = PEOS_ORBITFB_SHM_HEADER_BYTES + (size_t)slot * (size_t)slot_size;
+
+        if (format != ORBIT_FB_FORMAT_RGB565 && format != ORBIT_FB_FORMAT_XRGB8888) {
+            orbit_surface_reset(shell);
+            return 1;
+        }
+        if (slot >= shm->slot_count ||
+            w == 0u || h == 0u ||
+            w > ORBIT_FB_MAX_WIDTH || h > ORBIT_FB_MAX_HEIGHT ||
+            pitch < w * bytespp ||
+            len == 0u || len > slot_size ||
+            offset > shell->surface.shared_len ||
+            len > shell->surface.shared_len - offset) {
+            orbit_surface_reset(shell);
+            return 1;
+        }
+
+        if (shell->surface.pixels_owned && shell->surface.pixels) {
+            free(shell->surface.pixels);
+        }
+        shell->surface.pixels_owned = 0u;
+        shell->surface.pixels = shell->surface.shared_base + offset;
+        shell->surface.pixels_cap = 0u;
+        shell->surface.pixels_len = len;
+        shell->surface.width = w;
+        shell->surface.height = h;
+        shell->surface.pitch = pitch;
+        shell->surface.format = (uint8_t)format;
+        shell->surface.receiving = 0u;
+        shell->surface.discard = 0u;
+        shell->surface.active = 1u;
         return 1;
     }
 
@@ -2044,9 +2194,24 @@ static int orbit_spawn_process(orbit_shell_t *shell) {
 
 static void orbit_stop_process(orbit_shell_t *shell) {
     if (!shell) return;
+    int64_t pid = shell->child_pid;
+    uint8_t exited = 0u;
     orbit_request_child_exit(shell);
     orbit_close_fds(shell);
+    if (pid > 0) {
+        int status = 0;
+        for (uint32_t i = 0u; i < 20u; i++) {
+            uint64_t w = peos_waitpid_flags((uint64_t)pid, &status, PEOS_WAIT_NOHANG);
+            if (w == (uint64_t)pid) {
+                exited = 1u;
+                break;
+            }
+            peos_sleep(1u);
+        }
+    }
     shell->child_pid = -1;
+    if (exited) orbit_surface_destroy_shared_object(shell);
+    else orbit_surface_free(shell);
 }
 
 static void orbit_on_close(void *userdata) {
@@ -2054,6 +2219,7 @@ static void orbit_on_close(void *userdata) {
     if (!shell) return;
 
     int64_t pid = shell->child_pid;
+    uint8_t exited = 0u;
     orbit_request_child_exit(shell);
     orbit_close_fds(shell);
 
@@ -2061,12 +2227,17 @@ static void orbit_on_close(void *userdata) {
         int status = 0;
         for (uint32_t i = 0u; i < 20u; i++) {
             uint64_t w = peos_waitpid_flags((uint64_t)pid, &status, PEOS_WAIT_NOHANG);
-            if (w == (uint64_t)pid) break;
+            if (w == (uint64_t)pid) {
+                exited = 1u;
+                break;
+            }
             peos_sleep(1u);
         }
     }
 
     shell->child_pid = -1;
+    if (exited) orbit_surface_destroy_shared_object(shell);
+    else orbit_surface_free(shell);
 }
 
 static void orbit_mark_child_exited(orbit_shell_t *shell) {
@@ -2074,7 +2245,7 @@ static void orbit_mark_child_exited(orbit_shell_t *shell) {
     orbit_close_fds(shell);
     shell->child_pid = -1;
     orbit_ui_storage_free(&shell->ui);
-    orbit_surface_reset(shell);
+    orbit_surface_destroy_shared_object(shell);
     peos_memset(&shell->ui, 0, sizeof(shell->ui));
     orbit_push_line(shell, "[app exited] Press Enter to restart.");
 }
