@@ -162,9 +162,18 @@ static void sl_ui_move_caret(sl_ui_ctx_t *ui, uint32_t id, uint32_t old_pos, uin
 
 static uint8_t sl_ui_text_delete_selection(sl_ui_ctx_t *ui, uint32_t id,
                                            char *text, uint32_t *len, uint32_t *caret);
+static uint8_t sl_ui_text_apply_paste(sl_ui_ctx_t *ui, uint32_t id,
+                                      char *text, uint32_t *len, uint32_t text_cap, uint32_t *caret);
 static uint8_t sl_ui_utf8_is_cont(char c);
 static uint32_t sl_ui_utf8_prev_pos(const char *text, uint32_t pos);
 static uint32_t sl_ui_utf8_advance_cols(const char *text, uint32_t pos, uint32_t len, uint32_t cols);
+
+static uint8_t sl_ui_clipboard_copy_selection(const sl_ui_ctx_t *ui, uint32_t id, const char *text) {
+    uint32_t sel_start = 0u, sel_end = 0u;
+    if (!ui || !text) return 0u;
+    if (!sl_ui_selection_range(ui, id, &sel_start, &sel_end)) return 0u;
+    return sl_clipboard_set_text(text + sel_start, sel_end - sel_start);
+}
 
 static uint32_t sl_ui_text_input_hit_pos(sl_ui_ctx_t *ui,
                                          uint32_t x, uint32_t w,
@@ -227,7 +236,8 @@ static int sl_ui_point_in_rect(uint32_t px, uint32_t py,
 void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
                  uint32_t cursor_x, uint32_t cursor_y,
                  uint8_t mouse_down, uint8_t mouse_pressed, uint8_t mouse_released,
-                 int32_t wheel_x, int32_t wheel_y) {
+                 int32_t wheel_x, int32_t wheel_y,
+                 uint32_t clipboard_cmds) {
     if (!ui) return;
     ui->ctx = ctx;
     ui->win = win;
@@ -238,6 +248,7 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
     ui->mouse_released = mouse_released;
     ui->wheel_x = wheel_x;
     ui->wheel_y = wheel_y;
+    ui->clipboard_cmds = clipboard_cmds;
     ui->wheel_consumed = 0u;
     ui->select_overlay_pending = 0u;
     ui->select_overlay_options_pipe = NULL;
@@ -889,6 +900,16 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     if (ui->mouse_released && ui->active_id == id) ui->active_id = 0u;
 
     uint8_t changed = 0u;
+    if (enabled && focused) {
+        if (ui->clipboard_cmds & SL_CLIP_CMD_COPY) {
+            (void)sl_ui_clipboard_copy_selection(ui, id, text);
+            ui->clipboard_cmds &= ~SL_CLIP_CMD_COPY;
+        }
+        if (ui->clipboard_cmds & SL_CLIP_CMD_PASTE) {
+            if (sl_ui_text_apply_paste(ui, id, text, &len, text_cap, &ui->text_caret_pos)) changed = 1u;
+            ui->clipboard_cmds &= ~SL_CLIP_CMD_PASTE;
+        }
+    }
     for (uint8_t i = 0u; i < event_count; i++) {
         uint16_t code = sl_ui_norm_keycode(events[i].code);
         if (sl_keyboard_event_is_altgr(&events[i])) {
@@ -1220,6 +1241,24 @@ static uint8_t sl_ui_text_delete_selection(sl_ui_ctx_t *ui, uint32_t id,
     return 1u;
 }
 
+static uint8_t sl_ui_text_apply_paste(sl_ui_ctx_t *ui, uint32_t id,
+                                      char *text, uint32_t *len, uint32_t text_cap, uint32_t *caret) {
+    const char *clip_text = NULL;
+    uint32_t clip_len = 0u;
+    uint32_t old_len = 0u;
+    if (!ui || !text || !len || !caret || text_cap < 2u) return 0u;
+    clip_text = sl_clipboard_current_text(&clip_len);
+    if (!clip_text || clip_len == 0u) return 0u;
+    if (sl_ui_selection_range(ui, id, NULL, NULL)) {
+        (void)sl_ui_text_delete_selection(ui, id, text, len, caret);
+    }
+    old_len = *len;
+    sl_ui_text_insert_bytes(text, len, text_cap, caret, clip_text, clip_len);
+    if (*len == old_len) return 0u;
+    sl_ui_selection_collapse(ui, id, *caret);
+    return 1u;
+}
+
 static void sl_ui_text_backspace(char *text, uint32_t *len, uint32_t *caret) {
     if (!text || !len || !caret || *caret == 0u || *len == 0u) return;
     uint32_t prev = sl_ui_utf8_prev_pos(text, *caret);
@@ -1274,6 +1313,16 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     }
 
     uint8_t changed = 0u;
+    if (enabled && focused) {
+        if (ui->clipboard_cmds & SL_CLIP_CMD_COPY) {
+            (void)sl_ui_clipboard_copy_selection(ui, id, text);
+            ui->clipboard_cmds &= ~SL_CLIP_CMD_COPY;
+        }
+        if (ui->clipboard_cmds & SL_CLIP_CMD_PASTE) {
+            if (sl_ui_text_apply_paste(ui, id, text, &len, text_cap, &ui->text_caret_pos)) changed = 1u;
+            ui->clipboard_cmds &= ~SL_CLIP_CMD_PASTE;
+        }
+    }
     for (uint8_t i = 0u; i < event_count; i++) {
         uint16_t code = sl_ui_norm_keycode(events[i].code);
         if (sl_keyboard_event_is_altgr(&events[i])) {

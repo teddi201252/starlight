@@ -1,6 +1,7 @@
 #pragma once
 
 #include "starlight.h"
+#include "clipboard.h"
 #include "tween.h"
 #include "window.h"
 

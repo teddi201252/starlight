@@ -9,6 +9,23 @@ static uint8_t g_prev_mouse_buttons = 0u;
 #define SL_KEY_REPEAT_RATE_HZ_DEFAULT 30u
 #define SL_KEY_REPEAT_RATE_HZ_MIN 5u
 #define SL_KEY_REPEAT_RATE_HZ_MAX 60u
+#define SL_ACTIONMOD_TAP_NS 180000000ull
+#define SL_ACTIONMOD_HOLD_NS 400000000ull
+
+typedef enum {
+    SL_ACTIONMOD_IDLE = 0,
+    SL_ACTIONMOD_PRESSED,
+    SL_ACTIONMOD_CHORD_USED,
+    SL_ACTIONMOD_MANAGER_OPENED,
+} sl_actionmod_state_t;
+
+typedef struct {
+    sl_actionmod_state_t state;
+    uint64_t press_ns;
+    uint8_t caps_down;
+    uint8_t swallow_a;
+    uint8_t swallow_s;
+} sl_actionmod_tracker_t;
 
 typedef struct {
     uint8_t down;
@@ -19,6 +36,7 @@ typedef struct {
 static sl_key_repeat_slot_t g_key_repeat[SL_KEY_REPEAT_SLOTS];
 static uint32_t g_key_repeat_delay_ms = SL_KEY_REPEAT_DELAY_MS_DEFAULT;
 static uint32_t g_key_repeat_rate_hz = SL_KEY_REPEAT_RATE_HZ_DEFAULT;
+static sl_actionmod_tracker_t g_actionmod;
 
 static uint64_t sl_repeat_delay_ns(void) {
     return (uint64_t)g_key_repeat_delay_ms * 1000000ull;
@@ -39,7 +57,79 @@ static uint8_t sl_is_modifier_key(uint16_t code) {
     return (norm == PEOS_KEY_LSHIFT || norm == PEOS_KEY_RSHIFT ||
             norm == PEOS_KEY_LCTRL || norm == PEOS_KEY_RCTRL_NORM ||
             norm == PEOS_KEY_LALT || norm == PEOS_KEY_RALT_NORM ||
-            norm == PEOS_KEY_LSUPER_NORM || norm == PEOS_KEY_RSUPER_NORM) ? 1u : 0u;
+            norm == PEOS_KEY_LSUPER_NORM || norm == PEOS_KEY_RSUPER_NORM ||
+            norm == PEOS_KEY_CAPSLOCK) ? 1u : 0u;
+}
+
+static void sl_append_key_event(sl_input_frame_t *out, uint16_t code, uint8_t pressed, uint64_t now_ns) {
+    peos_input_event_t ev;
+    if (!out || out->key_event_count >= 16u) return;
+    ev.code = code;
+    ev.pressed = pressed ? 1u : 0u;
+    ev.reserved = 0u;
+    ev.time_ns = now_ns;
+    out->key_events[out->key_event_count++] = ev;
+}
+
+static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
+                                         const peos_input_event_t *ev,
+                                         uint64_t now_ns) {
+    uint16_t code;
+    if (!out || !ev) return 0u;
+    code = sl_norm_keycode(ev->code);
+    if (code == PEOS_KEY_CAPSLOCK) {
+        if (ev->pressed) {
+            g_actionmod.state = SL_ACTIONMOD_PRESSED;
+            g_actionmod.press_ns = now_ns;
+            g_actionmod.caps_down = 1u;
+            g_actionmod.swallow_a = 0u;
+            g_actionmod.swallow_s = 0u;
+        } else {
+            if (g_actionmod.state == SL_ACTIONMOD_PRESSED &&
+                (now_ns - g_actionmod.press_ns) <= SL_ACTIONMOD_TAP_NS) {
+                sl_append_key_event(out, PEOS_KEY_CAPSLOCK, 1u, now_ns);
+                sl_append_key_event(out, PEOS_KEY_CAPSLOCK, 0u, now_ns);
+            }
+            g_actionmod.state = SL_ACTIONMOD_IDLE;
+            g_actionmod.caps_down = 0u;
+            g_actionmod.swallow_a = 0u;
+            g_actionmod.swallow_s = 0u;
+        }
+        return 1u;
+    }
+    if (!g_actionmod.caps_down) return 0u;
+    if (code == PEOS_KEY_A) {
+        if (ev->pressed) {
+            out->clipboard_cmds |= SL_CLIP_CMD_COPY;
+            g_actionmod.state = SL_ACTIONMOD_CHORD_USED;
+            g_actionmod.swallow_a = 1u;
+        } else if (!g_actionmod.swallow_a) {
+            return 0u;
+        } else {
+            g_actionmod.swallow_a = 0u;
+        }
+        return 1u;
+    }
+    if (code == PEOS_KEY_S) {
+        if (ev->pressed) {
+            out->clipboard_cmds |= SL_CLIP_CMD_PASTE;
+            g_actionmod.state = SL_ACTIONMOD_CHORD_USED;
+            g_actionmod.swallow_s = 1u;
+        } else if (!g_actionmod.swallow_s) {
+            return 0u;
+        } else {
+            g_actionmod.swallow_s = 0u;
+        }
+        return 1u;
+    }
+    return 0u;
+}
+
+static void sl_actionmod_tick(sl_input_frame_t *out, uint64_t now_ns) {
+    if (!out || g_actionmod.state != SL_ACTIONMOD_PRESSED || !g_actionmod.caps_down) return;
+    if ((now_ns - g_actionmod.press_ns) < SL_ACTIONMOD_HOLD_NS) return;
+    out->clipboard_cmds |= SL_CLIP_CMD_OPEN_MANAGER;
+    g_actionmod.state = SL_ACTIONMOD_MANAGER_OPENED;
 }
 
 static sl_key_repeat_slot_t *sl_find_repeat_slot(uint16_t code) {
@@ -104,6 +194,7 @@ void sl_input_set_key_repeat_config(uint32_t delay_ms, uint32_t rate_hz) {
 void sl_input_state_reset(void) {
     g_prev_mouse_buttons = 0u;
     peos_memset(g_key_repeat, 0, sizeof(g_key_repeat));
+    peos_memset(&g_actionmod, 0, sizeof(g_actionmod));
 }
 
 int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
@@ -119,11 +210,16 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
     uint64_t now_ns = peos_time_ns();
 
     for (uint64_t i = 0; i < n; i++) {
+        if (!ctx->input_raw && sl_actionmod_filter_event(out, &evs[i], now_ns)) {
+            continue;
+        }
         sl_repeat_on_key_event(&evs[i], now_ns);
         if (out->key_event_count < 16u) {
             out->key_events[out->key_event_count++] = evs[i];
         }
     }
+
+    if (!ctx->input_raw) sl_actionmod_tick(out, now_ns);
 
     sl_emit_synthetic_repeats(out, now_ns);
 

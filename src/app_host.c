@@ -151,6 +151,7 @@ typedef struct {
     uint8_t mouse_r_released;
     int32_t mouse_wheel_x;
     int32_t mouse_wheel_y;
+    uint32_t clipboard_cmds;
     uint8_t key_event_count;
     uint8_t committed;
     sl_ui_ctx_t ui;
@@ -2330,6 +2331,7 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         shell->ui.mouse_r_released = frame->mouse_right_released;
         shell->ui.mouse_wheel_x = frame->mouse_wheel_x;
         shell->ui.mouse_wheel_y = frame->mouse_wheel_y;
+        shell->ui.clipboard_cmds = frame->clipboard_cmds;
     }
 
     if (!event) return;
@@ -3385,7 +3387,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         sl_ui_begin(&shell->ui.ui, ctx, win,
                     ctx->cursor_x, ctx->cursor_y,
                     shell->ui.mouse_down, shell->ui.mouse_pressed, shell->ui.mouse_released,
-                    shell->ui.mouse_wheel_x, shell->ui.mouse_wheel_y);
+                    shell->ui.mouse_wheel_x, shell->ui.mouse_wheel_y,
+                    shell->ui.clipboard_cmds);
         if (shell->ui.mouse_pressed) shell->ui.keyboard_nav_active = 0u;
         sl_ui_set_font_px(&shell->ui.ui, 0u);
         if (shell->ui.theme_override_enabled) {
@@ -3860,10 +3863,12 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         shell->ui.mouse_r_released = 0u;
         shell->ui.mouse_wheel_x = 0;
         shell->ui.mouse_wheel_y = 0;
+        shell->ui.clipboard_cmds = 0u;
         shell->ui.key_event_count = 0u;
         return;
     }
 
+    shell->ui.clipboard_cmds = 0u;
     shell->ui.key_event_count = 0u;
 
     uint32_t text_x = body_x + 4u;
