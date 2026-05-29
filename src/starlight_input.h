@@ -18,8 +18,13 @@ typedef struct {
     int32_t mouse_dy;
     int32_t mouse_wheel_x;
     int32_t mouse_wheel_y;
+    uint32_t clipboard_cmds;
     peos_input_event_t key_events[16];
 } sl_input_frame_t;
+
+#define SL_CLIP_CMD_COPY         (1u << 0)
+#define SL_CLIP_CMD_PASTE        (1u << 1)
+#define SL_CLIP_CMD_OPEN_MANAGER (1u << 2)
 
 void sl_input_state_reset(void);
 void sl_input_set_key_repeat_config(uint32_t delay_ms, uint32_t rate_hz);

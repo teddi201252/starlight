@@ -875,6 +875,10 @@ void sl_reload_theme(sl_ctx_t *ctx) {
 int sl_handle_input(sl_ctx_t *ctx) {
     sl_input_frame_t input;
     if (sl_input_poll(ctx, &input) < 0) return 1;
+    if (sl_clipboard_handle_input(ctx, &input)) {
+        sl_dirty_mark_full();
+        return input.quit_requested ? 1 : 0;
+    }
 
     if (input.mouse_moved) {
         sl_launcher_handle_context_hover(ctx);
@@ -883,11 +887,13 @@ int sl_handle_input(sl_ctx_t *ctx) {
 
     uint32_t reserved_left = sl_launcher_reserved_left(ctx);
     uint8_t mouse_on_launcher = (reserved_left > 0u && ctx->cursor_x < reserved_left) ? 1u : 0u;
+    uint8_t clipboard_cmds_pending = (input.clipboard_cmds != 0u) ? 1u : 0u;
 
     sl_window_t *focused = sl_window_get_focused();
     if (focused && focused->task && focused->task->on_input &&
         !mouse_on_launcher &&
-        (input.mouse_updated || input.mouse_left_pressed || input.mouse_left_released || input.mouse_moved)) {
+        (input.mouse_updated || input.mouse_left_pressed || input.mouse_left_released ||
+         input.mouse_moved || clipboard_cmds_pending)) {
         focused->task->on_input(ctx, &input, NULL, focused->task->userdata);
         sl_windows_mark_focused_activity();
         if (input.mouse_left_pressed || input.mouse_left_released ||
@@ -897,6 +903,8 @@ int sl_handle_input(sl_ctx_t *ctx) {
             uint32_t dx = 0u, dy = 0u, dw = 0u, dh = 0u;
             if (sl_app_host_input_dirty_rect(focused, &input, focused->task->userdata, &dx, &dy, &dw, &dh)) {
                 sl_dirty_add(ctx, dx, dy, dw, dh);
+            } else if (clipboard_cmds_pending) {
+                sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
             } else if (input.mouse_wheel_x != 0 || input.mouse_wheel_y != 0 ||
                        (input.mouse_moved && (input.mouse_buttons & 0x01u))) {
                 sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);

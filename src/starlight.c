@@ -124,6 +124,7 @@ int main(void) {
 
         sl_windows_render_all(&ctx);
         sl_launcher_render(&ctx);
+        sl_clipboard_render_overlay(&ctx);
         sl_fps_tick(&ctx, &fps_value_prev);
 
         if (!ctx.hw_cursor) {
@@ -138,6 +139,7 @@ int main(void) {
     }
 
     sl_tween_reset();
+    sl_clipboard_shutdown();
     if (ctx.bg_loaded) {
         sl_image_free(&ctx.bg_image);
     }

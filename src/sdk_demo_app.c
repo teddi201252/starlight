@@ -9,6 +9,7 @@ typedef struct {
     uint8_t mouse_released;
     int32_t mouse_wheel_x;
     int32_t mouse_wheel_y;
+    uint32_t clipboard_cmds;
     uint32_t slider;
     uint32_t clicks;
     uint8_t image_rgba[32u * 32u * 4u];
@@ -58,6 +59,7 @@ static void sdk_demo_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         s->mouse_released = frame->mouse_left_released;
         s->mouse_wheel_x = frame->mouse_wheel_x;
         s->mouse_wheel_y = frame->mouse_wheel_y;
+        s->clipboard_cmds = frame->clipboard_cmds;
 
         if (frame->mouse_left_released) {
             uint32_t body_x = 0u;
@@ -117,7 +119,8 @@ static void sdk_demo_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *user
     sl_ui_begin(&s->ui, ctx, win,
                 ctx->cursor_x, ctx->cursor_y,
                 s->mouse_down, s->mouse_pressed, s->mouse_released,
-                s->mouse_wheel_x, s->mouse_wheel_y);
+                s->mouse_wheel_x, s->mouse_wheel_y,
+                s->clipboard_cmds);
 
     uint32_t x = body_x + 10u;
     uint32_t y = body_y + 10u;
@@ -131,6 +134,7 @@ static void sdk_demo_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *user
     sdk_demo_u32_to_str(s->clicks, clicks_str, sizeof(clicks_str));
     sl_ui_label(&s->ui, x + 132u, y + 8u, "clicks:", SL_UI_COLOR_TEXT_SECONDARY);
     sl_ui_label(&s->ui, x + 188u, y + 8u, clicks_str, SL_UI_COLOR_TEXT_PRIMARY);
+    s->clipboard_cmds = 0u;
 
     y += 36u;
     sl_ui_label(&s->ui, x, y, "Slider:", SL_UI_COLOR_TEXT_SECONDARY);
