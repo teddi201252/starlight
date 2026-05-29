@@ -54,6 +54,9 @@ typedef struct {
     uint8_t super_down;
     uint32_t text_caret_id;
     uint32_t text_caret_pos;
+    uint32_t text_select_id;
+    uint32_t text_select_anchor_pos;
+    uint32_t text_select_focus_pos;
     uint32_t text_input_scroll_col;
     uint32_t text_area_scroll_line;
     uint32_t text_area_scroll_col;

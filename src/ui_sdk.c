@@ -96,6 +96,12 @@ static void sl_ui_fill_tok(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, 
     else sl_fill_rect_a(ui->ctx, x, y, w, h, c->r, c->g, c->b, c->a);
 }
 
+static void sl_ui_fill_selection(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    const sl_ui_color_t *c = sl_ui_theme_color(ui, SL_UI_COLOR_ACCENT);
+    if (!ui || !ui->ctx || w == 0u || h == 0u) return;
+    sl_fill_rect_a(ui->ctx, x, y, w, h, c->r, c->g, c->b, 96u);
+}
+
 static void sl_ui_text_tok(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text, sl_ui_color_token_t token) {
     const sl_ui_color_t *c = sl_ui_theme_color(ui, token);
     sl_draw_text_px(ui->ctx, x, y, text, c->r, c->g, c->b, ui->font_px);
@@ -114,6 +120,71 @@ static uint32_t sl_ui_font_h(const sl_ui_ctx_t *ui) {
 static uint32_t sl_ui_text_center_y(const sl_ui_ctx_t *ui, uint32_t y, uint32_t h) {
     uint32_t fh = sl_ui_font_h(ui);
     return y + ((h > fh) ? ((h - fh) / 2u) : 0u);
+}
+
+static void sl_ui_selection_collapse(sl_ui_ctx_t *ui, uint32_t id, uint32_t pos) {
+    if (!ui) return;
+    ui->text_select_id = id;
+    ui->text_select_anchor_pos = pos;
+    ui->text_select_focus_pos = pos;
+}
+
+static uint8_t sl_ui_selection_range(const sl_ui_ctx_t *ui, uint32_t id, uint32_t *out_start, uint32_t *out_end) {
+    uint32_t a = 0u, b = 0u;
+    if (!ui || ui->text_select_id != id) return 0u;
+    a = ui->text_select_anchor_pos;
+    b = ui->text_select_focus_pos;
+    if (a == b) return 0u;
+    if (a > b) {
+        uint32_t tmp = a;
+        a = b;
+        b = tmp;
+    }
+    if (out_start) *out_start = a;
+    if (out_end) *out_end = b;
+    return 1u;
+}
+
+static void sl_ui_move_caret(sl_ui_ctx_t *ui, uint32_t id, uint32_t old_pos, uint32_t new_pos, uint8_t extend_selection) {
+    if (!ui) return;
+    ui->text_caret_id = id;
+    ui->text_caret_pos = new_pos;
+    if (extend_selection) {
+        if (ui->text_select_id != id || ui->text_select_anchor_pos == ui->text_select_focus_pos) {
+            ui->text_select_id = id;
+            ui->text_select_anchor_pos = old_pos;
+        }
+        ui->text_select_focus_pos = new_pos;
+        return;
+    }
+    sl_ui_selection_collapse(ui, id, new_pos);
+}
+
+static uint8_t sl_ui_text_delete_selection(sl_ui_ctx_t *ui, uint32_t id,
+                                           char *text, uint32_t *len, uint32_t *caret);
+static uint8_t sl_ui_utf8_is_cont(char c);
+static uint32_t sl_ui_utf8_prev_pos(const char *text, uint32_t pos);
+static uint32_t sl_ui_utf8_advance_cols(const char *text, uint32_t pos, uint32_t len, uint32_t cols);
+
+static uint32_t sl_ui_text_input_hit_pos(sl_ui_ctx_t *ui,
+                                         uint32_t x, uint32_t w,
+                                         const char *text, uint32_t len) {
+    uint32_t fw, vis_chars, start, max_scroll_col;
+    if (!ui || !text) return 0u;
+    fw = sl_ui_font_w(ui);
+    vis_chars = (w > 12u) ? ((w - 12u) / fw) : 0u;
+    start = ui->text_input_scroll_col;
+    max_scroll_col = (len > vis_chars) ? (len - vis_chars) : 0u;
+    if (start > max_scroll_col) start = max_scroll_col;
+    if (start > 0u && sl_ui_utf8_is_cont(text[start])) start = sl_ui_utf8_prev_pos(text, start);
+    if (ui->cursor_x <= x + 6u) return start;
+    if (vis_chars == 0u) return start;
+    {
+        uint32_t rel = ui->cursor_x - (x + 6u);
+        uint32_t col = rel / fw;
+        if (col > vis_chars) col = vis_chars;
+        return sl_ui_utf8_advance_cols(text, start, len, col);
+    }
 }
 
 void sl_ui_set_font_px(sl_ui_ctx_t *ui, uint32_t font_px) {
@@ -771,15 +842,16 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
                                uint8_t enabled) {
     if (!ui || !ui->ctx || !text || text_cap < 2u || w < 16u || h < 12u) return 0u;
 
-    int was_focused = (ui->focused_id == id);
     int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
     if (enabled && ui->mouse_pressed) {
         if (hovered) {
             ui->focused_id = id;
+            ui->active_id = id;
         }
         else if (ui->focused_id == id) ui->focused_id = 0u;
     }
     if (!enabled && ui->focused_id == id) ui->focused_id = 0u;
+    if (!enabled && ui->active_id == id) ui->active_id = 0u;
     int focused = (ui->focused_id == id);
 
     uint32_t len = sl_ui_strlen(text);
@@ -791,30 +863,30 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         ui->text_caret_id = id;
         ui->text_caret_pos = len;
         ui->text_input_scroll_col = 0u;
+        sl_ui_selection_collapse(ui, id, len);
     }
     if (ui->text_caret_id == id && ui->text_caret_pos > len) ui->text_caret_pos = len;
     if (ui->text_caret_id == id && ui->text_caret_pos > 0u &&
         sl_ui_utf8_is_cont(text[ui->text_caret_pos])) {
         ui->text_caret_pos = sl_ui_utf8_prev_pos(text, ui->text_caret_pos);
     }
-
-    if (enabled && ui->mouse_pressed && hovered && was_focused) {
-        uint32_t fw = sl_ui_font_w(ui);
-        uint32_t vis_chars = (w > 12u) ? ((w - 12u) / fw) : 0u;
-        uint32_t start = ui->text_input_scroll_col;
-        uint32_t max_scroll_col = (len > vis_chars) ? (len - vis_chars) : 0u;
-        if (start > max_scroll_col) start = max_scroll_col;
-        if (start > 0u && sl_ui_utf8_is_cont(text[start])) start = sl_ui_utf8_prev_pos(text, start);
-        if (ui->cursor_x <= x + 6u) {
-            ui->text_caret_pos = start;
-        } else if (vis_chars > 0u) {
-            uint32_t rel = ui->cursor_x - (x + 6u);
-            uint32_t col = rel / fw;
-            if (col > vis_chars) col = vis_chars;
-            ui->text_caret_pos = sl_ui_utf8_advance_cols(text, start, len, col);
-        }
-        if (ui->text_caret_pos > len) ui->text_caret_pos = len;
+    if (ui->text_select_id == id) {
+        if (ui->text_select_anchor_pos > len) ui->text_select_anchor_pos = len;
+        if (ui->text_select_focus_pos > len) ui->text_select_focus_pos = len;
     }
+
+    if (enabled && ui->mouse_pressed && hovered) {
+        ui->text_caret_pos = sl_ui_text_input_hit_pos(ui, x, w, text, len);
+        if (ui->text_caret_pos > len) ui->text_caret_pos = len;
+        sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
+    }
+    if (enabled && ui->active_id == id && ui->mouse_down) {
+        uint32_t old_pos = ui->text_caret_pos;
+        uint32_t new_pos = sl_ui_text_input_hit_pos(ui, x, w, text, len);
+        if (new_pos > len) new_pos = len;
+        sl_ui_move_caret(ui, id, old_pos, new_pos, 1u);
+    }
+    if (ui->mouse_released && ui->active_id == id) ui->active_id = 0u;
 
     uint8_t changed = 0u;
     for (uint8_t i = 0u; i < event_count; i++) {
@@ -840,8 +912,17 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             continue;
         }
         if (!enabled || !focused || !events[i].pressed) continue;
+        if (ui->ctrl_down && code == PEOS_KEY_A) {
+            ui->text_caret_pos = len;
+            ui->text_select_id = id;
+            ui->text_select_anchor_pos = 0u;
+            ui->text_select_focus_pos = len;
+            continue;
+        }
         if (code == PEOS_KEY_BACKSPACE) {
-            if (ui->text_caret_pos > 0u && len > 0u) {
+            if (sl_ui_text_delete_selection(ui, id, text, &len, &ui->text_caret_pos)) {
+                changed = 1u;
+            } else if (ui->text_caret_pos > 0u && len > 0u) {
                 uint32_t prev = sl_ui_utf8_prev_pos(text, ui->text_caret_pos);
                 uint32_t removed = ui->text_caret_pos - prev;
                 for (uint32_t j = prev; j + removed <= len; j++) {
@@ -849,34 +930,53 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
                 }
                 ui->text_caret_pos = prev;
                 len -= removed;
+                sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
                 changed = 1u;
             }
             continue;
         }
         if (code == PEOS_KEY_LEFT_NORM) {
-            if (ui->text_caret_pos > 0u) ui->text_caret_pos = sl_ui_utf8_prev_pos(text, ui->text_caret_pos);
+            uint32_t sel_start = 0u, sel_end = 0u;
+            if (!ui->shift_down && sl_ui_selection_range(ui, id, &sel_start, &sel_end)) {
+                sl_ui_move_caret(ui, id, ui->text_caret_pos, sel_start, 0u);
+            } else {
+                uint32_t old_pos = ui->text_caret_pos;
+                uint32_t new_pos = old_pos;
+                if (new_pos > 0u) new_pos = sl_ui_utf8_prev_pos(text, new_pos);
+                sl_ui_move_caret(ui, id, old_pos, new_pos, ui->shift_down);
+            }
             continue;
         }
         if (code == PEOS_KEY_RIGHT_NORM) {
-            if (ui->text_caret_pos < len) ui->text_caret_pos = sl_ui_utf8_next_pos(text, ui->text_caret_pos, len);
+            uint32_t sel_start = 0u, sel_end = 0u;
+            if (!ui->shift_down && sl_ui_selection_range(ui, id, &sel_start, &sel_end)) {
+                sl_ui_move_caret(ui, id, ui->text_caret_pos, sel_end, 0u);
+            } else {
+                uint32_t old_pos = ui->text_caret_pos;
+                uint32_t new_pos = old_pos;
+                if (new_pos < len) new_pos = sl_ui_utf8_next_pos(text, new_pos, len);
+                sl_ui_move_caret(ui, id, old_pos, new_pos, ui->shift_down);
+            }
             continue;
         }
         if (code == PEOS_KEY_HOME_NORM) {
-            ui->text_caret_pos = 0u;
+            sl_ui_move_caret(ui, id, ui->text_caret_pos, 0u, ui->shift_down);
             continue;
         }
         if (code == PEOS_KEY_END_NORM) {
-            ui->text_caret_pos = len;
+            sl_ui_move_caret(ui, id, ui->text_caret_pos, len, ui->shift_down);
             continue;
         }
         if (code == PEOS_KEY_ESC) {
             ui->focused_id = 0u;
             focused = 0;
+            sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
             continue;
         }
         if (code == PEOS_KEY_ENTER) {
             ui->focused_id = 0u;
             focused = 0;
+            sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
             continue;
         }
         if (ui->ctrl_down || ui->alt_down || ui->super_down) {
@@ -887,6 +987,9 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         size_t input_len = sl_keyboard_translate_event(&events[i], ui->shift_down,
                                                        ui->altgr_down,
                                                        input, sizeof(input));
+        if (input_len > 0u && sl_ui_selection_range(ui, id, NULL, NULL)) {
+            if (sl_ui_text_delete_selection(ui, id, text, &len, &ui->text_caret_pos)) changed = 1u;
+        }
         if (input_len > 0u && len + input_len < text_cap) {
             for (uint32_t j = len + 1u; j > ui->text_caret_pos; j--) {
                 text[j + (uint32_t)input_len - 1u] = text[j - 1u];
@@ -896,6 +999,7 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             }
             ui->text_caret_pos += (uint32_t)input_len;
             len += (uint32_t)input_len;
+            sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
             changed = 1u;
         }
     }
@@ -940,12 +1044,28 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             }
             cols++;
         }
+        uint32_t visible_end = pos;
         uint32_t caret_draw = (input_caret_pos >= start) ?
             sl_ui_utf8_count_between(text, start, input_caret_pos) : 0u;
         if (caret_draw > vis_chars) caret_draw = vis_chars;
         draw_buf[n] = '\0';
         uint32_t text_x = x + 6u;
         uint32_t text_y = sl_ui_text_center_y(ui, y, h);
+        {
+            uint32_t sel_start = 0u, sel_end = 0u;
+            if (sl_ui_selection_range(ui, id, &sel_start, &sel_end)) {
+                uint32_t clip_start = (sel_start > start) ? sel_start : start;
+                uint32_t clip_end = (sel_end < visible_end) ? sel_end : visible_end;
+                if (clip_end > clip_start) {
+                    uint32_t sel_col0 = sl_ui_utf8_count_between(text, start, clip_start);
+                    uint32_t sel_col1 = sl_ui_utf8_count_between(text, start, clip_end);
+                    if (sel_col1 > sel_col0) {
+                        sl_ui_fill_selection(ui, text_x + sel_col0 * fw, text_y,
+                                             (sel_col1 - sel_col0) * fw, fh);
+                    }
+                }
+            }
+        }
         sl_ui_text_tok(ui, text_x, text_y, draw_buf,
                        enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
         if (caret_visible) {
@@ -1039,6 +1159,30 @@ static uint32_t sl_ui_text_pos_from_line_col(const char *text, uint32_t target_l
     return sl_ui_utf8_advance_cols(text, line_start, line_end, target_col);
 }
 
+static uint32_t sl_ui_text_area_hit_pos(sl_ui_ctx_t *ui,
+                                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                        const char *text) {
+    uint32_t content_x, content_y, content_w, content_h, fw, fh, vis_cols, vis_lines;
+    uint32_t click_row = 0u, click_col = 0u, click_line;
+    if (!ui || !text) return 0u;
+    content_x = x + 6u;
+    content_y = y + 6u;
+    content_w = (w > 12u) ? (w - 12u) : 0u;
+    content_h = (h > 12u) ? (h - 12u) : 0u;
+    fw = sl_ui_font_w(ui);
+    fh = sl_ui_font_h(ui);
+    vis_cols = content_w / fw;
+    vis_lines = content_h / fh;
+    if (vis_cols == 0u || vis_lines == 0u) return 0u;
+    if (ui->cursor_y > content_y) click_row = (ui->cursor_y - content_y) / fh;
+    if (click_row >= vis_lines) click_row = vis_lines - 1u;
+    if (ui->cursor_x > content_x) click_col = (ui->cursor_x - content_x) / fw;
+    if (click_col > vis_cols) click_col = vis_cols;
+    click_col += ui->text_area_scroll_col;
+    click_line = ui->text_area_scroll_line + click_row;
+    return sl_ui_text_pos_from_line_col(text, click_line, click_col);
+}
+
 static void sl_ui_text_insert_bytes(char *text, uint32_t *len, uint32_t cap,
                                     uint32_t *caret, const char *bytes, uint32_t byte_len) {
     if (!text || !len || !caret || !bytes || byte_len == 0u || *len + byte_len >= cap) return;
@@ -1052,6 +1196,28 @@ static void sl_ui_text_insert_bytes(char *text, uint32_t *len, uint32_t cap,
 
 static void sl_ui_text_insert_char(char *text, uint32_t *len, uint32_t cap, uint32_t *caret, char c) {
     sl_ui_text_insert_bytes(text, len, cap, caret, &c, 1u);
+}
+
+static uint8_t sl_ui_text_delete_range(char *text, uint32_t *len, uint32_t start, uint32_t end) {
+    if (!text || !len || start >= end || end > *len) return 0u;
+    uint32_t removed = end - start;
+    for (uint32_t i = start; i + removed <= *len; i++) {
+        text[i] = text[i + removed];
+    }
+    *len -= removed;
+    return 1u;
+}
+
+static uint8_t sl_ui_text_delete_selection(sl_ui_ctx_t *ui, uint32_t id,
+                                           char *text, uint32_t *len, uint32_t *caret) {
+    uint32_t sel_start = 0u;
+    uint32_t sel_end = 0u;
+    if (!ui || !text || !len || !caret) return 0u;
+    if (!sl_ui_selection_range(ui, id, &sel_start, &sel_end)) return 0u;
+    if (!sl_ui_text_delete_range(text, len, sel_start, sel_end)) return 0u;
+    *caret = sel_start;
+    sl_ui_selection_collapse(ui, id, sel_start);
+    return 1u;
 }
 
 static void sl_ui_text_backspace(char *text, uint32_t *len, uint32_t *caret) {
@@ -1072,13 +1238,16 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
                               uint8_t enabled) {
     if (!ui || !ui->ctx || !text || text_cap < 2u || w < 24u || h < 24u) return 0u;
 
-    int was_focused = (ui->focused_id == id);
     int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
     if (enabled && ui->mouse_pressed) {
-        if (hovered) ui->focused_id = id;
+        if (hovered) {
+            ui->focused_id = id;
+            ui->active_id = id;
+        }
         else if (ui->focused_id == id) ui->focused_id = 0u;
     }
     if (!enabled && ui->focused_id == id) ui->focused_id = 0u;
+    if (!enabled && ui->active_id == id) ui->active_id = 0u;
     int focused = (ui->focused_id == id);
 
     uint32_t len = sl_ui_strlen(text);
@@ -1092,11 +1261,16 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         ui->text_caret_pos = len;
         ui->text_area_scroll_line = 0u;
         ui->text_area_scroll_col = 0u;
+        sl_ui_selection_collapse(ui, id, len);
     }
     if (ui->text_caret_id == id && ui->text_caret_pos > len) ui->text_caret_pos = len;
     if (ui->text_caret_id == id && ui->text_caret_pos > 0u &&
         sl_ui_utf8_is_cont(text[ui->text_caret_pos])) {
         ui->text_caret_pos = sl_ui_utf8_prev_pos(text, ui->text_caret_pos);
+    }
+    if (ui->text_select_id == id) {
+        if (ui->text_select_anchor_pos > len) ui->text_select_anchor_pos = len;
+        if (ui->text_select_focus_pos > len) ui->text_select_focus_pos = len;
     }
 
     uint8_t changed = 0u;
@@ -1123,42 +1297,77 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             continue;
         }
         if (!enabled || !focused || !events[i].pressed) continue;
+        if (ui->ctrl_down && code == PEOS_KEY_A) {
+            ui->text_caret_pos = len;
+            ui->text_select_id = id;
+            ui->text_select_anchor_pos = 0u;
+            ui->text_select_focus_pos = len;
+            continue;
+        }
 
         if (code == PEOS_KEY_BACKSPACE) {
             uint32_t old_len = len;
-            sl_ui_text_backspace(text, &len, &ui->text_caret_pos);
+            if (!sl_ui_text_delete_selection(ui, id, text, &len, &ui->text_caret_pos)) {
+                sl_ui_text_backspace(text, &len, &ui->text_caret_pos);
+                if (len != old_len) sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
+            }
             if (len != old_len) changed = 1u;
             continue;
         }
         if (code == PEOS_KEY_ESC) {
             ui->focused_id = 0u;
             focused = 0;
+            sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
             continue;
         }
         if (code == PEOS_KEY_ENTER) {
             uint32_t old_len = len;
+            if (sl_ui_selection_range(ui, id, NULL, NULL)) {
+                if (sl_ui_text_delete_selection(ui, id, text, &len, &ui->text_caret_pos)) changed = 1u;
+            }
             sl_ui_text_insert_char(text, &len, text_cap, &ui->text_caret_pos, '\n');
-            if (len != old_len) changed = 1u;
+            if (len != old_len) {
+                sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
+                changed = 1u;
+            }
             continue;
         }
         if (code == PEOS_KEY_LEFT_NORM) {
-            if (ui->text_caret_pos > 0u) ui->text_caret_pos = sl_ui_utf8_prev_pos(text, ui->text_caret_pos);
+            uint32_t sel_start = 0u, sel_end = 0u;
+            if (!ui->shift_down && sl_ui_selection_range(ui, id, &sel_start, &sel_end)) {
+                sl_ui_move_caret(ui, id, ui->text_caret_pos, sel_start, 0u);
+            } else {
+                uint32_t old_pos = ui->text_caret_pos;
+                uint32_t new_pos = old_pos;
+                if (new_pos > 0u) new_pos = sl_ui_utf8_prev_pos(text, new_pos);
+                sl_ui_move_caret(ui, id, old_pos, new_pos, ui->shift_down);
+            }
             continue;
         }
         if (code == PEOS_KEY_RIGHT_NORM) {
-            if (ui->text_caret_pos < len) ui->text_caret_pos = sl_ui_utf8_next_pos(text, ui->text_caret_pos, len);
+            uint32_t sel_start = 0u, sel_end = 0u;
+            if (!ui->shift_down && sl_ui_selection_range(ui, id, &sel_start, &sel_end)) {
+                sl_ui_move_caret(ui, id, ui->text_caret_pos, sel_end, 0u);
+            } else {
+                uint32_t old_pos = ui->text_caret_pos;
+                uint32_t new_pos = old_pos;
+                if (new_pos < len) new_pos = sl_ui_utf8_next_pos(text, new_pos, len);
+                sl_ui_move_caret(ui, id, old_pos, new_pos, ui->shift_down);
+            }
             continue;
         }
         if (code == PEOS_KEY_UP_NORM || code == PEOS_KEY_DOWN_NORM) {
-            uint32_t line_start = sl_ui_text_line_start(text, ui->text_caret_pos);
-            uint32_t col = sl_ui_utf8_count_between(text, line_start, ui->text_caret_pos);
+            uint32_t old_pos = ui->text_caret_pos;
+            uint32_t new_pos = old_pos;
+            uint32_t line_start = sl_ui_text_line_start(text, old_pos);
+            uint32_t col = sl_ui_utf8_count_between(text, line_start, old_pos);
             if (code == PEOS_KEY_UP_NORM) {
                 if (line_start > 0u) {
                     uint32_t prev_end = line_start - 1u;
                     uint32_t prev_start = sl_ui_text_line_start(text, prev_end);
                     uint32_t prev_len = sl_ui_utf8_count_between(text, prev_start, prev_end);
-                    ui->text_caret_pos = sl_ui_utf8_advance_cols(text, prev_start, prev_end,
-                                                                 (col < prev_len) ? col : prev_len);
+                    new_pos = sl_ui_utf8_advance_cols(text, prev_start, prev_end,
+                                                      (col < prev_len) ? col : prev_len);
                 }
             } else {
                 uint32_t line_end = sl_ui_text_line_end(text, line_start);
@@ -1166,16 +1375,23 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
                     uint32_t next_start = line_end + 1u;
                     uint32_t next_end = sl_ui_text_line_end(text, next_start);
                     uint32_t next_len = sl_ui_utf8_count_between(text, next_start, next_end);
-                    ui->text_caret_pos = sl_ui_utf8_advance_cols(text, next_start, next_end,
-                                                                 (col < next_len) ? col : next_len);
+                    new_pos = sl_ui_utf8_advance_cols(text, next_start, next_end,
+                                                      (col < next_len) ? col : next_len);
                 }
             }
+            sl_ui_move_caret(ui, id, old_pos, new_pos, ui->shift_down);
             continue;
         }
         if (code == PEOS_KEY_TAB) {
             uint32_t old_len = len;
+            if (sl_ui_selection_range(ui, id, NULL, NULL)) {
+                if (sl_ui_text_delete_selection(ui, id, text, &len, &ui->text_caret_pos)) changed = 1u;
+            }
             sl_ui_text_insert_char(text, &len, text_cap, &ui->text_caret_pos, '\t');
-            if (len != old_len) changed = 1u;
+            if (len != old_len) {
+                sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
+                changed = 1u;
+            }
             continue;
         }
         if (ui->ctrl_down || ui->alt_down || ui->super_down) {
@@ -1188,9 +1404,15 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
                                                        input, sizeof(input));
         if (input_len > 0u) {
             uint32_t old_len = len;
+            if (sl_ui_selection_range(ui, id, NULL, NULL)) {
+                if (sl_ui_text_delete_selection(ui, id, text, &len, &ui->text_caret_pos)) changed = 1u;
+            }
             sl_ui_text_insert_bytes(text, &len, text_cap, &ui->text_caret_pos,
                                     input, (uint32_t)input_len);
-            if (len != old_len) changed = 1u;
+            if (len != old_len) {
+                sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
+                changed = 1u;
+            }
         }
     }
 
@@ -1221,18 +1443,18 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t max_scroll_col = (max_line_len > vis_cols) ? (max_line_len - vis_cols) : 0u;
     if (ui->text_area_scroll_col > max_scroll_col) ui->text_area_scroll_col = max_scroll_col;
 
-    if (enabled && ui->mouse_pressed && hovered && was_focused) {
-        uint32_t click_row = 0u;
-        uint32_t click_col = 0u;
-        if (ui->cursor_y > content_y) click_row = (ui->cursor_y - content_y) / fh;
-        if (click_row >= vis_lines) click_row = vis_lines - 1u;
-        if (ui->cursor_x > content_x) click_col = (ui->cursor_x - content_x) / fw;
-        if (click_col > vis_cols) click_col = vis_cols;
-        click_col += ui->text_area_scroll_col;
-        uint32_t click_line = ui->text_area_scroll_line + click_row;
-        ui->text_caret_pos = sl_ui_text_pos_from_line_col(text, click_line, click_col);
+    if (enabled && ui->mouse_pressed && hovered) {
+        ui->text_caret_pos = sl_ui_text_area_hit_pos(ui, x, y, w, h, text);
         if (ui->text_caret_pos > len) ui->text_caret_pos = len;
+        sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
     }
+    if (enabled && ui->active_id == id && ui->mouse_down) {
+        uint32_t old_pos = ui->text_caret_pos;
+        uint32_t new_pos = sl_ui_text_area_hit_pos(ui, x, y, w, h, text);
+        if (new_pos > len) new_pos = len;
+        sl_ui_move_caret(ui, id, old_pos, new_pos, 1u);
+    }
+    if (ui->mouse_released && ui->active_id == id) ui->active_id = 0u;
 
     if (enabled && hovered && !ui->wheel_consumed && max_scroll > 0u) {
         int32_t wheel = (ui->wheel_y != 0) ? ui->wheel_y : ui->wheel_x;
@@ -1298,6 +1520,27 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
 
         draw_buf[dn] = '\0';
 
+        {
+            uint32_t sel_start = 0u, sel_end = 0u;
+            if (sl_ui_selection_range(ui, id, &sel_start, &sel_end)) {
+                uint32_t clip_start = (sel_start > start) ? sel_start : start;
+                uint32_t clip_end = (sel_end < end) ? sel_end : end;
+                if (clip_end > clip_start) {
+                    uint32_t col0 = sl_ui_utf8_count_between(text, start, clip_start);
+                    uint32_t col1 = sl_ui_utf8_count_between(text, start, clip_end);
+                    if (col1 > col0) {
+                        uint32_t draw_col0 = (col0 > ui->text_area_scroll_col) ? (col0 - ui->text_area_scroll_col) : 0u;
+                        uint32_t draw_col1 = (col1 > ui->text_area_scroll_col) ? (col1 - ui->text_area_scroll_col) : 0u;
+                        if (draw_col0 > vis_cols) draw_col0 = vis_cols;
+                        if (draw_col1 > vis_cols) draw_col1 = vis_cols;
+                        if (draw_col1 > draw_col0) {
+                            sl_ui_fill_selection(ui, content_x + draw_col0 * fw, ly,
+                                                 (draw_col1 - draw_col0) * fw, fh);
+                        }
+                    }
+                }
+            }
+        }
         sl_ui_text_tok(ui, content_x, ly, draw_buf,
                        enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
         if (caret_visible && line_idx == caret_line) {
