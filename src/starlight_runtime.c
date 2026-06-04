@@ -874,9 +874,19 @@ void sl_reload_theme(sl_ctx_t *ctx) {
 
 int sl_handle_input(sl_ctx_t *ctx) {
     sl_input_frame_t input;
+    uint8_t clipboard_changed = 0u;
+    uint8_t clipboard_full_redraw = 0u;
     if (sl_input_poll(ctx, &input) < 0) return 1;
-    if (sl_clipboard_handle_input(ctx, &input)) {
-        sl_dirty_mark_full();
+    if (sl_clipboard_handle_input(ctx, &input, &clipboard_changed, &clipboard_full_redraw)) {
+        if (clipboard_changed) {
+            if (clipboard_full_redraw) {
+                sl_dirty_mark_full();
+            } else {
+                uint32_t x = 0u, y = 0u, w = 0u, h = 0u;
+                sl_clipboard_overlay_bounds(ctx, &x, &y, &w, &h);
+                sl_dirty_add(ctx, x, y, w, h);
+            }
+        }
         return input.quit_requested ? 1 : 0;
     }
 
