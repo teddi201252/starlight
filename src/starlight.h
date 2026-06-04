@@ -42,6 +42,7 @@ typedef struct {
     uint32_t double_click_ms;
     uint32_t keyboard_repeat_delay_ms;
     uint32_t keyboard_repeat_rate_hz;
+    uint32_t clipboard_manager_hold_ms;
 
     // Background
     sl_image_t bg_image;

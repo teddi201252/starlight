@@ -34,6 +34,9 @@
 #define SL_KEY_REPEAT_RATE_HZ_DEFAULT 30u
 #define SL_KEY_REPEAT_RATE_HZ_MIN 5u
 #define SL_KEY_REPEAT_RATE_HZ_MAX 60u
+#define SL_CLIPBOARD_MANAGER_HOLD_MS_DEFAULT 400u
+#define SL_CLIPBOARD_MANAGER_HOLD_MS_MIN 100u
+#define SL_CLIPBOARD_MANAGER_HOLD_MS_MAX 3000u
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
 #define SL_DIRTY_MAX_RECTS 256u
@@ -459,6 +462,7 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "keyboard_layout=us\n");
     (void)fprintf(f, "keyboard_repeat_delay_ms=250\n");
     (void)fprintf(f, "keyboard_repeat_rate_hz=30\n");
+    (void)fprintf(f, "clipboard_manager_hold_ms=400\n");
     (void)fclose(f);
 }
 
@@ -564,6 +568,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->double_click_ms = SL_DOUBLE_CLICK_MS_DEFAULT;
     ctx->keyboard_repeat_delay_ms = SL_KEY_REPEAT_DELAY_MS_DEFAULT;
     ctx->keyboard_repeat_rate_hz = SL_KEY_REPEAT_RATE_HZ_DEFAULT;
+    ctx->clipboard_manager_hold_ms = SL_CLIPBOARD_MANAGER_HOLD_MS_DEFAULT;
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
     if (!cfg) {
@@ -638,6 +643,13 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                         if (n > SL_KEY_REPEAT_RATE_HZ_MAX) n = SL_KEY_REPEAT_RATE_HZ_MAX;
                         ctx->keyboard_repeat_rate_hz = n;
                     }
+                } else if (strcmp(key, "clipboard_manager_hold_ms") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n)) {
+                        if (n < SL_CLIPBOARD_MANAGER_HOLD_MS_MIN) n = SL_CLIPBOARD_MANAGER_HOLD_MS_MIN;
+                        if (n > SL_CLIPBOARD_MANAGER_HOLD_MS_MAX) n = SL_CLIPBOARD_MANAGER_HOLD_MS_MAX;
+                        ctx->clipboard_manager_hold_ms = n;
+                    }
                 }
             }
         }
@@ -709,15 +721,20 @@ static void sl_apply_animation_config(const sl_ctx_t *ctx) {
 static void sl_apply_keyboard_config(const sl_ctx_t *ctx) {
     uint32_t delay_ms = SL_KEY_REPEAT_DELAY_MS_DEFAULT;
     uint32_t rate_hz = SL_KEY_REPEAT_RATE_HZ_DEFAULT;
+    uint32_t hold_ms = SL_CLIPBOARD_MANAGER_HOLD_MS_DEFAULT;
     if (!ctx) return;
     delay_ms = ctx->keyboard_repeat_delay_ms;
     rate_hz = ctx->keyboard_repeat_rate_hz;
+    hold_ms = ctx->clipboard_manager_hold_ms;
     if (delay_ms < SL_KEY_REPEAT_DELAY_MS_MIN) delay_ms = SL_KEY_REPEAT_DELAY_MS_MIN;
     if (delay_ms > SL_KEY_REPEAT_DELAY_MS_MAX) delay_ms = SL_KEY_REPEAT_DELAY_MS_MAX;
     if (rate_hz < SL_KEY_REPEAT_RATE_HZ_MIN) rate_hz = SL_KEY_REPEAT_RATE_HZ_MIN;
     if (rate_hz > SL_KEY_REPEAT_RATE_HZ_MAX) rate_hz = SL_KEY_REPEAT_RATE_HZ_MAX;
+    if (hold_ms < SL_CLIPBOARD_MANAGER_HOLD_MS_MIN) hold_ms = SL_CLIPBOARD_MANAGER_HOLD_MS_MIN;
+    if (hold_ms > SL_CLIPBOARD_MANAGER_HOLD_MS_MAX) hold_ms = SL_CLIPBOARD_MANAGER_HOLD_MS_MAX;
     (void)sl_keyboard_layout_load(ctx->keyboard_layout_path);
     sl_input_set_key_repeat_config(delay_ms, rate_hz);
+    sl_input_set_actionmod_hold_config(hold_ms);
 }
 
 char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap) {
