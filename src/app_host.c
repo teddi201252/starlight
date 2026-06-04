@@ -232,6 +232,7 @@ typedef struct {
     size_t pending_len;
     size_t pending_cap;
     uint8_t shift_down;
+    uint8_t caps_lock_on;
     uint8_t ctrl_down;
     uint8_t alt_down;
     uint8_t altgr_down;
@@ -2332,6 +2333,7 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         shell->ui.mouse_wheel_x = frame->mouse_wheel_x;
         shell->ui.mouse_wheel_y = frame->mouse_wheel_y;
         shell->ui.clipboard_cmds = frame->clipboard_cmds;
+        shell->caps_lock_on = frame->caps_lock_on;
     }
 
     if (!event) return;
@@ -2403,6 +2405,7 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
 
     char input[8];
     size_t input_len = sl_keyboard_translate_event(event, shell->shift_down,
+                                                   shell->caps_lock_on,
                                                    shell->altgr_down,
                                                    input, sizeof(input));
     if (input_len == 0u) return;
@@ -3388,7 +3391,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     ctx->cursor_x, ctx->cursor_y,
                     shell->ui.mouse_down, shell->ui.mouse_pressed, shell->ui.mouse_released,
                     shell->ui.mouse_wheel_x, shell->ui.mouse_wheel_y,
-                    shell->ui.clipboard_cmds);
+                    shell->ui.clipboard_cmds, shell->caps_lock_on);
         if (shell->ui.mouse_pressed) shell->ui.keyboard_nav_active = 0u;
         sl_ui_set_font_px(&shell->ui.ui, 0u);
         if (shell->ui.theme_override_enabled) {

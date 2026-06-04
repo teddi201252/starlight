@@ -9,6 +9,7 @@ typedef struct {
     uint8_t mouse_released;
     int32_t mouse_wheel_x;
     int32_t mouse_wheel_y;
+    uint8_t caps_lock_on;
     uint32_t clipboard_cmds;
     uint32_t slider;
     uint32_t clicks;
@@ -59,6 +60,7 @@ static void sdk_demo_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         s->mouse_released = frame->mouse_left_released;
         s->mouse_wheel_x = frame->mouse_wheel_x;
         s->mouse_wheel_y = frame->mouse_wheel_y;
+        s->caps_lock_on = frame->caps_lock_on;
         s->clipboard_cmds = frame->clipboard_cmds;
 
         if (frame->mouse_left_released) {
@@ -120,7 +122,7 @@ static void sdk_demo_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *user
                 ctx->cursor_x, ctx->cursor_y,
                 s->mouse_down, s->mouse_pressed, s->mouse_released,
                 s->mouse_wheel_x, s->mouse_wheel_y,
-                s->clipboard_cmds);
+                s->clipboard_cmds, s->caps_lock_on);
 
     uint32_t x = body_x + 10u;
     uint32_t y = body_y + 10u;

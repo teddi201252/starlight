@@ -21,6 +21,31 @@ typedef struct {
 
 static sl_keymap_entry_t g_keymap[SL_KEYMAP_KEYS];
 
+static uint8_t sl_keymap_entry_is_ascii_alpha(const char *text) {
+    return (text && text[0] && text[1] == '\0' &&
+            ((text[0] >= 'a' && text[0] <= 'z') || (text[0] >= 'A' && text[0] <= 'Z'))) ? 1u : 0u;
+}
+
+static uint8_t sl_keymap_is_alpha_key(uint16_t code) {
+    const char *base = NULL;
+    const char *shift = NULL;
+    if (code >= SL_KEYMAP_KEYS) return 0u;
+    base = g_keymap[code].text[0];
+    shift = g_keymap[code].text[1];
+    if (!sl_keymap_entry_is_ascii_alpha(base) || !sl_keymap_entry_is_ascii_alpha(shift)) return 0u;
+    if ((base[0] >= 'a' && base[0] <= 'z') &&
+        (shift[0] >= 'A' && shift[0] <= 'Z') &&
+        (uint8_t)(shift[0] - 'A') == (uint8_t)(base[0] - 'a')) {
+        return 1u;
+    }
+    if ((base[0] >= 'A' && base[0] <= 'Z') &&
+        (shift[0] >= 'a' && shift[0] <= 'z') &&
+        (uint8_t)(base[0] - 'A') == (uint8_t)(shift[0] - 'a')) {
+        return 1u;
+    }
+    return 0u;
+}
+
 static void sl_keymap_clear(void) {
     peos_memset(g_keymap, 0, sizeof(g_keymap));
 }
@@ -363,17 +388,24 @@ size_t sl_keyboard_translate(uint16_t keycode, uint32_t mods, char *out, size_t 
 
 size_t sl_keyboard_translate_event(const peos_input_event_t *event,
                                    uint8_t shift_down,
+                                   uint8_t caps_lock_on,
                                    uint8_t altgr_down,
                                    char *out,
                                    size_t out_cap) {
     uint32_t mods = 0u;
+    uint16_t code = 0u;
+    uint8_t effective_shift = shift_down ? 1u : 0u;
     if (!event || !event->pressed) {
         if (out && out_cap > 0u) out[0] = '\0';
         return 0u;
     }
-    if (shift_down) mods |= SL_KEYMOD_SHIFT;
+    code = sl_keymap_norm_keycode(event->code);
+    if (caps_lock_on && !altgr_down && sl_keymap_is_alpha_key(code)) {
+        effective_shift ^= 1u;
+    }
+    if (effective_shift) mods |= SL_KEYMOD_SHIFT;
     if (altgr_down) mods |= SL_KEYMOD_ALTGR;
-    return sl_keyboard_translate(event->code, mods, out, out_cap);
+    return sl_keyboard_translate(code, mods, out, out_cap);
 }
 
 uint8_t sl_keyboard_event_is_altgr(const peos_input_event_t *event) {

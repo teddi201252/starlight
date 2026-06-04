@@ -49,6 +49,7 @@ typedef struct {
     uint32_t focused_id;
     uint32_t clipboard_cmds;
     uint8_t shift_down;
+    uint8_t caps_lock_on;
     uint8_t ctrl_down;
     uint8_t alt_down;
     uint8_t altgr_down;
@@ -119,7 +120,7 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
                  uint32_t cursor_x, uint32_t cursor_y,
                  uint8_t mouse_down, uint8_t mouse_pressed, uint8_t mouse_released,
                  int32_t wheel_x, int32_t wheel_y,
-                 uint32_t clipboard_cmds);
+                 uint32_t clipboard_cmds, uint8_t caps_lock_on);
 void sl_ui_theme_set_default(sl_ui_theme_t *theme);
 void sl_ui_theme_apply(sl_ui_ctx_t *ui, const sl_ui_theme_t *theme);
 void sl_ui_theme_reset(sl_ui_ctx_t *ui);
