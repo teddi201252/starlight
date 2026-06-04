@@ -29,4 +29,5 @@ typedef struct {
 
 void sl_input_state_reset(void);
 void sl_input_set_key_repeat_config(uint32_t delay_ms, uint32_t rate_hz);
+void sl_input_set_actionmod_hold_config(uint32_t hold_ms);
 int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out);

@@ -10,7 +10,9 @@ static uint8_t g_prev_mouse_buttons = 0u;
 #define SL_KEY_REPEAT_RATE_HZ_MIN 5u
 #define SL_KEY_REPEAT_RATE_HZ_MAX 60u
 #define SL_ACTIONMOD_TAP_NS 180000000ull
-#define SL_ACTIONMOD_HOLD_NS 400000000ull
+#define SL_ACTIONMOD_HOLD_MS_DEFAULT 400u
+#define SL_ACTIONMOD_HOLD_MS_MIN 100u
+#define SL_ACTIONMOD_HOLD_MS_MAX 3000u
 
 typedef enum {
     SL_ACTIONMOD_IDLE = 0,
@@ -37,6 +39,7 @@ typedef struct {
 static sl_key_repeat_slot_t g_key_repeat[SL_KEY_REPEAT_SLOTS];
 static uint32_t g_key_repeat_delay_ms = SL_KEY_REPEAT_DELAY_MS_DEFAULT;
 static uint32_t g_key_repeat_rate_hz = SL_KEY_REPEAT_RATE_HZ_DEFAULT;
+static uint32_t g_actionmod_hold_ms = SL_ACTIONMOD_HOLD_MS_DEFAULT;
 static sl_actionmod_tracker_t g_actionmod;
 
 static uint64_t sl_repeat_delay_ns(void) {
@@ -46,6 +49,11 @@ static uint64_t sl_repeat_delay_ns(void) {
 static uint64_t sl_repeat_interval_ns(void) {
     uint32_t hz = g_key_repeat_rate_hz ? g_key_repeat_rate_hz : SL_KEY_REPEAT_RATE_HZ_DEFAULT;
     return 1000000000ull / (uint64_t)hz;
+}
+
+static uint64_t sl_actionmod_hold_ns(void) {
+    uint32_t hold_ms = g_actionmod_hold_ms ? g_actionmod_hold_ms : SL_ACTIONMOD_HOLD_MS_DEFAULT;
+    return (uint64_t)hold_ms * 1000000ull;
 }
 
 static uint16_t sl_norm_keycode(uint16_t code) {
@@ -129,7 +137,7 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
 
 static void sl_actionmod_tick(sl_input_frame_t *out, uint64_t now_ns) {
     if (!out || g_actionmod.state != SL_ACTIONMOD_PRESSED || !g_actionmod.caps_down) return;
-    if ((now_ns - g_actionmod.press_ns) < SL_ACTIONMOD_HOLD_NS) return;
+    if ((now_ns - g_actionmod.press_ns) < sl_actionmod_hold_ns()) return;
     out->clipboard_cmds |= SL_CLIP_CMD_OPEN_MANAGER;
     g_actionmod.state = SL_ACTIONMOD_MANAGER_OPENED;
 }
@@ -191,6 +199,12 @@ void sl_input_set_key_repeat_config(uint32_t delay_ms, uint32_t rate_hz) {
     if (rate_hz > SL_KEY_REPEAT_RATE_HZ_MAX) rate_hz = SL_KEY_REPEAT_RATE_HZ_MAX;
     g_key_repeat_delay_ms = delay_ms;
     g_key_repeat_rate_hz = rate_hz;
+}
+
+void sl_input_set_actionmod_hold_config(uint32_t hold_ms) {
+    if (hold_ms < SL_ACTIONMOD_HOLD_MS_MIN) hold_ms = SL_ACTIONMOD_HOLD_MS_MIN;
+    if (hold_ms > SL_ACTIONMOD_HOLD_MS_MAX) hold_ms = SL_ACTIONMOD_HOLD_MS_MAX;
+    g_actionmod_hold_ms = hold_ms;
 }
 
 void sl_input_state_reset(void) {
