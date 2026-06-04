@@ -237,7 +237,7 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
                  uint32_t cursor_x, uint32_t cursor_y,
                  uint8_t mouse_down, uint8_t mouse_pressed, uint8_t mouse_released,
                  int32_t wheel_x, int32_t wheel_y,
-                 uint32_t clipboard_cmds) {
+                 uint32_t clipboard_cmds, uint8_t caps_lock_on) {
     if (!ui) return;
     ui->ctx = ctx;
     ui->win = win;
@@ -249,6 +249,7 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
     ui->wheel_x = wheel_x;
     ui->wheel_y = wheel_y;
     ui->clipboard_cmds = clipboard_cmds;
+    ui->caps_lock_on = caps_lock_on;
     ui->wheel_consumed = 0u;
     ui->select_overlay_pending = 0u;
     ui->select_overlay_options_pipe = NULL;
@@ -1006,6 +1007,7 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
 
         char input[8];
         size_t input_len = sl_keyboard_translate_event(&events[i], ui->shift_down,
+                                                       ui->caps_lock_on,
                                                        ui->altgr_down,
                                                        input, sizeof(input));
         if (input_len > 0u && sl_ui_selection_range(ui, id, NULL, NULL)) {
@@ -1449,6 +1451,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
 
         char input[8];
         size_t input_len = sl_keyboard_translate_event(&events[i], ui->shift_down,
+                                                       ui->caps_lock_on,
                                                        ui->altgr_down,
                                                        input, sizeof(input));
         if (input_len > 0u) {

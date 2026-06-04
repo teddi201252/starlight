@@ -23,6 +23,7 @@ typedef struct {
     sl_actionmod_state_t state;
     uint64_t press_ns;
     uint8_t caps_down;
+    uint8_t caps_lock_on;
     uint8_t swallow_a;
     uint8_t swallow_s;
 } sl_actionmod_tracker_t;
@@ -87,6 +88,7 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
         } else {
             if (g_actionmod.state == SL_ACTIONMOD_PRESSED &&
                 (now_ns - g_actionmod.press_ns) <= SL_ACTIONMOD_TAP_NS) {
+                g_actionmod.caps_lock_on ^= 1u;
                 sl_append_key_event(out, PEOS_KEY_CAPSLOCK, 1u, now_ns);
                 sl_append_key_event(out, PEOS_KEY_CAPSLOCK, 0u, now_ns);
             }
@@ -201,6 +203,7 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
     if (!ctx || !out) return -1;
 
     peos_memset(out, 0, sizeof(*out));
+    out->caps_lock_on = g_actionmod.caps_lock_on;
 
     peos_input_event_t evs[16];
     peos_mouse_event_t mev;
@@ -210,7 +213,7 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
     uint64_t now_ns = peos_time_ns();
 
     for (uint64_t i = 0; i < n; i++) {
-        if (!ctx->input_raw && sl_actionmod_filter_event(out, &evs[i], now_ns)) {
+        if (sl_actionmod_filter_event(out, &evs[i], now_ns)) {
             continue;
         }
         sl_repeat_on_key_event(&evs[i], now_ns);
@@ -219,7 +222,8 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
         }
     }
 
-    if (!ctx->input_raw) sl_actionmod_tick(out, now_ns);
+    sl_actionmod_tick(out, now_ns);
+    out->caps_lock_on = g_actionmod.caps_lock_on;
 
     sl_emit_synthetic_repeats(out, now_ns);
 
