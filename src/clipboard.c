@@ -24,6 +24,24 @@ typedef struct {
 
 static sl_clipboard_state_t g_clipboard;
 
+void sl_clipboard_overlay_bounds(const sl_ctx_t *ctx,
+                                 uint32_t *out_x, uint32_t *out_y,
+                                 uint32_t *out_w, uint32_t *out_h) {
+    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
+    if (!ctx) goto out;
+    panel_w = 420u;
+    panel_h = 240u;
+    if (ctx->fb.width < panel_w + 24u) panel_w = (ctx->fb.width > 24u) ? (ctx->fb.width - 24u) : ctx->fb.width;
+    if (ctx->fb.height < panel_h + 24u) panel_h = (ctx->fb.height > 24u) ? (ctx->fb.height - 24u) : ctx->fb.height;
+    panel_x = (ctx->fb.width > panel_w) ? ((ctx->fb.width - panel_w) / 2u) : 0u;
+    panel_y = (ctx->fb.height > panel_h) ? ((ctx->fb.height - panel_h) / 2u) : 0u;
+out:
+    if (out_x) *out_x = panel_x;
+    if (out_y) *out_y = panel_y;
+    if (out_w) *out_w = panel_w;
+    if (out_h) *out_h = panel_h;
+}
+
 static void sl_clipboard_item_free(sl_clipboard_item_t *item) {
     if (!item) return;
     if (item->text) free(item->text);
@@ -130,24 +148,24 @@ void sl_clipboard_shutdown(void) {
     g_clipboard.manager_selected = 0u;
 }
 
-uint8_t sl_clipboard_handle_input(sl_ctx_t *ctx, sl_input_frame_t *frame) {
+uint8_t sl_clipboard_handle_input(sl_ctx_t *ctx, sl_input_frame_t *frame,
+                                  uint8_t *out_changed, uint8_t *out_full_redraw) {
     uint32_t panel_x, panel_y, panel_w, panel_h, row_h, list_x, list_y, list_w;
     uint32_t visible, start_idx;
+    if (out_changed) *out_changed = 0u;
+    if (out_full_redraw) *out_full_redraw = 0u;
     if (!ctx || !frame) return 0u;
     if (frame->clipboard_cmds & SL_CLIP_CMD_OPEN_MANAGER) {
         frame->clipboard_cmds &= ~SL_CLIP_CMD_OPEN_MANAGER;
         g_clipboard.manager_open = 1u;
         if (g_clipboard.manager_selected >= g_clipboard.count) g_clipboard.manager_selected = 0u;
+        if (out_changed) *out_changed = 1u;
+        if (out_full_redraw) *out_full_redraw = 1u;
         return 1u;
     }
     if (!g_clipboard.manager_open) return 0u;
 
-    panel_w = 420u;
-    panel_h = 240u;
-    if (ctx->fb.width < panel_w + 24u) panel_w = (ctx->fb.width > 24u) ? (ctx->fb.width - 24u) : ctx->fb.width;
-    if (ctx->fb.height < panel_h + 24u) panel_h = (ctx->fb.height > 24u) ? (ctx->fb.height - 24u) : ctx->fb.height;
-    panel_x = (ctx->fb.width > panel_w) ? ((ctx->fb.width - panel_w) / 2u) : 0u;
-    panel_y = (ctx->fb.height > panel_h) ? ((ctx->fb.height - panel_h) / 2u) : 0u;
+    sl_clipboard_overlay_bounds(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
     row_h = 20u;
     list_x = panel_x + 12u;
     list_y = panel_y + 52u;
@@ -166,19 +184,29 @@ uint8_t sl_clipboard_handle_input(sl_ctx_t *ctx, sl_input_frame_t *frame) {
         if (!ev->pressed) continue;
         if (code == PEOS_KEY_ESC) {
             g_clipboard.manager_open = 0u;
+            if (out_changed) *out_changed = 1u;
+            if (out_full_redraw) *out_full_redraw = 1u;
             return 1u;
         }
         if (code == PEOS_KEY_UP || code == PEOS_KEY_UP_NORM) {
-            if (g_clipboard.manager_selected > 0u) g_clipboard.manager_selected--;
+            if (g_clipboard.manager_selected > 0u) {
+                g_clipboard.manager_selected--;
+                if (out_changed) *out_changed = 1u;
+            }
             return 1u;
         }
         if (code == PEOS_KEY_DOWN || code == PEOS_KEY_DOWN_NORM) {
-            if (g_clipboard.manager_selected + 1u < g_clipboard.count) g_clipboard.manager_selected++;
+            if (g_clipboard.manager_selected + 1u < g_clipboard.count) {
+                g_clipboard.manager_selected++;
+                if (out_changed) *out_changed = 1u;
+            }
             return 1u;
         }
         if (code == PEOS_KEY_ENTER && g_clipboard.count > 0u) {
             sl_clipboard_promote_index(g_clipboard.manager_selected);
             g_clipboard.manager_open = 0u;
+            if (out_changed) *out_changed = 1u;
+            if (out_full_redraw) *out_full_redraw = 1u;
             return 1u;
         }
     }
@@ -187,6 +215,8 @@ uint8_t sl_clipboard_handle_input(sl_ctx_t *ctx, sl_input_frame_t *frame) {
         if (ctx->cursor_x < panel_x || ctx->cursor_x >= panel_x + panel_w ||
             ctx->cursor_y < panel_y || ctx->cursor_y >= panel_y + panel_h) {
             g_clipboard.manager_open = 0u;
+            if (out_changed) *out_changed = 1u;
+            if (out_full_redraw) *out_full_redraw = 1u;
             return 1u;
         }
         if (ctx->cursor_x >= list_x && ctx->cursor_x < list_x + list_w &&
@@ -197,6 +227,8 @@ uint8_t sl_clipboard_handle_input(sl_ctx_t *ctx, sl_input_frame_t *frame) {
                 g_clipboard.manager_selected = picked;
                 sl_clipboard_promote_index(picked);
                 g_clipboard.manager_open = 0u;
+                if (out_changed) *out_changed = 1u;
+                if (out_full_redraw) *out_full_redraw = 1u;
             }
             return 1u;
         }
@@ -211,12 +243,7 @@ void sl_clipboard_render_overlay(sl_ctx_t *ctx) {
     char line[56];
     if (!ctx || !g_clipboard.manager_open) return;
 
-    panel_w = 420u;
-    panel_h = 240u;
-    if (ctx->fb.width < panel_w + 24u) panel_w = (ctx->fb.width > 24u) ? (ctx->fb.width - 24u) : ctx->fb.width;
-    if (ctx->fb.height < panel_h + 24u) panel_h = (ctx->fb.height > 24u) ? (ctx->fb.height - 24u) : ctx->fb.height;
-    panel_x = (ctx->fb.width > panel_w) ? ((ctx->fb.width - panel_w) / 2u) : 0u;
-    panel_y = (ctx->fb.height > panel_h) ? ((ctx->fb.height - panel_h) / 2u) : 0u;
+    sl_clipboard_overlay_bounds(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
     row_h = 20u;
     visible = (g_clipboard.count < SL_CLIPBOARD_VISIBLE) ? g_clipboard.count : SL_CLIPBOARD_VISIBLE;
     if (visible == 0u) visible = 1u;
