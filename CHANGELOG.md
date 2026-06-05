@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.10.2] - 2026-06-05
+- Add clipboard copy feedback effects
+
 ## [0.10.1] - 2026-05-26
 - Add shared-surface Orbit framebuffer transport
 
