@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.10.3] - 2026-06-05
+- Patch maintenance release.
+
 ## [0.10.2] - 2026-06-05
 - Add clipboard copy feedback effects
 
