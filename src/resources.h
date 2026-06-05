@@ -15,4 +15,5 @@
 #define SL_RESOURCE_CURSOR_ALT SL_RESOURCE_ROOT "/cursor_2.png"
 #define SL_RESOURCE_BACKGROUND_ALT SL_RESOURCE_ROOT "/backgrounds/fih.jpg"
 #define SL_RESOURCE_START_WAV SL_RESOURCE_ROOT "/start.wav"
+#define SL_RESOURCE_COPYEFF_WAV SL_RESOURCE_ROOT "/copyeff.wav"
 #define SL_RESOURCE_APP_PLACEHOLDER SL_RESOURCE_ROOT "/app_placeholder.png"

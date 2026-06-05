@@ -108,6 +108,7 @@ int main(void) {
         sl_windows_tick_animations(&ctx);
 
         sl_app_host_tick(&ctx);
+        sl_clipboard_tick(&ctx);
 
         {
             uint8_t app_prompt_blink_now = (uint8_t)((peos_time_ns() / 500000000ull) & 1ull);

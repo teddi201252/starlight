@@ -37,6 +37,8 @@
 #define SL_CLIPBOARD_MANAGER_HOLD_MS_DEFAULT 400u
 #define SL_CLIPBOARD_MANAGER_HOLD_MS_MIN 100u
 #define SL_CLIPBOARD_MANAGER_HOLD_MS_MAX 3000u
+#define SL_CLIPBOARD_FEEDBACK_AUDIO_DEFAULT 1u
+#define SL_CLIPBOARD_FEEDBACK_VISUAL_DEFAULT 1u
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
 #define SL_DIRTY_MAX_RECTS 256u
@@ -463,6 +465,8 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "keyboard_repeat_delay_ms=250\n");
     (void)fprintf(f, "keyboard_repeat_rate_hz=30\n");
     (void)fprintf(f, "clipboard_manager_hold_ms=400\n");
+    (void)fprintf(f, "clipboard_feedback_audio=1\n");
+    (void)fprintf(f, "clipboard_feedback_visual=1\n");
     (void)fclose(f);
 }
 
@@ -569,6 +573,8 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->keyboard_repeat_delay_ms = SL_KEY_REPEAT_DELAY_MS_DEFAULT;
     ctx->keyboard_repeat_rate_hz = SL_KEY_REPEAT_RATE_HZ_DEFAULT;
     ctx->clipboard_manager_hold_ms = SL_CLIPBOARD_MANAGER_HOLD_MS_DEFAULT;
+    ctx->clipboard_feedback_audio_enabled = SL_CLIPBOARD_FEEDBACK_AUDIO_DEFAULT;
+    ctx->clipboard_feedback_visual_enabled = SL_CLIPBOARD_FEEDBACK_VISUAL_DEFAULT;
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
     if (!cfg) {
@@ -649,6 +655,16 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                         if (n < SL_CLIPBOARD_MANAGER_HOLD_MS_MIN) n = SL_CLIPBOARD_MANAGER_HOLD_MS_MIN;
                         if (n > SL_CLIPBOARD_MANAGER_HOLD_MS_MAX) n = SL_CLIPBOARD_MANAGER_HOLD_MS_MAX;
                         ctx->clipboard_manager_hold_ms = n;
+                    }
+                } else if (strcmp(key, "clipboard_feedback_audio") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n)) {
+                        ctx->clipboard_feedback_audio_enabled = n ? 1u : 0u;
+                    }
+                } else if (strcmp(key, "clipboard_feedback_visual") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n)) {
+                        ctx->clipboard_feedback_visual_enabled = n ? 1u : 0u;
                     }
                 }
             }
@@ -737,6 +753,12 @@ static void sl_apply_keyboard_config(const sl_ctx_t *ctx) {
     sl_input_set_actionmod_hold_config(hold_ms);
 }
 
+static void sl_apply_clipboard_feedback_config(const sl_ctx_t *ctx) {
+    if (!ctx) return;
+    sl_clipboard_set_feedback_config(ctx->clipboard_feedback_audio_enabled,
+                                     ctx->clipboard_feedback_visual_enabled);
+}
+
 char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap) {
     if (!out || out_cap == 0) return NULL;
 
@@ -820,6 +842,7 @@ int sl_init(sl_ctx_t *ctx) {
     sl_load_starlight_config(ctx);
     sl_apply_animation_config(ctx);
     sl_apply_keyboard_config(ctx);
+    sl_apply_clipboard_feedback_config(ctx);
     sl_load_theme_config();
     sl_font_reset_default();
     if (ctx->font_manifest_path[0]) {
@@ -865,6 +888,7 @@ void sl_reload_display(sl_ctx_t *ctx) {
     sl_load_starlight_config(ctx);
     sl_apply_animation_config(ctx);
     sl_apply_keyboard_config(ctx);
+    sl_apply_clipboard_feedback_config(ctx);
     sl_load_theme_config();
     sl_font_reset_default();
     if (ctx->font_manifest_path[0]) {
