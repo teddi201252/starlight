@@ -43,6 +43,8 @@ typedef struct {
     uint32_t keyboard_repeat_delay_ms;
     uint32_t keyboard_repeat_rate_hz;
     uint32_t clipboard_manager_hold_ms;
+    uint8_t clipboard_feedback_audio_enabled;
+    uint8_t clipboard_feedback_visual_enabled;
 
     // Background
     sl_image_t bg_image;

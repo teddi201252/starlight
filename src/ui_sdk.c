@@ -165,14 +165,64 @@ static uint8_t sl_ui_text_delete_selection(sl_ui_ctx_t *ui, uint32_t id,
 static uint8_t sl_ui_text_apply_paste(sl_ui_ctx_t *ui, uint32_t id,
                                       char *text, uint32_t *len, uint32_t text_cap, uint32_t *caret);
 static uint8_t sl_ui_utf8_is_cont(char c);
+static uint32_t sl_ui_utf8_count_between(const char *text, uint32_t start, uint32_t end);
 static uint32_t sl_ui_utf8_prev_pos(const char *text, uint32_t pos);
 static uint32_t sl_ui_utf8_advance_cols(const char *text, uint32_t pos, uint32_t len, uint32_t cols);
+static uint32_t sl_ui_text_line_col_at(const char *text, uint32_t pos, uint32_t *col_out);
 
 static uint8_t sl_ui_clipboard_copy_selection(const sl_ui_ctx_t *ui, uint32_t id, const char *text) {
     uint32_t sel_start = 0u, sel_end = 0u;
     if (!ui || !text) return 0u;
     if (!sl_ui_selection_range(ui, id, &sel_start, &sel_end)) return 0u;
     return sl_clipboard_set_text(text + sel_start, sel_end - sel_start);
+}
+
+static void sl_ui_text_input_copy_point(const sl_ui_ctx_t *ui,
+                                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                        const char *text, uint32_t len,
+                                        int32_t *out_x, int32_t *out_y) {
+    uint32_t fw = 0u, vis_chars = 0u, start = 0u, caret_draw = 0u, text_x = 0u, text_y = 0u;
+    uint32_t input_caret_pos = 0u;
+    if (!ui || !out_x || !out_y) return;
+    fw = sl_ui_font_w(ui);
+    vis_chars = (w > 12u) ? ((w - 12u) / fw) : 0u;
+    text_x = x + 6u;
+    text_y = sl_ui_text_center_y(ui, y, h);
+    input_caret_pos = ui->text_caret_pos;
+    start = ui->text_input_scroll_col;
+    if (start > len) start = len;
+    if (start > 0u && sl_ui_utf8_is_cont(text[start])) start = sl_ui_utf8_prev_pos(text, start);
+    if (input_caret_pos < start) input_caret_pos = start;
+    caret_draw = sl_ui_utf8_count_between(text, start, input_caret_pos);
+    if (vis_chars > 0u && caret_draw > vis_chars) caret_draw = vis_chars;
+    *out_x = (int32_t)(text_x + (caret_draw * fw));
+    *out_y = (int32_t)(text_y + (sl_ui_font_h(ui) / 2u));
+}
+
+static void sl_ui_text_area_copy_point(const sl_ui_ctx_t *ui,
+                                       uint32_t x, uint32_t y,
+                                       const char *text,
+                                       int32_t *out_x, int32_t *out_y) {
+    uint32_t caret_col = 0u, caret_line = 0u, fw = 0u, fh = 0u;
+    uint32_t draw_col = 0u, draw_line = 0u;
+    if (!ui || !out_x || !out_y) return;
+    fw = sl_ui_font_w(ui);
+    fh = sl_ui_font_h(ui);
+    caret_line = sl_ui_text_line_col_at(text, ui->text_caret_pos, &caret_col);
+    draw_col = (caret_col > ui->text_area_scroll_col) ? (caret_col - ui->text_area_scroll_col) : 0u;
+    draw_line = (caret_line > ui->text_area_scroll_line) ? (caret_line - ui->text_area_scroll_line) : 0u;
+    *out_x = (int32_t)(x + 6u + (draw_col * fw));
+    *out_y = (int32_t)(y + 6u + (draw_line * fh) + (fh / 2u));
+}
+
+static void sl_ui_clipboard_notify_copy_feedback(const sl_ui_ctx_t *ui,
+                                                 const char *text,
+                                                 uint32_t sel_start, uint32_t sel_end,
+                                                 int32_t start_x, int32_t start_y) {
+    if (!ui || !ui->ctx || !text || sel_end <= sel_start) return;
+    sl_clipboard_notify_copy(ui->ctx, text + sel_start, sel_end - sel_start,
+                             start_x, start_y,
+                             (int32_t)ui->ctx->cursor_x, (int32_t)ui->ctx->cursor_y);
 }
 
 static uint32_t sl_ui_text_input_hit_pos(sl_ui_ctx_t *ui,
@@ -903,7 +953,13 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     uint8_t changed = 0u;
     if (enabled && focused) {
         if (ui->clipboard_cmds & SL_CLIP_CMD_COPY) {
-            (void)sl_ui_clipboard_copy_selection(ui, id, text);
+            uint32_t sel_start = 0u, sel_end = 0u;
+            int32_t fx = 0, fy = 0;
+            if (sl_ui_selection_range(ui, id, &sel_start, &sel_end) &&
+                sl_ui_clipboard_copy_selection(ui, id, text)) {
+                sl_ui_text_input_copy_point(ui, x, y, w, h, text, len, &fx, &fy);
+                sl_ui_clipboard_notify_copy_feedback(ui, text, sel_start, sel_end, fx, fy);
+            }
             ui->clipboard_cmds &= ~SL_CLIP_CMD_COPY;
         }
         if (ui->clipboard_cmds & SL_CLIP_CMD_PASTE) {
@@ -1317,7 +1373,13 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     uint8_t changed = 0u;
     if (enabled && focused) {
         if (ui->clipboard_cmds & SL_CLIP_CMD_COPY) {
-            (void)sl_ui_clipboard_copy_selection(ui, id, text);
+            uint32_t sel_start = 0u, sel_end = 0u;
+            int32_t fx = 0, fy = 0;
+            if (sl_ui_selection_range(ui, id, &sel_start, &sel_end) &&
+                sl_ui_clipboard_copy_selection(ui, id, text)) {
+                sl_ui_text_area_copy_point(ui, x, y, text, &fx, &fy);
+                sl_ui_clipboard_notify_copy_feedback(ui, text, sel_start, sel_end, fx, fy);
+            }
             ui->clipboard_cmds &= ~SL_CLIP_CMD_COPY;
         }
         if (ui->clipboard_cmds & SL_CLIP_CMD_PASTE) {

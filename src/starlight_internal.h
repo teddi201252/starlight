@@ -13,6 +13,7 @@
 
 void sl_audio_init(void);
 void sl_audio_shutdown(void);
+void sl_audio_play_copy_effect(void);
 
 int sl_init(sl_ctx_t *ctx);
 void sl_shutdown(sl_ctx_t *ctx);

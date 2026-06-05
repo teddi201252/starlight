@@ -1,4 +1,5 @@
 #include "clipboard.h"
+#include "starlight_internal.h"
 
 #include "render/pixels.h"
 
@@ -7,6 +8,10 @@
 #define SL_CLIPBOARD_MAX_TEXT 65535u
 #define SL_CLIPBOARD_HISTORY 12u
 #define SL_CLIPBOARD_VISIBLE 8u
+#define SL_CLIPBOARD_FEEDBACK_LABEL_MAX 64u
+#define SL_CLIPBOARD_FEEDBACK_DURATION_MS 520u
+#define SL_CLIPBOARD_FEEDBACK_PAD_X 6u
+#define SL_CLIPBOARD_FEEDBACK_PAD_Y 4u
 
 typedef struct {
     char *text;
@@ -22,7 +27,62 @@ typedef struct {
     uint32_t manager_selected;
 } sl_clipboard_state_t;
 
+typedef struct {
+    uint8_t audio_enabled;
+    uint8_t visual_enabled;
+    uint8_t active;
+    char label[SL_CLIPBOARD_FEEDBACK_LABEL_MAX];
+    int32_t start_x;
+    int32_t start_y;
+    int32_t end_x;
+    int32_t end_y;
+    uint64_t start_ns;
+    uint32_t duration_ms;
+    uint32_t last_x;
+    uint32_t last_y;
+    uint32_t last_w;
+    uint32_t last_h;
+    uint8_t last_valid;
+} sl_clipboard_feedback_t;
+
 static sl_clipboard_state_t g_clipboard;
+static sl_clipboard_feedback_t g_feedback = {
+    .audio_enabled = 1u,
+    .visual_enabled = 1u,
+};
+
+static float sl_clipboard_ease_out_cubic(float t) {
+    float inv = 1.0f - t;
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    return 1.0f - (inv * inv * inv);
+}
+
+static void sl_clipboard_feedback_rect_for(float progress,
+                                           uint32_t *out_x, uint32_t *out_y,
+                                           uint32_t *out_w, uint32_t *out_h,
+                                           uint8_t *out_alpha) {
+    int32_t cx = 0;
+    int32_t cy = 0;
+    uint32_t text_w = sl_text_measure_width(g_feedback.label);
+    uint32_t text_h = sl_text_cell_h();
+    uint32_t w = text_w + (SL_CLIPBOARD_FEEDBACK_PAD_X * 2u);
+    uint32_t h = text_h + (SL_CLIPBOARD_FEEDBACK_PAD_Y * 2u);
+    float eased = sl_clipboard_ease_out_cubic(progress);
+    float alpha_f = 1.0f - progress;
+    cx = g_feedback.start_x + (int32_t)((float)(g_feedback.end_x - g_feedback.start_x) * eased);
+    cy = g_feedback.start_y + (int32_t)((float)(g_feedback.end_y - g_feedback.start_y) * eased);
+    if (out_x) *out_x = (cx > (int32_t)(w / 2u)) ? (uint32_t)(cx - (int32_t)(w / 2u)) : 0u;
+    if (out_y) *out_y = (cy > (int32_t)(h / 2u)) ? (uint32_t)(cy - (int32_t)(h / 2u)) : 0u;
+    if (out_w) *out_w = w;
+    if (out_h) *out_h = h;
+    if (out_alpha) {
+        uint32_t a = (uint32_t)(alpha_f * 160.0f);
+        if (a < 20u) a = 20u;
+        if (a > 160u) a = 160u;
+        *out_alpha = (uint8_t)a;
+    }
+}
 
 void sl_clipboard_overlay_bounds(const sl_ctx_t *ctx,
                                  uint32_t *out_x, uint32_t *out_y,
@@ -98,6 +158,15 @@ static void sl_clipboard_compact_label(const char *src, char *out, uint32_t out_
     }
 }
 
+void sl_clipboard_set_feedback_config(uint8_t audio_enabled, uint8_t visual_enabled) {
+    g_feedback.audio_enabled = audio_enabled ? 1u : 0u;
+    g_feedback.visual_enabled = visual_enabled ? 1u : 0u;
+    if (!g_feedback.visual_enabled) {
+        g_feedback.active = 0u;
+        g_feedback.last_valid = 0u;
+    }
+}
+
 uint8_t sl_clipboard_set_text(const char *text, uint32_t text_len) {
     char *copy;
     if (!text || text_len == 0u) return 0u;
@@ -146,6 +215,68 @@ void sl_clipboard_shutdown(void) {
     g_clipboard.current_idx = 0u;
     g_clipboard.manager_open = 0u;
     g_clipboard.manager_selected = 0u;
+    g_feedback.active = 0u;
+    g_feedback.last_valid = 0u;
+}
+
+void sl_clipboard_notify_copy(sl_ctx_t *ctx, const char *text, uint32_t text_len,
+                              int32_t start_x, int32_t start_y,
+                              int32_t end_x, int32_t end_y) {
+    uint32_t ox = 0u, oy = 0u, ow = 0u, oh = 0u;
+    if (g_feedback.audio_enabled) sl_audio_play_copy_effect();
+    if (!g_feedback.visual_enabled || !ctx || !text || text_len == 0u) return;
+    if (g_feedback.last_valid) {
+        sl_dirty_add(ctx, g_feedback.last_x, g_feedback.last_y, g_feedback.last_w, g_feedback.last_h);
+        g_feedback.last_valid = 0u;
+    }
+    g_feedback.active = 1u;
+    sl_clipboard_compact_label(text, g_feedback.label, sizeof(g_feedback.label));
+    g_feedback.start_x = start_x;
+    g_feedback.start_y = start_y;
+    g_feedback.end_x = end_x + 14;
+    g_feedback.end_y = end_y - 14;
+    g_feedback.start_ns = peos_time_ns();
+    g_feedback.duration_ms = SL_CLIPBOARD_FEEDBACK_DURATION_MS;
+    sl_clipboard_feedback_rect_for(0.0f, &ox, &oy, &ow, &oh, NULL);
+    g_feedback.last_x = ox;
+    g_feedback.last_y = oy;
+    g_feedback.last_w = ow;
+    g_feedback.last_h = oh;
+    g_feedback.last_valid = 1u;
+    sl_dirty_add(ctx, ox, oy, ow, oh);
+}
+
+void sl_clipboard_tick(sl_ctx_t *ctx) {
+    uint64_t now_ns = 0ull;
+    uint32_t prev_x = 0u, prev_y = 0u, prev_w = 0u, prev_h = 0u;
+    uint32_t cur_x = 0u, cur_y = 0u, cur_w = 0u, cur_h = 0u;
+    float progress = 0.0f;
+    if (!ctx || !g_feedback.active) return;
+    now_ns = peos_time_ns();
+    if (g_feedback.duration_ms == 0u) g_feedback.duration_ms = SL_CLIPBOARD_FEEDBACK_DURATION_MS;
+    progress = (float)(now_ns - g_feedback.start_ns) / (float)((uint64_t)g_feedback.duration_ms * 1000000ull);
+    if (progress >= 1.0f) {
+        if (g_feedback.last_valid) {
+            sl_dirty_add(ctx, g_feedback.last_x, g_feedback.last_y, g_feedback.last_w, g_feedback.last_h);
+        }
+        g_feedback.active = 0u;
+        g_feedback.last_valid = 0u;
+        return;
+    }
+    if (g_feedback.last_valid) {
+        prev_x = g_feedback.last_x;
+        prev_y = g_feedback.last_y;
+        prev_w = g_feedback.last_w;
+        prev_h = g_feedback.last_h;
+    }
+    sl_clipboard_feedback_rect_for(progress, &cur_x, &cur_y, &cur_w, &cur_h, NULL);
+    g_feedback.last_x = cur_x;
+    g_feedback.last_y = cur_y;
+    g_feedback.last_w = cur_w;
+    g_feedback.last_h = cur_h;
+    g_feedback.last_valid = 1u;
+    if (prev_w && prev_h) sl_dirty_add(ctx, prev_x, prev_y, prev_w, prev_h);
+    sl_dirty_add(ctx, cur_x, cur_y, cur_w, cur_h);
 }
 
 uint8_t sl_clipboard_handle_input(sl_ctx_t *ctx, sl_input_frame_t *frame,
@@ -241,7 +372,24 @@ void sl_clipboard_render_overlay(sl_ctx_t *ctx) {
     uint32_t panel_x, panel_y, panel_w, panel_h, row_h, visible, start_idx;
     uint32_t text_y, current_idx, list_y;
     char line[56];
-    if (!ctx || !g_clipboard.manager_open) return;
+    if (!ctx) return;
+
+    if (g_feedback.active && g_feedback.visual_enabled) {
+        uint64_t now_ns = peos_time_ns();
+        float progress = (float)(now_ns - g_feedback.start_ns) / (float)((uint64_t)g_feedback.duration_ms * 1000000ull);
+        uint32_t fx = 0u, fy = 0u, fw = 0u, fh = 0u;
+        uint8_t alpha = 0u;
+        if (progress < 1.0f) {
+            uint8_t text_c = (uint8_t)(255u - (uint32_t)(progress * 64.0f));
+            sl_clipboard_feedback_rect_for(progress, &fx, &fy, &fw, &fh, &alpha);
+            sl_fill_rect_a(ctx, fx, fy, fw, fh, 60u, 92u, 138u, alpha);
+            sl_draw_text(ctx, fx + SL_CLIPBOARD_FEEDBACK_PAD_X,
+                         fy + SL_CLIPBOARD_FEEDBACK_PAD_Y,
+                         g_feedback.label, text_c, text_c, text_c);
+        }
+    }
+
+    if (!g_clipboard.manager_open) return;
 
     sl_clipboard_overlay_bounds(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
     row_h = 20u;
