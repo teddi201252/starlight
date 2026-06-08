@@ -33,6 +33,11 @@
 #define ORBIT_FB_FORMAT_XRGB8888 PEOS_ORBITFB_FORMAT_XRGB8888
 #define ORBIT_FB_FORMAT_RGB565 PEOS_ORBITFB_FORMAT_RGB565
 
+static uint32_t g_orbit_rgb565_lut[65536];
+static uint8_t g_orbit_rgb565_lut_ready = 0u;
+static uint32_t *g_orbit_xmap = NULL;
+static size_t g_orbit_xmap_cap = 0u;
+
 #define ORBIT_SLUI_CAP_LABEL        (1u << 0)
 #define ORBIT_SLUI_CAP_BUTTON       (1u << 1)
 #define ORBIT_SLUI_CAP_SLIDER       (1u << 2)
@@ -3213,6 +3218,16 @@ int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t 
     return 1;
 }
 
+int sl_app_host_cache_update_rect(const sl_window_t *win, const void *userdata,
+                                  uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!win || !userdata || !x || !y || !w || !h) return 0;
+
+    orbit_shell_t *shell = (orbit_shell_t *)userdata;
+    if (!shell->initialized) return 0;
+    if (!shell->surface.active) return 0;
+    return orbit_ui_body_rect(win, x, y, w, h) ? 1 : 0;
+}
+
 static const char *orbit_get_line(const orbit_shell_t *shell, size_t logical_index) {
     if (!shell || logical_index >= shell->line_count) return "";
     size_t slot = (shell->line_head + logical_index) % ORBIT_MAX_LINES;
@@ -3270,6 +3285,30 @@ static uint32_t orbit_read_rgb565(const uint8_t *p) {
     return (r << 16) | (g << 8) | b;
 }
 
+static void orbit_rgb565_lut_init(void) {
+    if (g_orbit_rgb565_lut_ready) return;
+    for (uint32_t v = 0u; v <= 0xFFFFu; v++) {
+        uint32_t r = (v >> 11) & 0x1Fu;
+        uint32_t g = (v >> 5) & 0x3Fu;
+        uint32_t b = v & 0x1Fu;
+        r = (r << 3) | (r >> 2);
+        g = (g << 2) | (g >> 4);
+        b = (b << 3) | (b >> 2);
+        g_orbit_rgb565_lut[v] = 0xFF000000u | (r << 16) | (g << 8) | b;
+    }
+    g_orbit_rgb565_lut_ready = 1u;
+}
+
+static int orbit_xmap_ensure(uint32_t width) {
+    if (width == 0u) return 0;
+    if (g_orbit_xmap && g_orbit_xmap_cap >= (size_t)width) return 1;
+    uint32_t *map = (uint32_t *)realloc(g_orbit_xmap, (size_t)width * sizeof(uint32_t));
+    if (!map) return 0;
+    g_orbit_xmap = map;
+    g_orbit_xmap_cap = (size_t)width;
+    return 1;
+}
+
 static uint32_t orbit_surface_read_rgb(const orbit_surface_t *surface, const uint8_t *src_row, uint32_t sx) {
     if (!surface || !src_row) return 0u;
     if (surface->format == ORBIT_FB_FORMAT_RGB565) {
@@ -3323,6 +3362,64 @@ static void orbit_draw_surface(sl_ctx_t *ctx, const orbit_shell_t *shell,
     if (draw_x1 > ctx->fb.width) draw_x1 = ctx->fb.width;
     if (draw_y1 > ctx->fb.height) draw_y1 = ctx->fb.height;
     if (draw_x1 <= draw_x0 || draw_y1 <= draw_y0) return;
+
+    {
+        uint32_t draw_w = draw_x1 - draw_x0;
+        uint32_t draw_h = draw_y1 - draw_y0;
+        uint32_t src_x0 = draw_x0 - dst_x;
+        uint32_t src_y0 = draw_y0 - dst_y;
+
+        if (draw_w > 0u && draw_h > 0u &&
+            dst_w == shell->surface.width &&
+            dst_h == shell->surface.height &&
+            ctx->bytespp == 4u &&
+            shell->surface.format == ORBIT_FB_FORMAT_XRGB8888) {
+            for (uint32_t row = 0u; row < draw_h; row++) {
+                const uint8_t *src = shell->surface.pixels +
+                                     ((size_t)(src_y0 + row) * (size_t)shell->surface.pitch) +
+                                     ((size_t)src_x0 * 4u);
+                uint8_t *dst = ctx->frame +
+                               ((size_t)(draw_y0 + row) * ctx->row_stride) +
+                               ((size_t)draw_x0 * 4u);
+                peos_memcpy(dst, src, (size_t)draw_w * 4u);
+            }
+            return;
+        }
+
+        if (ctx->bytespp == 4u && shell->surface.format == ORBIT_FB_FORMAT_RGB565) {
+            orbit_rgb565_lut_init();
+            if (!orbit_xmap_ensure(draw_w)) return;
+
+            uint32_t x_step = (uint32_t)(((uint64_t)shell->surface.width << 16) / (uint64_t)dst_w);
+            uint32_t y_step = (uint32_t)(((uint64_t)shell->surface.height << 16) / (uint64_t)dst_h);
+            if (x_step == 0u) x_step = 1u;
+            if (y_step == 0u) y_step = 1u;
+
+            uint32_t x_fp = src_x0 * x_step;
+            for (uint32_t i = 0u; i < draw_w; i++) {
+                uint32_t sx = x_fp >> 16;
+                if (sx >= shell->surface.width) sx = shell->surface.width - 1u;
+                g_orbit_xmap[i] = sx;
+                x_fp += x_step;
+            }
+
+            uint32_t y_fp = src_y0 * y_step;
+            for (uint32_t y = 0u; y < draw_h; y++) {
+                uint32_t sy = y_fp >> 16;
+                if (sy >= shell->surface.height) sy = shell->surface.height - 1u;
+                const uint16_t *src16 = (const uint16_t *)(const void *)
+                    (shell->surface.pixels + (size_t)sy * (size_t)shell->surface.pitch);
+                uint32_t *dst32 = (uint32_t *)(void *)
+                    (ctx->frame + ((size_t)(draw_y0 + y) * ctx->row_stride) +
+                     ((size_t)draw_x0 * 4u));
+                for (uint32_t x = 0u; x < draw_w; x++) {
+                    dst32[x] = g_orbit_rgb565_lut[src16[g_orbit_xmap[x]]];
+                }
+                y_fp += y_step;
+            }
+            return;
+        }
+    }
 
     uint32_t x_step = (uint32_t)(((uint64_t)shell->surface.width << 16) / (uint64_t)dst_w);
     uint32_t y_step = (uint32_t)(((uint64_t)shell->surface.height << 16) / (uint64_t)dst_h);
