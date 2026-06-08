@@ -1,6 +1,7 @@
 #include "window.h"
 
 #include "starlight_internal.h"
+#include "app_host.h"
 
 #include <stdlib.h>
 
@@ -74,6 +75,53 @@ static int sl_window_copy_frame_to_cache(sl_window_t *win) {
     size_t row_bytes = (size_t)copy_w * (size_t)win->ctx->bytespp;
 
     for (uint32_t row = 0; row < copy_h; row++) {
+        uint8_t *dst = win->client_surface +
+                       ((size_t)(off_y + row) * (size_t)win->client_stride) +
+                       ((size_t)off_x * (size_t)win->ctx->bytespp);
+        const uint8_t *src = win->ctx->frame +
+                             ((size_t)(cy0 + row) * win->ctx->row_stride) +
+                             ((size_t)cx0 * (size_t)win->ctx->bytespp);
+        peos_memcpy(dst, src, row_bytes);
+    }
+
+    return 1;
+}
+
+static int sl_window_copy_frame_to_cache_rect(sl_window_t *win,
+                                              uint32_t rx, uint32_t ry,
+                                              uint32_t rw, uint32_t rh) {
+    if (!win || !win->ctx || !win->ctx->frame) return 0;
+    if (!sl_window_ensure_surface(win)) return 0;
+    if (rw == 0u || rh == 0u) return 0;
+
+    int64_t wx0 = (int64_t)win->x;
+    int64_t wy0 = (int64_t)win->y;
+    int64_t wx1 = wx0 + (int64_t)win->width;
+    int64_t wy1 = wy0 + (int64_t)win->height;
+    int64_t rx0 = (int64_t)rx;
+    int64_t ry0 = (int64_t)ry;
+    int64_t rx1 = rx0 + (int64_t)rw;
+    int64_t ry1 = ry0 + (int64_t)rh;
+
+    int64_t ix0 = (wx0 > rx0) ? wx0 : rx0;
+    int64_t iy0 = (wy0 > ry0) ? wy0 : ry0;
+    int64_t ix1 = (wx1 < rx1) ? wx1 : rx1;
+    int64_t iy1 = (wy1 < ry1) ? wy1 : ry1;
+    if (ix1 <= ix0 || iy1 <= iy0) return 0;
+
+    int64_t cx0 = (ix0 < 0) ? 0 : ix0;
+    int64_t cy0 = (iy0 < 0) ? 0 : iy0;
+    int64_t cx1 = (ix1 > (int64_t)win->ctx->fb.width) ? (int64_t)win->ctx->fb.width : ix1;
+    int64_t cy1 = (iy1 > (int64_t)win->ctx->fb.height) ? (int64_t)win->ctx->fb.height : iy1;
+    if (cx1 <= cx0 || cy1 <= cy0) return 0;
+
+    uint32_t copy_w = (uint32_t)(cx1 - cx0);
+    uint32_t copy_h = (uint32_t)(cy1 - cy0);
+    uint32_t off_x = (uint32_t)(cx0 - wx0);
+    uint32_t off_y = (uint32_t)(cy0 - wy0);
+    size_t row_bytes = (size_t)copy_w * (size_t)win->ctx->bytespp;
+
+    for (uint32_t row = 0u; row < copy_h; row++) {
         uint8_t *dst = win->client_surface +
                        ((size_t)(off_y + row) * (size_t)win->client_stride) +
                        ((size_t)off_x * (size_t)win->ctx->bytespp);
@@ -233,6 +281,7 @@ void sl_window_shutdown(sl_window_t *win) {
 int sl_window_render(sl_window_t *win) {
     if (!win) return 0;
 
+    uint8_t cache_was_valid = win->cache_valid;
     uint8_t anim_opacity = win->anim_opacity;
     uint8_t need_anim_blend = (anim_opacity < 255u) ? 1u : 0u;
     uint8_t *underlay = NULL;
@@ -353,7 +402,17 @@ int sl_window_render(sl_window_t *win) {
             }
         }
     }
-    win->cache_valid = sl_window_copy_frame_to_cache(win) ? 1u : 0u;
+    if (cache_was_valid && !win->force_redraw && !need_anim_blend &&
+        win->task && win->task->userdata) {
+        uint32_t rx = 0u, ry = 0u, rw = 0u, rh = 0u;
+        if (sl_app_host_cache_update_rect(win, win->task->userdata, &rx, &ry, &rw, &rh)) {
+            win->cache_valid = sl_window_copy_frame_to_cache_rect(win, rx, ry, rw, rh) ? 1u : 0u;
+        } else {
+            win->cache_valid = sl_window_copy_frame_to_cache(win) ? 1u : 0u;
+        }
+    } else {
+        win->cache_valid = sl_window_copy_frame_to_cache(win) ? 1u : 0u;
+    }
     win->force_redraw = 0u;
     if (target_fps > 0u) {
         uint64_t interval = 1000000000ull / (uint64_t)target_fps;
