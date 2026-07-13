@@ -1,5 +1,6 @@
 #include "pixels.h"
 #include "font.h"
+#include "render_ops.h"
 
 static inline uint8_t sl_blend_chan(uint8_t src, uint8_t dst, uint8_t a) {
     uint32_t inv = 255u - (uint32_t)a;
@@ -251,8 +252,7 @@ void sl_fill_rect(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
     if (ctx->bytespp == 4u) {
         uint32_t px = ((uint32_t)0xFFu << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
         for (uint32_t j = 0; j < draw_h; j++) {
-            uint32_t *dst = (uint32_t *)(void *)row;
-            for (uint32_t i = 0; i < draw_w; i++) dst[i] = px;
+            sl_render_fill_bgra32((uint32_t *)(void *)row, draw_w, px);
             row += ctx->row_stride;
         }
         return;
@@ -297,6 +297,16 @@ void sl_fill_rect_a(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t 
 
     if (ctx->bytespp != 3u && ctx->bytespp != 4u) return;
 
+    if (ctx->bytespp == 4u) {
+        for (uint32_t j = 0u; j < draw_h; j++) {
+            uint32_t *dst = (uint32_t *)(void *)(ctx->frame +
+                            ((size_t)(draw_y + j) * ctx->row_stride) +
+                            ((size_t)draw_x * 4u));
+            sl_render_blend_fill_bgra32(dst, draw_w, r, g, b, a);
+        }
+        return;
+    }
+
     for (uint32_t j = 0u; j < draw_h; j++) {
         uint8_t *dst = ctx->frame + ((size_t)(draw_y + j) * ctx->row_stride) +
                        ((size_t)draw_x * (size_t)ctx->bytespp);
@@ -307,6 +317,47 @@ void sl_fill_rect_a(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t 
             if (ctx->bytespp == 4u) dst[3] = 0xFFu;
             dst += ctx->bytespp;
         }
+    }
+}
+
+void sl_blend_coverage_row(sl_ctx_t *ctx, int32_t dst_x, int32_t dst_y,
+                           const uint8_t *coverage, uint32_t count,
+                           uint8_t r, uint8_t g, uint8_t b) {
+    if (!ctx || !ctx->frame || !coverage || count == 0u || dst_y < 0 ||
+        (uint32_t)dst_y >= ctx->fb.height ||
+        (ctx->bytespp != 3u && ctx->bytespp != 4u)) return;
+
+    int64_t start = 0;
+    int64_t end = count;
+    int64_t x0 = dst_x;
+    if (x0 < 0) start = -x0;
+    if (x0 + end > (int64_t)ctx->fb.width) end = (int64_t)ctx->fb.width - x0;
+    if (ctx->clip_enabled) {
+        if ((uint32_t)dst_y < ctx->clip_y ||
+            (uint64_t)(uint32_t)dst_y >= (uint64_t)ctx->clip_y + ctx->clip_h) return;
+        if (x0 + start < (int64_t)ctx->clip_x) start = (int64_t)ctx->clip_x - x0;
+        uint64_t clip_end = (uint64_t)ctx->clip_x + ctx->clip_w;
+        if ((uint64_t)(x0 + end) > clip_end) end = (int64_t)clip_end - x0;
+    }
+    if (start < 0) start = 0;
+    if (end > (int64_t)count) end = count;
+    if (end <= start) return;
+
+    uint8_t *dst = ctx->frame + (size_t)(uint32_t)dst_y * ctx->row_stride +
+                   (size_t)(x0 + start) * ctx->bytespp;
+    for (int64_t i = start; i < end; i++) {
+        uint8_t a = coverage[i];
+        if (a == 255u) {
+            dst[0] = b;
+            dst[1] = g;
+            dst[2] = r;
+        } else if (a != 0u) {
+            dst[0] = sl_blend_chan(b, dst[0], a);
+            dst[1] = sl_blend_chan(g, dst[1], a);
+            dst[2] = sl_blend_chan(r, dst[2], a);
+        }
+        if (ctx->bytespp == 4u) dst[3] = 0xFFu;
+        dst += ctx->bytespp;
     }
 }
 
@@ -332,7 +383,22 @@ void sl_blit_rgba(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y,
         uint8_t *drow = ctx->frame + ((size_t)(draw_y + y) * ctx->row_stride) +
                         ((size_t)draw_x * (size_t)ctx->bytespp);
 
-        for (uint32_t x = 0; x < draw_w; x++) {
+        uint32_t x = 0u;
+        if (ctx->bytespp == 4u) {
+            uint32_t opaque_run = 0u;
+            while (opaque_run < draw_w &&
+                   srow[((size_t)(src_x0 + opaque_run) * 4u) + 3u] == 255u) {
+                opaque_run++;
+            }
+            if (opaque_run == draw_w) {
+                sl_render_copy_opaque_rgba_to_bgra32(
+                    (uint32_t *)(void *)drow,
+                    (const uint32_t *)(const void *)(srow + (size_t)src_x0 * 4u),
+                    draw_w);
+                continue;
+            }
+        }
+        for (; x < draw_w; x++) {
             const uint8_t *s = srow + ((size_t)(src_x0 + x) * 4u);
             uint8_t sr = s[0];
             uint8_t sg = s[1];

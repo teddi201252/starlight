@@ -1,4 +1,5 @@
 #include "starlight_internal.h"
+#include "perf_stats.h"
 #include "render/pixels.h"
 
 static void sl_fps_draw(sl_ctx_t *ctx, uint32_t fps_value) {
@@ -46,6 +47,7 @@ int main(void) {
         peos_puts("starlight: init failed\n");
         peos_exit(1);
     }
+    sl_perf_init(ctx.graphics_perf_enabled);
     sl_audio_init();
     peos_puts("starlight: minimal skeleton running\n");
     if (ctx.fb_direct) {
@@ -79,6 +81,7 @@ int main(void) {
     uint32_t fps_value_prev = 0xFFFFFFFFu;
 
     for (;;) {
+        sl_perf_frame_begin(peos_time_ns());
         if (!ctx.hw_cursor) {
             if (ctx.cursor_saved_valid) {
                 sl_dirty_add(&ctx, ctx.cursor_saved_x, ctx.cursor_saved_y,
@@ -121,8 +124,11 @@ int main(void) {
             }
         }
 
+        uint64_t composite_start_ns = peos_time_ns();
         sl_render_dirty_background(&ctx);
+        sl_perf_add_composite(peos_time_ns() - composite_start_ns);
 
+        uint64_t render_start_ns = peos_time_ns();
         sl_windows_render_all(&ctx);
         sl_launcher_render(&ctx);
         sl_clipboard_render_overlay(&ctx);
@@ -133,9 +139,11 @@ int main(void) {
             sl_render_cursor(&ctx);
             sl_dirty_add(&ctx, ctx.cursor_x, ctx.cursor_y, SL_CURSOR_W, SL_CURSOR_H);
         }
+        sl_perf_add_render(peos_time_ns() - render_start_ns);
         if (!sl_present(&ctx)) break;
 
         sl_frame_pace(&next_frame_ns);
+        sl_perf_frame_end(peos_time_ns());
 
     }
 
