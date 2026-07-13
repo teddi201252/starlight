@@ -53,7 +53,10 @@ void sl_dirty_reset(void);
 void sl_dirty_mark_full(void);
 void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 int sl_dirty_intersects_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
-int sl_dirty_get_bounds(uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
+typedef void (*sl_dirty_rect_fn)(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                 void *userdata);
+void sl_dirty_for_each_intersection(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                    sl_dirty_rect_fn fn, void *userdata);
 void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata);
 void sl_windows_tick_animations(sl_ctx_t *ctx);
 

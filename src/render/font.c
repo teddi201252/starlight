@@ -1289,15 +1289,8 @@ static void sl_font_draw_vector_codepoint(sl_ctx_t *ctx, uint32_t pen_x, int32_t
     int32_t base_y = baseline_y + glyph->bearing_y;
     for (uint32_t yy = 0u; yy < glyph->height; yy++) {
         int32_t out_y = base_y + (int32_t)yy;
-        if (out_y < 0) continue;
-        for (uint32_t xx = 0u; xx < glyph->width; xx++) {
-            uint8_t a = glyph->coverage[(size_t)yy * (size_t)glyph->width + (size_t)xx];
-            if (a == 0u) continue;
-            int32_t out_x = base_x + (int32_t)xx;
-            if (out_x < 0) continue;
-            if (a == 255u) sl_put_pixel(ctx, (uint32_t)out_x, (uint32_t)out_y, r, g, b);
-            else sl_fill_rect_a(ctx, (uint32_t)out_x, (uint32_t)out_y, 1u, 1u, r, g, b, a);
-        }
+        const uint8_t *coverage = glyph->coverage + (size_t)yy * glyph->width;
+        sl_blend_coverage_row(ctx, base_x, out_y, coverage, glyph->width, r, g, b);
     }
 }
 

@@ -4,6 +4,8 @@
 #include "ui_sdk.h"
 #include "render/font.h"
 #include "render/pixels.h"
+#include "perf_stats.h"
+#include "damage.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,15 +44,11 @@
 #define SL_CFG_FILE_MAX 4096u
 #define SL_CFG_LINE_MAX 256u
 #define SL_DIRTY_MAX_RECTS 256u
+#define SL_PRESENT_MAX_RECTS 32u
 #define SL_DIRTY_FULL_AREA_THRESHOLD_PCT 65u
 #define SL_DRAG_DIRTY_PADDING 8u
 
-typedef struct {
-    uint32_t x;
-    uint32_t y;
-    uint32_t w;
-    uint32_t h;
-} sl_rect_t;
+typedef sl_damage_rect_t sl_rect_t;
 
 static struct {
     sl_rect_t rects[SL_DIRTY_MAX_RECTS];
@@ -69,17 +67,11 @@ void sl_dirty_reset(void) {
 }
 
 static int sl_rects_overlap_or_touch(const sl_rect_t *a, const sl_rect_t *b) {
-    if (!a || !b) return 0;
-    uint64_t ax2 = (uint64_t)a->x + (uint64_t)a->w;
-    uint64_t ay2 = (uint64_t)a->y + (uint64_t)a->h;
-    uint64_t bx2 = (uint64_t)b->x + (uint64_t)b->w;
-    uint64_t by2 = (uint64_t)b->y + (uint64_t)b->h;
-    return !((ax2 < b->x) || (bx2 < a->x) || (ay2 < b->y) || (by2 < a->y));
+    return sl_damage_overlap_or_touch(a, b);
 }
 
 static uint64_t sl_rect_area(const sl_rect_t *r) {
-    if (!r) return 0ull;
-    return (uint64_t)r->w * (uint64_t)r->h;
+    return sl_damage_area(r);
 }
 
 int sl_dirty_intersects_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
@@ -94,58 +86,58 @@ int sl_dirty_intersects_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     return 0;
 }
 
-int sl_dirty_get_bounds(uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
-    if (!x || !y || !w || !h) return 0;
-    if (g_dirty.full || g_dirty.count == 0u) return 0;
-
-    uint32_t min_x = g_dirty.rects[0].x;
-    uint32_t min_y = g_dirty.rects[0].y;
-    uint64_t max_x = (uint64_t)g_dirty.rects[0].x + (uint64_t)g_dirty.rects[0].w;
-    uint64_t max_y = (uint64_t)g_dirty.rects[0].y + (uint64_t)g_dirty.rects[0].h;
-
-    for (size_t i = 1u; i < g_dirty.count; i++) {
-        const sl_rect_t *r = &g_dirty.rects[i];
-        if (r->x < min_x) min_x = r->x;
-        if (r->y < min_y) min_y = r->y;
-        uint64_t rx2 = (uint64_t)r->x + (uint64_t)r->w;
-        uint64_t ry2 = (uint64_t)r->y + (uint64_t)r->h;
-        if (rx2 > max_x) max_x = rx2;
-        if (ry2 > max_y) max_y = ry2;
+void sl_dirty_for_each_intersection(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                    sl_dirty_rect_fn fn, void *userdata) {
+    if (!fn || w == 0u || h == 0u) return;
+    uint64_t x2 = (uint64_t)x + w;
+    uint64_t y2 = (uint64_t)y + h;
+    if (g_dirty.full) {
+        fn(x, y, w, h, userdata);
+        return;
     }
-
-    if (max_x <= min_x || max_y <= min_y) return 0;
-    *x = min_x;
-    *y = min_y;
-    *w = (uint32_t)(max_x - min_x);
-    *h = (uint32_t)(max_y - min_y);
-    return 1;
+    for (size_t i = 0u; i < g_dirty.count; i++) {
+        const sl_rect_t *r = &g_dirty.rects[i];
+        uint32_t ix0 = x > r->x ? x : r->x;
+        uint32_t iy0 = y > r->y ? y : r->y;
+        uint64_t rx2 = (uint64_t)r->x + r->w;
+        uint64_t ry2 = (uint64_t)r->y + r->h;
+        uint64_t ix2 = x2 < rx2 ? x2 : rx2;
+        uint64_t iy2 = y2 < ry2 ? y2 : ry2;
+        if (ix2 > ix0 && iy2 > iy0) {
+            fn(ix0, iy0, (uint32_t)(ix2 - ix0), (uint32_t)(iy2 - iy0), userdata);
+        }
+    }
 }
 
 static sl_rect_t sl_rect_union(const sl_rect_t *a, const sl_rect_t *b) {
-    sl_rect_t r = {0, 0, 0, 0};
-    if (!a) return b ? *b : r;
-    if (!b) return *a;
-
-    uint32_t x1 = (a->x < b->x) ? a->x : b->x;
-    uint32_t y1 = (a->y < b->y) ? a->y : b->y;
-    uint64_t ax2 = (uint64_t)a->x + (uint64_t)a->w;
-    uint64_t ay2 = (uint64_t)a->y + (uint64_t)a->h;
-    uint64_t bx2 = (uint64_t)b->x + (uint64_t)b->w;
-    uint64_t by2 = (uint64_t)b->y + (uint64_t)b->h;
-    uint64_t x2 = (ax2 > bx2) ? ax2 : bx2;
-    uint64_t y2 = (ay2 > by2) ? ay2 : by2;
-
-    r.x = x1;
-    r.y = y1;
-    r.w = (uint32_t)(x2 - x1);
-    r.h = (uint32_t)(y2 - y1);
-    return r;
+    return sl_damage_union(a, b);
 }
 
-static int sl_dirty_should_mark_full(const sl_ctx_t *ctx) {
-    (void)ctx;
-    // Keep compositor strictly in partial-update mode during normal runtime.
-    return 0;
+static size_t sl_dirty_build_present_rects(const sl_ctx_t *ctx,
+                                           peos_fb_rect_t out[SL_PRESENT_MAX_RECTS],
+                                           uint64_t *out_pixels, uint8_t *out_full) {
+    if (!ctx || !out || !out_pixels || !out_full) return 0u;
+    *out_pixels = 0u;
+    *out_full = g_dirty.full;
+    if (g_dirty.full) {
+        out[0] = (peos_fb_rect_t){ 0u, 0u, ctx->fb.width, ctx->fb.height };
+        *out_pixels = (uint64_t)ctx->fb.width * ctx->fb.height;
+        return 1u;
+    }
+    if (g_dirty.count == 0u) return 0u;
+
+    sl_rect_t work[SL_PRESENT_MAX_RECTS];
+    size_t count = sl_damage_reduce(g_dirty.rects, g_dirty.count, work,
+                                    SL_PRESENT_MAX_RECTS,
+                                    ctx->fb.width, ctx->fb.height,
+                                    SL_DIRTY_FULL_AREA_THRESHOLD_PCT, out_full);
+    uint64_t pixels = 0u;
+    for (size_t i = 0u; i < count; i++) pixels += sl_rect_area(&work[i]);
+    for (size_t i = 0u; i < count; i++) {
+        out[i] = (peos_fb_rect_t){ work[i].x, work[i].y, work[i].w, work[i].h };
+    }
+    *out_pixels = pixels;
+    return count;
 }
 
 static int sl_dirty_coalesce_best_pair(void) {
@@ -212,9 +204,6 @@ void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint3
                 }
                 j++;
             }
-            if (sl_dirty_should_mark_full(ctx)) {
-                sl_dirty_mark_full();
-            }
             return;
         }
     }
@@ -229,9 +218,6 @@ void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint3
         }
     }
     g_dirty.rects[g_dirty.count++] = in;
-    if (sl_dirty_should_mark_full(ctx)) {
-        sl_dirty_mark_full();
-    }
 }
 
 static void sl_dirty_add_padded(const sl_ctx_t *ctx, uint32_t x, uint32_t y,
@@ -467,6 +453,7 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "clipboard_manager_hold_ms=400\n");
     (void)fprintf(f, "clipboard_feedback_audio=1\n");
     (void)fprintf(f, "clipboard_feedback_visual=1\n");
+    (void)fprintf(f, "graphics_perf=0\n");
     (void)fclose(f);
 }
 
@@ -575,6 +562,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->clipboard_manager_hold_ms = SL_CLIPBOARD_MANAGER_HOLD_MS_DEFAULT;
     ctx->clipboard_feedback_audio_enabled = SL_CLIPBOARD_FEEDBACK_AUDIO_DEFAULT;
     ctx->clipboard_feedback_visual_enabled = SL_CLIPBOARD_FEEDBACK_VISUAL_DEFAULT;
+    ctx->graphics_perf_enabled = 0u;
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
     if (!cfg) {
@@ -666,6 +654,9 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     if (sl_parse_u32(val, &n)) {
                         ctx->clipboard_feedback_visual_enabled = n ? 1u : 0u;
                     }
+                } else if (strcmp(key, "graphics_perf") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n)) ctx->graphics_perf_enabled = n ? 1u : 0u;
                 }
             }
         }
@@ -1113,36 +1104,57 @@ void sl_render_dirty_background(sl_ctx_t *ctx) {
 
 int sl_present(sl_ctx_t *ctx) {
     if (!ctx || !ctx->frame) return 0;
-    if (ctx->fb_direct) {
-        if (!ctx->fb_front) return 0;
-        if (g_dirty.full) {
-            size_t rows = (size_t)ctx->fb.height;
-            size_t row_bytes = (size_t)ctx->fb.width * (size_t)ctx->bytespp;
-            for (size_t y = 0; y < rows; y++) {
-                uint8_t *dst = ctx->fb_front + (y * ctx->fb_front_stride);
-                const uint8_t *src = ctx->frame + (y * ctx->row_stride);
-                peos_memcpy(dst, src, row_bytes);
-            }
-        } else {
-            for (size_t i = 0; i < g_dirty.count; i++) {
-                const sl_rect_t *r = &g_dirty.rects[i];
-                size_t row_bytes = (size_t)r->w * (size_t)ctx->bytespp;
-                for (uint32_t y = 0; y < r->h; y++) {
-                    size_t yy = (size_t)r->y + (size_t)y;
-                    uint8_t *dst = ctx->fb_front + (yy * ctx->fb_front_stride) +
-                                   ((size_t)r->x * (size_t)ctx->bytespp);
-                    const uint8_t *src = ctx->frame + (yy * ctx->row_stride) +
-                                         ((size_t)r->x * (size_t)ctx->bytespp);
-                    peos_memcpy(dst, src, row_bytes);
-                }
-            }
-        }
+    peos_fb_rect_t rects[SL_PRESENT_MAX_RECTS];
+    uint64_t pixels = 0u;
+    uint8_t full = 0u;
+    size_t rect_count = sl_dirty_build_present_rects(ctx, rects, &pixels, &full);
+    (void)pixels;
+    (void)full;
+    if (rect_count == 0u) {
+        sl_perf_record_present(0u, 0u, 0u, 0u, ctx->bytespp, 0u);
         sl_dirty_reset();
         return 1;
     }
-    uint64_t wr = peos_fbpresent(ctx->frame, ctx->frame_bytes, PEOS_FBPRESENT_EXCLUSIVE);
+
+    if (ctx->fb_direct) {
+        if (!ctx->fb_front) return 0;
+        uint64_t copy_start_ns = peos_time_ns();
+        for (size_t i = 0; i < rect_count; i++) {
+            const peos_fb_rect_t *r = &rects[i];
+            size_t row_bytes = (size_t)r->width * (size_t)ctx->bytespp;
+            for (uint32_t y = 0; y < r->height; y++) {
+                size_t yy = (size_t)r->y + (size_t)y;
+                uint8_t *dst = ctx->fb_front + (yy * ctx->fb_front_stride) +
+                               ((size_t)r->x * (size_t)ctx->bytespp);
+                const uint8_t *src = ctx->frame + (yy * ctx->row_stride) +
+                                     ((size_t)r->x * (size_t)ctx->bytespp);
+                peos_memcpy(dst, src, row_bytes);
+            }
+        }
+        uint64_t copy_ns = peos_time_ns() - copy_start_ns;
+        uint64_t flush_start_ns = peos_time_ns();
+        if (peos_fbpresent_damage(NULL, 0u, rects, rect_count,
+                                  PEOS_FBPRESENT_EXCLUSIVE) < 0) {
+            sl_dirty_mark_full();
+            return 1;
+        }
+        uint64_t flush_ns = peos_time_ns() - flush_start_ns;
+        sl_perf_record_present(copy_ns, flush_ns, rect_count, pixels,
+                               ctx->bytespp, full);
+        sl_dirty_reset();
+        return 1;
+    }
+    uint64_t present_start_ns = peos_time_ns();
+    int64_t wr = peos_fbpresent_damage(ctx->frame, ctx->frame_bytes,
+                                      rects, rect_count, PEOS_FBPRESENT_EXCLUSIVE);
+    if (wr < 0) {
+        sl_dirty_mark_full();
+        return 1;
+    }
+    sl_perf_record_present(0u, peos_time_ns() - present_start_ns,
+                           rect_count, pixels, ctx->bytespp, full);
     sl_dirty_reset();
-    return (int64_t)wr >= 0 && wr == (uint64_t)ctx->frame_bytes;
+    return 1;
 }
 
 void sl_frame_pace(uint64_t *next_deadline_ns) {

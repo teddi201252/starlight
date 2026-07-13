@@ -45,6 +45,7 @@ typedef struct {
     uint32_t clipboard_manager_hold_ms;
     uint8_t clipboard_feedback_audio_enabled;
     uint8_t clipboard_feedback_visual_enabled;
+    uint8_t graphics_perf_enabled;
 
     // Background
     sl_image_t bg_image;
