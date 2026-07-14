@@ -6,6 +6,7 @@
 
 app_instance_t *sl_app_host_instance(void);
 app_instance_t *sl_app_host_instance_at(size_t index);
+app_instance_t *sl_app_host_instance_peek_at(size_t index);
 void sl_app_host_reset(void);
 void sl_app_host_tick(sl_ctx_t *ctx);
 void sl_app_host_slots_clear(void);

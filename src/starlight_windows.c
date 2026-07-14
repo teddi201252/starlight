@@ -10,7 +10,8 @@
 
 #define SL_APP_DIR "/system/apps"
 #define SL_APP_MANIFEST "app.ini"
-#define SL_APP_SLOT_MAX 8u
+#define SL_LAUNCHER_VISIBLE_MAX 8u
+#define SL_APP_CATALOG_INITIAL_CAP 16u
 #define SL_WIN_ANIM_MAX 32u
 #define SL_WIN_ANIM_OPEN_OFFSET_Y 28.0f
 #define SL_WIN_ANIM_OPEN_MS 140u
@@ -78,8 +79,9 @@ static sl_window_t *g_windows = NULL;
 static size_t g_window_count = 0;
 static size_t g_focused_window = (size_t)-1;
 
-static sl_launcher_item_t g_launcher_items[SL_APP_SLOT_MAX];
+static sl_launcher_item_t *g_launcher_items = NULL;
 static size_t g_launcher_count = 0u;
+static size_t g_launcher_cap = 0u;
 static sl_image_t g_launcher_placeholder_icon;
 static uint8_t g_launcher_placeholder_loaded = 0u;
 static uint8_t g_launcher_placeholder_failed = 0u;
@@ -465,7 +467,10 @@ static void sl_launcher_items_reset(void) {
             sl_image_free(&g_launcher_items[i].icon_image);
         }
     }
-    peos_memset(g_launcher_items, 0, sizeof(g_launcher_items));
+    if (g_launcher_items && g_launcher_cap > 0u) {
+        peos_memset(g_launcher_items, 0,
+                    sizeof(*g_launcher_items) * g_launcher_cap);
+    }
     g_launcher_count = 0u;
     g_launcher_hover_index = (size_t)-1;
     g_launcher_ctx_open = 0u;
@@ -476,8 +481,33 @@ static void sl_launcher_items_reset(void) {
     g_launcher_ctx_h = 0u;
 }
 
-static void sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app, const char *bundle_path) {
-    if (!app || g_launcher_count >= SL_APP_SLOT_MAX) return;
+static size_t sl_launcher_visible_count(void) {
+    return (g_launcher_count < SL_LAUNCHER_VISIBLE_MAX)
+               ? g_launcher_count
+               : SL_LAUNCHER_VISIBLE_MAX;
+}
+
+static int sl_launcher_reserve(size_t needed) {
+    if (needed <= g_launcher_cap) return 1;
+    size_t cap = g_launcher_cap ? g_launcher_cap : SL_APP_CATALOG_INITIAL_CAP;
+    while (cap < needed) {
+        if (cap > SIZE_MAX / 2u) return 0;
+        cap *= 2u;
+    }
+    if (cap > SIZE_MAX / sizeof(*g_launcher_items)) return 0;
+    sl_launcher_item_t *items =
+        (sl_launcher_item_t *)realloc(g_launcher_items, cap * sizeof(*items));
+    if (!items) return 0;
+    peos_memset(items + g_launcher_cap, 0,
+                (cap - g_launcher_cap) * sizeof(*items));
+    g_launcher_items = items;
+    g_launcher_cap = cap;
+    return 1;
+}
+
+static int sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app,
+                                const char *bundle_path) {
+    if (!app || !sl_launcher_reserve(g_launcher_count + 1u)) return 0;
     sl_launcher_item_t *item = &g_launcher_items[g_launcher_count++];
     item->slot = slot;
     item->width = app->width;
@@ -491,6 +521,7 @@ static void sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app, const 
     if (item->title[0] == '\0') {
         sl_copy_str(item->title, sizeof(item->title), "App");
     }
+    return 1;
 }
 
 static uint32_t sl_launcher_content_width(void) {
@@ -512,7 +543,7 @@ static uint32_t sl_launcher_width(void) {
 
 static uint32_t sl_launcher_panel_height(void) {
     if (g_launcher_count == 0u) return 0u;
-    uint32_t count = (uint32_t)g_launcher_count;
+    uint32_t count = (uint32_t)sl_launcher_visible_count();
     uint32_t item_h = sl_launcher_item_height();
     uint32_t items_h = count * item_h;
     if (count > 1u) {
@@ -645,7 +676,8 @@ static int sl_launcher_hit_test(const sl_ctx_t *ctx, uint32_t x, uint32_t y, siz
     if (panel_w == 0u || panel_h == 0u) return 0;
     if (!sl_point_in_rect(x, y, panel_x, panel_y, panel_w, panel_h)) return 0;
 
-    for (size_t i = 0u; i < g_launcher_count; i++) {
+    size_t visible_count = sl_launcher_visible_count();
+    for (size_t i = 0u; i < visible_count; i++) {
         uint32_t ix, iy, iw, ih;
         sl_launcher_item_rect(ctx, i, &ix, &iy, &iw, &ih);
         if (!sl_point_in_rect(x, y, ix, iy, iw, ih)) continue;
@@ -677,7 +709,7 @@ static void sl_launcher_context_close(sl_ctx_t *ctx) {
 
 static uint32_t sl_launcher_context_action_count(const sl_launcher_item_t *item) {
     if (!item) return 0u;
-    app_instance_t *app = sl_app_host_instance_at(item->slot);
+    app_instance_t *app = sl_app_host_instance_peek_at(item->slot);
     if (!app) return 0u;
     return (sl_window_index_for_task(app) != (size_t)-1) ? 2u : 1u;
 }
@@ -687,7 +719,7 @@ static void sl_launcher_context_action_text(const sl_launcher_item_t *item, uint
     if (!out || out_cap == 0u) return;
     out[0] = '\0';
     if (!item) return;
-    app_instance_t *app = sl_app_host_instance_at(item->slot);
+    app_instance_t *app = sl_app_host_instance_peek_at(item->slot);
     if (app && sl_window_index_for_task(app) != (size_t)-1) {
         if (action == 0u) sl_copy_str(out, out_cap, "Focus");
         else if (action == 1u) sl_copy_str(out, out_cap, "Close");
@@ -755,7 +787,7 @@ static void sl_launcher_context_open(sl_ctx_t *ctx, size_t item_index, uint32_t 
 static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint32_t action) {
     if (!ctx || item_index >= g_launcher_count) return 0;
     sl_launcher_item_t *item = &g_launcher_items[item_index];
-    app_instance_t *app = sl_app_host_instance_at(item->slot);
+    app_instance_t *app = sl_app_host_instance_peek_at(item->slot);
     if (!app) return 0;
     item->instance = app;
 
@@ -1060,7 +1092,19 @@ int sl_windows_open_app_bundle_path(sl_ctx_t *ctx, const char *bundle_path) {
         if (strcmp(g_launcher_items[i].bundle_path, bundle_path) != 0) continue;
         return sl_windows_open_launcher_item(ctx, i);
     }
-    return 0;
+
+    char manifest_path[320];
+    if (!sl_join_path(manifest_path, sizeof(manifest_path), bundle_path,
+                      SL_APP_MANIFEST)) {
+        return 0;
+    }
+    sl_app_bundle_t app;
+    if (!sl_load_app_bundle(manifest_path, bundle_path, &app)) return 0;
+
+    size_t slot = g_launcher_count;
+    if (!sl_app_host_slot_configure(slot, app.title, app.exec, app.args)) return 0;
+    if (!sl_launcher_add_item(slot, &app, bundle_path)) return 0;
+    return sl_windows_open_launcher_item(ctx, g_launcher_count - 1u);
 }
 
 static size_t sl_load_apps_from_system(void) {
@@ -1089,7 +1133,6 @@ static size_t sl_load_apps_from_system(void) {
         if (name_len == 0u) continue;
 
         if (!sl_has_suffix(name, ".app")) continue;
-        if (slot >= SL_APP_SLOT_MAX) break;
 
         char bundle_path[256];
         if (!sl_join_path(bundle_path, sizeof(bundle_path), SL_APP_DIR, name)) continue;
@@ -1104,7 +1147,7 @@ static size_t sl_load_apps_from_system(void) {
             if (!sl_load_app_bundle(bundle_path, NULL, &app)) continue;
         }
         if (!sl_app_host_slot_configure(slot, app.title, app.exec, app.args)) continue;
-        sl_launcher_add_item(slot, &app, bundle_path);
+        if (!sl_launcher_add_item(slot, &app, bundle_path)) break;
         slot++;
     }
 
@@ -1170,7 +1213,7 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
         sl_app_bundle_t fallback;
         peos_memset(&fallback, 0, sizeof(fallback));
         sl_copy_str(fallback.title, sizeof(fallback.title), "Orbit");
-        sl_launcher_add_item(0u, &fallback, NULL);
+        (void)sl_launcher_add_item(0u, &fallback, NULL);
     }
 
     sl_dirty_mark_full();
@@ -1435,13 +1478,14 @@ void sl_launcher_render(sl_ctx_t *ctx) {
     sl_fill_rect(ctx, panel_x + panel_w - 1u, panel_y, 1u, panel_h, 54u, 65u, 78u);
     sl_draw_text(ctx, panel_x + SL_LAUNCHER_PAD_X, panel_y + SL_LAUNCHER_PAD_Y, "APPS", 228u, 233u, 238u);
 
-    for (size_t i = 0u; i < g_launcher_count; i++) {
+    size_t visible_count = sl_launcher_visible_count();
+    for (size_t i = 0u; i < visible_count; i++) {
         sl_launcher_item_t *item = &g_launcher_items[i];
         uint32_t ix, iy, iw, ih;
         sl_launcher_item_rect(ctx, i, &ix, &iy, &iw, &ih);
         sl_launcher_try_load_icon(item);
 
-        app_instance_t *app = sl_app_host_instance_at(item->slot);
+        app_instance_t *app = sl_app_host_instance_peek_at(item->slot);
         item->instance = app;
         size_t win_idx = app ? sl_window_index_for_task(app) : (size_t)-1;
         uint8_t running = (win_idx != (size_t)-1) ? 1u : 0u;
