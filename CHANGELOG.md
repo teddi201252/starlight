@@ -2,6 +2,11 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.11.0] - 2026-07-14
+- Better window rendering
+- Optimize Starlight graphics pipeline
+- Add dynamic application catalog
+
 ## [0.10.3] - 2026-06-05
 - Patch maintenance release.
 
