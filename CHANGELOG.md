@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.11.1] - 2026-07-14
+- Add animated expandable launcher grid with external toggle and icon-centered hover labels
+
 ## [0.11.0] - 2026-07-14
 - Better window rendering
 - Optimize Starlight graphics pipeline
