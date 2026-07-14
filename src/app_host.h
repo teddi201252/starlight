@@ -12,6 +12,7 @@ void sl_app_host_tick(sl_ctx_t *ctx);
 void sl_app_host_slots_clear(void);
 void sl_app_host_slots_use_default(void);
 int sl_app_host_slot_configure(size_t index, const char *title, const char *exec_path, const char *exec_args);
+size_t sl_app_host_next_slot_index(void);
 size_t sl_app_host_slot_count_enabled(void);
 int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t *frame,
                                  const void *userdata,

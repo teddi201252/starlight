@@ -54,7 +54,7 @@ static void sl_keymap_set(uint16_t code, uint8_t level, const char *text) {
     if (code >= SL_KEYMAP_KEYS || level >= SL_KEYMAP_LEVELS) return;
     char *dst = g_keymap[code].text[level];
     size_t i = 0u;
-    if (!text || !text[0] || strcmp(text, "-") == 0 || strcmp(text, "none") == 0) {
+    if (!text || !text[0] || strcmp(text, "none") == 0) {
         dst[0] = '\0';
         return;
     }
@@ -208,7 +208,7 @@ static int sl_keymap_token_to_text(const char *tok, char *out, size_t out_cap) {
     size_t i = 0u;
     if (!tok || !out || out_cap == 0u) return 0;
     out[0] = '\0';
-    if (!tok[0] || strcmp(tok, "-") == 0 || strcmp(tok, "none") == 0) return 1;
+    if (!tok[0] || strcmp(tok, "none") == 0) return 1;
     if (strcmp(tok, "space") == 0 || strcmp(tok, "SPACE") == 0) {
         if (out_cap < 2u) return 0;
         out[0] = ' ';

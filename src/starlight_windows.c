@@ -10,6 +10,9 @@
 
 #define SL_APP_DIR "/system/apps"
 #define SL_APP_MANIFEST "app.ini"
+#define SL_APP_CATALOG_SCAN_INTERVAL_NS 1000000000ull
+#define SL_APP_DIRECTORY_BUFFER_INITIAL 4096u
+#define SL_APP_DIRECTORY_BUFFER_MAX (1024u * 1024u)
 #define SL_LAUNCHER_VISIBLE_MAX 8u
 #define SL_APP_CATALOG_INITIAL_CAP 16u
 #define SL_WIN_ANIM_MAX 32u
@@ -51,6 +54,12 @@ typedef struct {
 } sl_app_bundle_t;
 
 typedef struct {
+    sl_app_bundle_t app;
+    char bundle_path[256];
+    uint64_t signature;
+} sl_scanned_app_t;
+
+typedef struct {
     size_t slot;
     char title[64];
     char bundle_path[256];
@@ -60,6 +69,7 @@ typedef struct {
     uint8_t icon_failed;
     uint32_t width;
     uint32_t height;
+    uint64_t signature;
     app_instance_t *instance;
 } sl_launcher_item_t;
 
@@ -102,6 +112,7 @@ static int32_t g_launcher_ctx_hover_row = -1;
 static uint8_t g_launcher_expanded = 0u;
 static uint32_t g_launcher_extra_width = 0u;
 static sl_window_rect_snapshot_t g_launcher_last_rect;
+static uint64_t g_launcher_next_scan_ns = 0ull;
 static sl_window_anim_t g_window_anims[SL_WIN_ANIM_MAX];
 
 static void sl_window_refresh_zorder(void);
@@ -470,6 +481,144 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
     return (out->exec[0] != '\0') ? 1 : 0;
 }
 
+static uint64_t sl_catalog_hash_bytes(uint64_t hash, const void *data, size_t len) {
+    const uint8_t *bytes = (const uint8_t *)data;
+    for (size_t i = 0u; i < len; i++) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static uint64_t sl_catalog_hash_text(uint64_t hash, const char *text) {
+    if (!text) return sl_catalog_hash_bytes(hash, "", 1u);
+    return sl_catalog_hash_bytes(hash, text, strlen(text) + 1u);
+}
+
+static uint64_t sl_catalog_signature(const sl_scanned_app_t *entry) {
+    uint64_t hash = 1469598103934665603ull;
+    if (!entry) return hash;
+    hash = sl_catalog_hash_text(hash, entry->bundle_path);
+    hash = sl_catalog_hash_text(hash, entry->app.title);
+    hash = sl_catalog_hash_text(hash, entry->app.exec);
+    hash = sl_catalog_hash_text(hash, entry->app.args);
+    hash = sl_catalog_hash_text(hash, entry->app.icon);
+    hash = sl_catalog_hash_bytes(hash, &entry->app.width, sizeof(entry->app.width));
+    return sl_catalog_hash_bytes(hash, &entry->app.height, sizeof(entry->app.height));
+}
+
+static int sl_scan_reserve(sl_scanned_app_t **entries, size_t *cap, size_t needed) {
+    if (!entries || !cap) return 0;
+    if (needed <= *cap) return 1;
+    size_t next_cap = *cap ? *cap : SL_APP_CATALOG_INITIAL_CAP;
+    while (next_cap < needed) {
+        if (next_cap > SIZE_MAX / 2u) return 0;
+        next_cap *= 2u;
+    }
+    if (next_cap > SIZE_MAX / sizeof(**entries)) return 0;
+    sl_scanned_app_t *next = (sl_scanned_app_t *)realloc(
+        *entries, next_cap * sizeof(**entries));
+    if (!next) return 0;
+    *entries = next;
+    *cap = next_cap;
+    return 1;
+}
+
+static char *sl_read_app_directory(size_t *out_len) {
+    size_t cap = SL_APP_DIRECTORY_BUFFER_INITIAL;
+    if (out_len) *out_len = 0u;
+
+    while (cap <= SL_APP_DIRECTORY_BUFFER_MAX) {
+        char *buf = (char *)malloc(cap);
+        if (!buf) return NULL;
+        uint64_t result = peos_readdir(SL_APP_DIR, sizeof(SL_APP_DIR) - 1u,
+                                       buf, cap - 1u);
+        if ((int64_t)result < 0) {
+            free(buf);
+            return NULL;
+        }
+        size_t len = (size_t)result;
+        if (len < cap - 1u || cap == SL_APP_DIRECTORY_BUFFER_MAX) {
+            if (len >= cap) len = cap - 1u;
+            buf[len] = '\0';
+            if (out_len) *out_len = len;
+            return buf;
+        }
+        free(buf);
+        if (cap > SL_APP_DIRECTORY_BUFFER_MAX / 2u) cap = SL_APP_DIRECTORY_BUFFER_MAX;
+        else cap *= 2u;
+    }
+    return NULL;
+}
+
+static int sl_scan_apps_from_system(sl_scanned_app_t **out_entries, size_t *out_count) {
+    if (!out_entries || !out_count) return 0;
+    *out_entries = NULL;
+    *out_count = 0u;
+
+    size_t list_len = 0u;
+    char *list = sl_read_app_directory(&list_len);
+    if (!list) return 0;
+
+    sl_scanned_app_t *entries = NULL;
+    size_t count = 0u;
+    size_t cap = 0u;
+    size_t pos = 0u;
+    while (pos < list_len) {
+        size_t start = pos;
+        while (pos < list_len && list[pos] != '\n' && list[pos] != '\r') pos++;
+        size_t len = pos - start;
+        while (pos < list_len && (list[pos] == '\n' || list[pos] == '\r')) pos++;
+        if (len == 0u || len >= 128u) continue;
+
+        char name[128];
+        peos_memcpy(name, &list[start], len);
+        name[len] = '\0';
+        if (sl_trim_trailing_slash(name) == 0u || !sl_has_suffix(name, ".app")) continue;
+
+        sl_scanned_app_t entry;
+        peos_memset(&entry, 0, sizeof(entry));
+        if (!sl_join_path(entry.bundle_path, sizeof(entry.bundle_path), SL_APP_DIR, name)) continue;
+
+        char manifest_path[320];
+        if (!sl_join_path(manifest_path, sizeof(manifest_path), entry.bundle_path,
+                          SL_APP_MANIFEST)) {
+            continue;
+        }
+        if (!sl_load_app_bundle(manifest_path, entry.bundle_path, &entry.app) &&
+            !sl_load_app_bundle(entry.bundle_path, NULL, &entry.app)) {
+            continue;
+        }
+        entry.signature = sl_catalog_signature(&entry);
+        peos_stat_t stat_info;
+        peos_memset(&stat_info, 0, sizeof(stat_info));
+        if ((int64_t)peos_stat(manifest_path, strlen(manifest_path),
+                               &stat_info, sizeof(stat_info)) >= 0) {
+            entry.signature = sl_catalog_hash_bytes(entry.signature, &stat_info,
+                                                     sizeof(stat_info));
+        }
+        if (entry.app.icon[0] != '\0') {
+            peos_memset(&stat_info, 0, sizeof(stat_info));
+            if ((int64_t)peos_stat(entry.app.icon, strlen(entry.app.icon),
+                                   &stat_info, sizeof(stat_info)) >= 0) {
+                entry.signature = sl_catalog_hash_bytes(entry.signature, &stat_info,
+                                                         sizeof(stat_info));
+            }
+        }
+        if (!sl_scan_reserve(&entries, &cap, count + 1u)) {
+            free(entries);
+            free(list);
+            return 0;
+        }
+        entries[count++] = entry;
+    }
+
+    free(list);
+    *out_entries = entries;
+    *out_count = count;
+    return 1;
+}
+
 static void sl_launcher_items_reset(void) {
     for (size_t i = 0u; i < g_launcher_count; i++) {
         if (g_launcher_items[i].icon_image.data) {
@@ -530,6 +679,11 @@ static int sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app,
     sl_copy_str(item->title, sizeof(item->title), app->title);
     sl_copy_str(item->bundle_path, sizeof(item->bundle_path), bundle_path);
     sl_copy_str(item->icon_path, sizeof(item->icon_path), app->icon);
+    sl_scanned_app_t entry;
+    peos_memset(&entry, 0, sizeof(entry));
+    entry.app = *app;
+    sl_copy_str(entry.bundle_path, sizeof(entry.bundle_path), bundle_path);
+    item->signature = sl_catalog_signature(&entry);
     if (item->title[0] == '\0') {
         sl_copy_str(item->title, sizeof(item->title), "App");
     }
@@ -686,7 +840,8 @@ static void sl_launcher_hover_label_rect(const sl_ctx_t *ctx, size_t index,
     char label[26];
     sl_launcher_compact_label(item->title, label, sizeof(label));
 
-    uint32_t text_w = (uint32_t)strlen(label) * 8u;
+    uint32_t text_w = sl_text_measure_width(label);
+    if (text_w == 0u && label[0] != '\0') text_w = (uint32_t)strlen(label) * 8u;
     uint32_t tip_w = text_w + SL_LAUNCHER_TOOLTIP_PAD_X * 2u;
     if (tip_w > SL_LAUNCHER_TOOLTIP_W_MAX) tip_w = SL_LAUNCHER_TOOLTIP_W_MAX;
     if (tip_w < 48u) tip_w = 48u;
@@ -723,6 +878,7 @@ static void sl_launcher_draw_hover_label(sl_ctx_t *ctx, size_t index) {
     sl_launcher_hover_label_rect(ctx, index, &tip_x, &tip_y, &tip_w, &tip_h);
     if (tip_w == 0u || tip_h == 0u) return;
 
+    sl_clip_set(ctx, tip_x, tip_y, tip_w, tip_h);
     sl_fill_rect(ctx, tip_x, tip_y, tip_w, tip_h, 20u, 25u, 34u);
     sl_fill_rect(ctx, tip_x, tip_y, tip_w, 1u, 90u, 110u, 132u);
     sl_fill_rect(ctx, tip_x, tip_y + tip_h - 1u, tip_w, 1u, 90u, 110u, 132u);
@@ -730,6 +886,37 @@ static void sl_launcher_draw_hover_label(sl_ctx_t *ctx, size_t index) {
     sl_fill_rect(ctx, tip_x + tip_w - 1u, tip_y, 1u, tip_h, 90u, 110u, 132u);
     uint32_t text_y = tip_y + ((tip_h > 8u) ? ((tip_h - 8u) / 2u) : 0u);
     sl_draw_text(ctx, tip_x + SL_LAUNCHER_TOOLTIP_PAD_X, text_y, label, 242u, 244u, 247u);
+    sl_clip_clear(ctx);
+}
+
+static void sl_launcher_invalidate_overlay(sl_ctx_t *ctx,
+                                           uint32_t x, uint32_t y,
+                                           uint32_t w, uint32_t h) {
+    if (!ctx || w == 0u || h == 0u) return;
+
+    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
+    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
+
+    int64_t x0 = (x < panel_x) ? x : panel_x;
+    int64_t y0 = (y < panel_y) ? y : panel_y;
+    int64_t x1 = (int64_t)x + w;
+    int64_t y1 = (int64_t)y + h;
+    int64_t panel_x1 = (int64_t)panel_x + panel_w;
+    int64_t panel_y1 = (int64_t)panel_y + panel_h;
+    if (panel_x1 > x1) x1 = panel_x1;
+    if (panel_y1 > y1) y1 = panel_y1;
+
+    x0 -= 2;
+    y0 -= 2;
+    x1 += 2;
+    y1 += 2;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int64_t)ctx->fb.width) x1 = ctx->fb.width;
+    if (y1 > (int64_t)ctx->fb.height) y1 = ctx->fb.height;
+    if (x1 <= x0 || y1 <= y0) return;
+    sl_dirty_add(ctx, (uint32_t)x0, (uint32_t)y0,
+                 (uint32_t)(x1 - x0), (uint32_t)(y1 - y0));
 }
 
 static int sl_launcher_hit_test(const sl_ctx_t *ctx, uint32_t x, uint32_t y, size_t *out_index) {
@@ -773,7 +960,7 @@ static void sl_launcher_toggle(sl_ctx_t *ctx) {
     if (g_launcher_hover_index != (size_t)-1) {
         uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
         sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
-        if (tw > 0u && th > 0u) sl_dirty_add(ctx, tx, ty, tw, th);
+        if (tw > 0u && th > 0u) sl_launcher_invalidate_overlay(ctx, tx, ty, tw, th);
         g_launcher_hover_index = (size_t)-1;
     }
 
@@ -826,11 +1013,8 @@ static void sl_launcher_context_close(sl_ctx_t *ctx) {
     if (!ctx) return;
     if (!g_launcher_ctx_open) return;
     if (g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u) {
-        uint32_t dx = (g_launcher_ctx_x > 0u) ? (g_launcher_ctx_x - 1u) : 0u;
-        uint32_t dy = (g_launcher_ctx_y > 0u) ? (g_launcher_ctx_y - 1u) : 0u;
-        uint32_t dw = g_launcher_ctx_w + 4u;
-        uint32_t dh = g_launcher_ctx_h + 4u;
-        sl_dirty_add(ctx, dx, dy, dw, dh);
+        sl_launcher_invalidate_overlay(ctx, g_launcher_ctx_x, g_launcher_ctx_y,
+                                       g_launcher_ctx_w + 2u, g_launcher_ctx_h + 2u);
     }
     g_launcher_ctx_open = 0u;
     g_launcher_ctx_item_index = (size_t)-1;
@@ -872,11 +1056,8 @@ static void sl_launcher_context_label_cb(uint32_t option_index, char *out, size_
 static void sl_launcher_context_open(sl_ctx_t *ctx, size_t item_index, uint32_t anchor_x, uint32_t anchor_y) {
     if (!ctx || item_index >= g_launcher_count) return;
     if (g_launcher_ctx_open && g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u) {
-        uint32_t old_x = (g_launcher_ctx_x > 0u) ? (g_launcher_ctx_x - 1u) : 0u;
-        uint32_t old_y = (g_launcher_ctx_y > 0u) ? (g_launcher_ctx_y - 1u) : 0u;
-        uint32_t old_w = g_launcher_ctx_w + 4u;
-        uint32_t old_h = g_launcher_ctx_h + 4u;
-        sl_dirty_add(ctx, old_x, old_y, old_w, old_h);
+        sl_launcher_invalidate_overlay(ctx, g_launcher_ctx_x, g_launcher_ctx_y,
+                                       g_launcher_ctx_w + 2u, g_launcher_ctx_h + 2u);
     }
     const sl_launcher_item_t *item = &g_launcher_items[item_index];
     uint32_t action_count = sl_launcher_context_action_count(item);
@@ -906,16 +1087,11 @@ static void sl_launcher_context_open(sl_ctx_t *ctx, size_t item_index, uint32_t 
     if (g_launcher_hover_index != (size_t)-1) {
         uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
         sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
-        if (tw > 0u && th > 0u) sl_dirty_add(ctx, tx, ty, tw, th);
+        if (tw > 0u && th > 0u) sl_launcher_invalidate_overlay(ctx, tx, ty, tw, th);
         g_launcher_hover_index = (size_t)-1;
     }
-    {
-        uint32_t dx = (g_launcher_ctx_x > 0u) ? (g_launcher_ctx_x - 1u) : 0u;
-        uint32_t dy = (g_launcher_ctx_y > 0u) ? (g_launcher_ctx_y - 1u) : 0u;
-        uint32_t dw = g_launcher_ctx_w + 4u;
-        uint32_t dh = g_launcher_ctx_h + 4u;
-        sl_dirty_add(ctx, dx, dy, dw, dh);
-    }
+    sl_launcher_invalidate_overlay(ctx, g_launcher_ctx_x, g_launcher_ctx_y,
+                                   g_launcher_ctx_w + 2u, g_launcher_ctx_h + 2u);
 }
 
 static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint32_t action) {
@@ -970,13 +1146,8 @@ void sl_launcher_handle_context_hover(sl_ctx_t *ctx) {
     }
     if (next_row == g_launcher_ctx_hover_row) return;
     g_launcher_ctx_hover_row = next_row;
-    {
-        uint32_t dx = (g_launcher_ctx_x > 0u) ? (g_launcher_ctx_x - 1u) : 0u;
-        uint32_t dy = (g_launcher_ctx_y > 0u) ? (g_launcher_ctx_y - 1u) : 0u;
-        uint32_t dw = g_launcher_ctx_w + 4u;
-        uint32_t dh = g_launcher_ctx_h + 4u;
-        sl_dirty_add(ctx, dx, dy, dw, dh);
-    }
+    sl_launcher_invalidate_overlay(ctx, g_launcher_ctx_x, g_launcher_ctx_y,
+                                   g_launcher_ctx_w + 2u, g_launcher_ctx_h + 2u);
 }
 
 static size_t sl_window_index_for_task(const app_instance_t *task) {
@@ -1235,57 +1406,135 @@ int sl_windows_open_app_bundle_path(sl_ctx_t *ctx, const char *bundle_path) {
     sl_app_bundle_t app;
     if (!sl_load_app_bundle(manifest_path, bundle_path, &app)) return 0;
 
-    size_t slot = g_launcher_count;
+    size_t slot = sl_app_host_next_slot_index();
     if (!sl_app_host_slot_configure(slot, app.title, app.exec, app.args)) return 0;
     if (!sl_launcher_add_item(slot, &app, bundle_path)) return 0;
+    sl_dirty_mark_full();
     return sl_windows_open_launcher_item(ctx, g_launcher_count - 1u);
 }
 
-static size_t sl_load_apps_from_system(void) {
-    sl_app_host_slots_clear();
-    sl_launcher_items_reset();
+static int sl_launcher_catalog_matches(const sl_scanned_app_t *entries, size_t count) {
+    if (count != g_launcher_count) return 0;
+    for (size_t i = 0u; i < count; i++) {
+        if (entries[i].signature != g_launcher_items[i].signature ||
+            strcmp(entries[i].bundle_path, g_launcher_items[i].bundle_path) != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
 
-    char list[4096];
-    uint64_t n = peos_readdir(SL_APP_DIR, sizeof(SL_APP_DIR) - 1u, list, sizeof(list) - 1u);
-    if ((int64_t)n <= 0) return 0u;
-    list[n] = '\0';
+static size_t sl_launcher_find_bundle(const char *bundle_path) {
+    if (!bundle_path) return (size_t)-1;
+    for (size_t i = 0u; i < g_launcher_count; i++) {
+        if (strcmp(g_launcher_items[i].bundle_path, bundle_path) == 0) return i;
+    }
+    return (size_t)-1;
+}
 
-    size_t slot = 0u;
-    size_t i = 0u;
-    while (i < (size_t)n) {
-        size_t start = i;
-        while (i < (size_t)n && list[i] != '\n') i++;
-        size_t len = i - start;
-        if (i < (size_t)n && list[i] == '\n') i++;
-        if (len == 0u) continue;
+static void sl_launcher_release_items(sl_launcher_item_t *items, size_t count) {
+    if (!items) return;
+    for (size_t i = 0u; i < count; i++) {
+        if (items[i].icon_image.data) sl_image_free(&items[i].icon_image);
+    }
+    free(items);
+}
 
-        char name[128];
-        if (len >= sizeof(name)) continue;
-        peos_memcpy(name, &list[start], len);
-        name[len] = '\0';
-        size_t name_len = sl_trim_trailing_slash(name);
-        if (name_len == 0u) continue;
+static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
+                                         sl_scanned_app_t *entries,
+                                         size_t count,
+                                         uint8_t force) {
+    if (!force && sl_launcher_catalog_matches(entries, count)) return 0;
 
-        if (!sl_has_suffix(name, ".app")) continue;
+    sl_launcher_item_t *next = NULL;
+    if (count > 0u) {
+        if (count > SIZE_MAX / sizeof(*next)) return 0;
+        next = (sl_launcher_item_t *)calloc(count, sizeof(*next));
+        if (!next) return 0;
+    }
 
-        char bundle_path[256];
-        if (!sl_join_path(bundle_path, sizeof(bundle_path), SL_APP_DIR, name)) continue;
-
-        char manifest_path[320];
-        if (!sl_join_path(manifest_path, sizeof(manifest_path), bundle_path, SL_APP_MANIFEST)) {
+    size_t next_count = 0u;
+    for (size_t i = 0u; i < count; i++) {
+        sl_scanned_app_t *entry = &entries[i];
+        size_t old_index = sl_launcher_find_bundle(entry->bundle_path);
+        size_t slot = (old_index != (size_t)-1)
+                          ? g_launcher_items[old_index].slot
+                          : sl_app_host_next_slot_index();
+        if (!sl_app_host_slot_configure(slot, entry->app.title,
+                                        entry->app.exec, entry->app.args)) {
             continue;
         }
 
-        sl_app_bundle_t app;
-        if (!sl_load_app_bundle(manifest_path, bundle_path, &app)) {
-            if (!sl_load_app_bundle(bundle_path, NULL, &app)) continue;
+        sl_launcher_item_t *item = &next[next_count++];
+        if (old_index != (size_t)-1) {
+            *item = g_launcher_items[old_index];
+            g_launcher_items[old_index].icon_image.data = NULL;
+            if (strcmp(item->icon_path, entry->app.icon) != 0) {
+                if (item->icon_image.data) sl_image_free(&item->icon_image);
+                peos_memset(&item->icon_image, 0, sizeof(item->icon_image));
+                item->icon_loaded = 0u;
+                item->icon_failed = 0u;
+            }
         }
-        if (!sl_app_host_slot_configure(slot, app.title, app.exec, app.args)) continue;
-        if (!sl_launcher_add_item(slot, &app, bundle_path)) break;
-        slot++;
+
+        item->slot = slot;
+        item->width = entry->app.width;
+        item->height = entry->app.height;
+        item->signature = entry->signature;
+        item->instance = sl_app_host_instance_peek_at(slot);
+        sl_copy_str(item->title, sizeof(item->title), entry->app.title);
+        sl_copy_str(item->bundle_path, sizeof(item->bundle_path), entry->bundle_path);
+        sl_copy_str(item->icon_path, sizeof(item->icon_path), entry->app.icon);
+        if (item->title[0] == '\0') sl_copy_str(item->title, sizeof(item->title), "App");
     }
 
-    return slot;
+    sl_launcher_release_items(g_launcher_items, g_launcher_count);
+    g_launcher_items = next;
+    g_launcher_count = next_count;
+    g_launcher_cap = count;
+    g_launcher_hover_index = (size_t)-1;
+    g_launcher_ctx_open = 0u;
+    g_launcher_ctx_item_index = (size_t)-1;
+
+    uint32_t target = (g_launcher_expanded && g_launcher_count > SL_LAUNCHER_VISIBLE_MAX)
+                          ? sl_launcher_expand_target(ctx)
+                          : 0u;
+    if (target == 0u) g_launcher_expanded = 0u;
+    if (!sl_tween_to_u32(SL_LAUNCHER_TWEEN_ID, &g_launcher_extra_width, target,
+                         SL_LAUNCHER_ANIM_MS, SL_TWEEN_EASE_IN_OUT_CUBIC,
+                         NULL, NULL)) {
+        sl_tween_set_u32_immediate(&g_launcher_extra_width, target);
+    }
+    sl_dirty_mark_full();
+    return 1;
+}
+
+static size_t sl_load_apps_from_system(sl_ctx_t *ctx) {
+    sl_scanned_app_t *entries = NULL;
+    size_t count = 0u;
+    if (!sl_scan_apps_from_system(&entries, &count)) return 0u;
+    sl_app_host_slots_clear();
+    (void)sl_launcher_reconcile_catalog(ctx, entries, count, 1u);
+    free(entries);
+    return g_launcher_count;
+}
+
+static void sl_launcher_tick_catalog(sl_ctx_t *ctx) {
+    if (!ctx) return;
+    uint64_t now = peos_time_ns();
+    if (now < g_launcher_next_scan_ns) return;
+    g_launcher_next_scan_ns = now + SL_APP_CATALOG_SCAN_INTERVAL_NS;
+
+    sl_scanned_app_t *entries = NULL;
+    size_t count = 0u;
+    if (!sl_scan_apps_from_system(&entries, &count)) return;
+    if (count == 0u && g_launcher_count == 1u &&
+        g_launcher_items[0].bundle_path[0] == '\0') {
+        free(entries);
+        return;
+    }
+    (void)sl_launcher_reconcile_catalog(ctx, entries, count, 0u);
+    free(entries);
 }
 
 void sl_windows_focus_at_cursor(uint32_t x, uint32_t y) {
@@ -1339,7 +1588,7 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count) {
 void sl_windows_create_default(sl_ctx_t *ctx) {
     if (!ctx) return;
 
-    size_t loaded = sl_load_apps_from_system();
+    size_t loaded = sl_load_apps_from_system(ctx);
     if (loaded == 0u) {
         sl_app_host_slots_use_default();
         sl_launcher_items_reset();
@@ -1350,6 +1599,7 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
         (void)sl_launcher_add_item(0u, &fallback, NULL);
     }
 
+    g_launcher_next_scan_ns = peos_time_ns() + SL_APP_CATALOG_SCAN_INTERVAL_NS;
     sl_dirty_mark_full();
 }
 
@@ -1374,6 +1624,7 @@ void sl_windows_tick_animations(sl_ctx_t *ctx) {
     uint8_t any_active = 0u;
     if (!ctx) return;
 
+    sl_launcher_tick_catalog(ctx);
     /* The launcher tween must keep repainting even when the desktop has no windows. */
     sl_launcher_track_animation_dirty(ctx);
     if (!g_windows || g_window_count == 0u) return;
@@ -1489,6 +1740,7 @@ void sl_windows_destroy_all(void) {
     g_launcher_ctx_y = 0u;
     g_launcher_ctx_w = 0u;
     g_launcher_ctx_h = 0u;
+    g_launcher_next_scan_ns = 0ull;
 }
 
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y) {
@@ -1586,21 +1838,15 @@ void sl_launcher_handle_hover(sl_ctx_t *ctx) {
     (void)sl_launcher_hit_test(ctx, ctx->cursor_x, ctx->cursor_y, &next_hover);
     if (next_hover == g_launcher_hover_index) return;
 
-    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
-    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
-    if (panel_w > 0u && panel_h > 0u) {
-        sl_dirty_add(ctx, panel_x, panel_y, panel_w, panel_h);
-    }
-
     if (g_launcher_hover_index != (size_t)-1) {
         uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
         sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
-        if (tw > 0u && th > 0u) sl_dirty_add(ctx, tx, ty, tw, th);
+        if (tw > 0u && th > 0u) sl_launcher_invalidate_overlay(ctx, tx, ty, tw, th);
     }
     if (next_hover != (size_t)-1) {
         uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
         sl_launcher_hover_label_rect(ctx, next_hover, &tx, &ty, &tw, &th);
-        if (tw > 0u && th > 0u) sl_dirty_add(ctx, tx, ty, tw, th);
+        if (tw > 0u && th > 0u) sl_launcher_invalidate_overlay(ctx, tx, ty, tw, th);
     }
 
     g_launcher_hover_index = next_hover;

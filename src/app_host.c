@@ -2,6 +2,7 @@
 #include "starlight_internal.h"
 #include "context_menu_renderer.h"
 #include "keyboard_layout.h"
+#include "orbit_text_layout.h"
 #include "ui_sdk.h"
 #include "render/image_decode.h"
 #include "peos/orbitfb.h"
@@ -13,6 +14,7 @@
 
 #define ORBIT_MAX_LINES 256u
 #define ORBIT_LINE_CHARS 160u
+#define ORBIT_DRAW_ROW_CHARS 512u
 #define ORBIT_PENDING_LINE_INITIAL_CHARS 256u
 #define ORBIT_TITLE_CHARS 64u
 #define ORBIT_EXEC_CHARS 160u
@@ -3988,39 +3990,44 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     if (cols < 8u || rows < 1u) return;
 
     uint32_t history_rows = rows;
-    size_t virtual_total = shell->line_count + ((shell->pending_len > 0u) ? 1u : 0u);
-    size_t start = 0u;
-    if (virtual_total > history_rows) {
-        start = virtual_total - history_rows;
+    if (cols >= ORBIT_DRAW_ROW_CHARS) cols = ORBIT_DRAW_ROW_CHARS - 1u;
+
+    size_t virtual_total = 0u;
+    for (size_t i = 0u; i < shell->line_count; i++) {
+        const char *line = orbit_get_line(shell, i);
+        virtual_total += orbit_text_row_count(peos_strlen(line), cols, 0u);
+    }
+    uint8_t has_pending = (shell->pending_len > 0u) ? 1u : 0u;
+    if (has_pending) {
+        virtual_total += orbit_text_row_count(shell->pending_len, cols, 1u);
     }
 
-    for (uint32_t r = 0u; r < history_rows; r++) {
-        size_t idx = start + r;
-        if (idx >= virtual_total) break;
+    size_t start = (virtual_total > history_rows) ? (virtual_total - history_rows) : 0u;
+    size_t virtual_row = 0u;
+    uint32_t draw_row = 0u;
+    uint64_t blink = (peos_time_ns() / 500000000ull) & 1ull;
 
-        const char *src = NULL;
-        char line_buf[ORBIT_LINE_CHARS];
-        if (idx < shell->line_count) {
-            src = orbit_get_line(shell, idx);
-        } else {
-            orbit_copy_str(line_buf, sizeof(line_buf), shell->pending_line ? shell->pending_line : "");
-            uint64_t blink = (peos_time_ns() / 500000000ull) & 1ull;
-            size_t n = peos_strlen(line_buf);
-            if (win->focused && blink && n + 1u < sizeof(line_buf)) {
-                line_buf[n++] = '_';
-                line_buf[n] = '\0';
-            }
-            src = line_buf;
-        }
+    size_t logical_total = shell->line_count + (has_pending ? 1u : 0u);
+    for (size_t i = 0u; i < logical_total && draw_row < history_rows; i++) {
+        uint8_t pending = (i == shell->line_count) ? 1u : 0u;
+        const char *line = pending
+                               ? (shell->pending_line ? shell->pending_line : "")
+                               : orbit_get_line(shell, i);
+        size_t line_len = pending ? shell->pending_len : peos_strlen(line);
+        size_t line_rows = orbit_text_row_count(line_len, cols, pending);
+        size_t cursor_row = pending ? (line_len / cols) : SIZE_MAX;
 
-        size_t n = peos_strlen(src);
-        if (n > cols) {
-            const char *tail = src + (n - cols);
-            char clipped[ORBIT_LINE_CHARS];
-            orbit_copy_str(clipped, sizeof(clipped), tail);
-            sl_draw_text(ctx, text_x, text_y + (r * cell_h), clipped, 200u, 230u, 200u);
-        } else {
-            sl_draw_text(ctx, text_x, text_y + (r * cell_h), src, 200u, 230u, 200u);
+        for (size_t segment = 0u; segment < line_rows; segment++, virtual_row++) {
+            if (virtual_row < start) continue;
+            char row_buf[ORBIT_DRAW_ROW_CHARS];
+            uint8_t show_cursor = (pending && segment == cursor_row &&
+                                   win->focused && blink) ? 1u : 0u;
+            (void)orbit_text_copy_row(line, line_len, cols, segment,
+                                      show_cursor, row_buf, sizeof(row_buf));
+            sl_draw_text(ctx, text_x, text_y + (draw_row * cell_h),
+                         row_buf, 200u, 230u, 200u);
+            draw_row++;
+            if (draw_row >= history_rows) break;
         }
     }
 
@@ -4158,7 +4165,14 @@ int sl_app_host_slot_configure(size_t index, const char *title, const char *exec
     orbit_copy_str(g_orbit_cfg[index].title, sizeof(g_orbit_cfg[index].title), title ? title : "App");
     orbit_copy_str(g_orbit_cfg[index].exec_path, sizeof(g_orbit_cfg[index].exec_path), exec_path);
     orbit_copy_str(g_orbit_cfg[index].exec_args, sizeof(g_orbit_cfg[index].exec_args), exec_args ? exec_args : "");
+    if (g_orbit[index] && !g_orbit[index]->initialized) {
+        orbit_cfg_apply_to_shell(index);
+    }
     return 1;
+}
+
+size_t sl_app_host_next_slot_index(void) {
+    return g_orbit_slot_count;
 }
 
 void sl_app_host_slots_use_default(void) {
@@ -4235,6 +4249,7 @@ app_instance_t *sl_app_host_instance_at(size_t index) {
         shell->initialized = 1u;
     } else {
         if (shell->enabled && shell->child_pid <= 0) {
+            orbit_cfg_apply_to_shell(index);
             if (!orbit_spawn_process(shell)) {
                 orbit_push_line(shell, "failed to start app process");
             }
