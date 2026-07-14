@@ -2,6 +2,12 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.11.2] - 2026-07-14
+- Fix literal minus translation in US and Italian keyboard layouts
+- Wrap long Orbit terminal lines instead of scrolling horizontally
+- Refresh the launcher catalog when application bundles change
+- Fix launcher tooltip and context-menu damage invalidation
+
 ## [0.11.1] - 2026-07-14
 - Add animated expandable launcher grid with external toggle and icon-centered hover labels
 
