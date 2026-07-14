@@ -25,6 +25,12 @@
 #define SL_LAUNCHER_ITEM_H 44u
 #define SL_LAUNCHER_ITEM_GAP 10u
 #define SL_LAUNCHER_ICON_SIZE 60u
+#define SL_LAUNCHER_COLUMN_GAP 10u
+#define SL_LAUNCHER_ARROW_GAP 2u
+#define SL_LAUNCHER_ARROW_W 20u
+#define SL_LAUNCHER_ARROW_H 40u
+#define SL_LAUNCHER_ANIM_MS 220u
+#define SL_LAUNCHER_TWEEN_ID 0xA1200000u
 #define SL_LAUNCHER_TOOLTIP_PAD_X 8u
 #define SL_LAUNCHER_TOOLTIP_W_MAX 210u
 #define SL_LAUNCHER_TOOLTIP_H 22u
@@ -93,6 +99,9 @@ static uint32_t g_launcher_ctx_y = 0u;
 static uint32_t g_launcher_ctx_w = 0u;
 static uint32_t g_launcher_ctx_h = 0u;
 static int32_t g_launcher_ctx_hover_row = -1;
+static uint8_t g_launcher_expanded = 0u;
+static uint32_t g_launcher_extra_width = 0u;
+static sl_window_rect_snapshot_t g_launcher_last_rect;
 static sl_window_anim_t g_window_anims[SL_WIN_ANIM_MAX];
 
 static void sl_window_refresh_zorder(void);
@@ -479,6 +488,9 @@ static void sl_launcher_items_reset(void) {
     g_launcher_ctx_y = 0u;
     g_launcher_ctx_w = 0u;
     g_launcher_ctx_h = 0u;
+    g_launcher_expanded = 0u;
+    sl_tween_set_u32_immediate(&g_launcher_extra_width, 0u);
+    g_launcher_last_rect.valid = 0u;
 }
 
 static size_t sl_launcher_visible_count(void) {
@@ -530,6 +542,26 @@ static uint32_t sl_launcher_content_width(void) {
     return (icon_w > header_w) ? icon_w : header_w;
 }
 
+static size_t sl_launcher_column_count(void) {
+    if (g_launcher_count == 0u) return 0u;
+    return (g_launcher_count + SL_LAUNCHER_VISIBLE_MAX - 1u) /
+           SL_LAUNCHER_VISIBLE_MAX;
+}
+
+static uint32_t sl_launcher_collapsed_width(void) {
+    return SL_LAUNCHER_PAD_X * 2u + sl_launcher_content_width();
+}
+
+static uint32_t sl_launcher_desired_extra_width(void) {
+    size_t columns = sl_launcher_column_count();
+    if (columns <= 1u) return 0u;
+
+    size_t extra_columns = columns - 1u;
+    uint32_t stride = sl_launcher_content_width() + SL_LAUNCHER_COLUMN_GAP;
+    if (extra_columns > UINT32_MAX / stride) return UINT32_MAX;
+    return (uint32_t)extra_columns * stride;
+}
+
 static uint32_t sl_launcher_item_height(void) {
     uint32_t min_h = SL_LAUNCHER_ITEM_H;
     uint32_t icon_h = SL_LAUNCHER_ICON_SIZE + 2u;
@@ -538,7 +570,9 @@ static uint32_t sl_launcher_item_height(void) {
 
 static uint32_t sl_launcher_width(void) {
     if (g_launcher_count == 0u) return 0u;
-    return SL_LAUNCHER_PAD_X * 2u + sl_launcher_content_width();
+    uint32_t base = sl_launcher_collapsed_width();
+    if (g_launcher_extra_width > UINT32_MAX - base) return UINT32_MAX;
+    return base + g_launcher_extra_width;
 }
 
 static uint32_t sl_launcher_panel_height(void) {
@@ -560,11 +594,16 @@ static void sl_launcher_panel_rect(const sl_ctx_t *ctx,
     uint32_t panel_y = 0u;
 
     if (ctx) {
-        if (panel_w > ctx->fb.width) panel_w = ctx->fb.width;
-        if (panel_h > ctx->fb.height) panel_h = ctx->fb.height;
-        if (panel_x + panel_w > ctx->fb.width) {
-            panel_x = (panel_w >= ctx->fb.width) ? 0u : (ctx->fb.width - panel_w);
+        uint32_t available_w = (ctx->fb.width > panel_x)
+                                   ? (ctx->fb.width - panel_x)
+                                   : ctx->fb.width;
+        if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX) {
+            uint32_t arrow_space = SL_LAUNCHER_ARROW_GAP + SL_LAUNCHER_ARROW_W;
+            available_w = (available_w > arrow_space) ? (available_w - arrow_space) : 0u;
         }
+        if (panel_x >= ctx->fb.width) panel_x = 0u;
+        if (panel_w > available_w) panel_w = available_w;
+        if (panel_h > ctx->fb.height) panel_h = ctx->fb.height;
         if (ctx->fb.height > panel_h) {
             panel_y = (ctx->fb.height - panel_h) / 2u;
         }
@@ -583,15 +622,47 @@ static void sl_launcher_item_rect(const sl_ctx_t *ctx, size_t index,
     (void)panel_h;
 
     uint32_t item_h = sl_launcher_item_height();
-    uint32_t item_x = panel_x + SL_LAUNCHER_PAD_X;
+    uint32_t column = (uint32_t)(index / SL_LAUNCHER_VISIBLE_MAX);
+    uint32_t row = (uint32_t)(index % SL_LAUNCHER_VISIBLE_MAX);
+    uint32_t item_x = panel_x + SL_LAUNCHER_PAD_X +
+                      column * (sl_launcher_content_width() + SL_LAUNCHER_COLUMN_GAP);
     uint32_t item_y = panel_y + SL_LAUNCHER_PAD_Y + SL_LAUNCHER_HEADER_H + 8u +
-                      (uint32_t)index * (item_h + SL_LAUNCHER_ITEM_GAP);
-    uint32_t item_w = (panel_w > SL_LAUNCHER_PAD_X * 2u) ? (panel_w - SL_LAUNCHER_PAD_X * 2u) : panel_w;
+                      row * (item_h + SL_LAUNCHER_ITEM_GAP);
+    uint32_t item_w = sl_launcher_content_width();
 
     if (x) *x = item_x;
     if (y) *y = item_y;
     if (w) *w = item_w;
     if (h) *h = item_h;
+}
+
+static void sl_launcher_arrow_rect_for_panel(uint32_t panel_x, uint32_t panel_y,
+                                             uint32_t panel_w, uint32_t panel_h,
+                                             uint32_t *x, uint32_t *y,
+                                             uint32_t *w, uint32_t *h) {
+    uint32_t arrow_w = SL_LAUNCHER_ARROW_W;
+    uint32_t arrow_h = (panel_h < SL_LAUNCHER_ARROW_H) ? panel_h : SL_LAUNCHER_ARROW_H;
+    uint32_t arrow_x = panel_x + panel_w + SL_LAUNCHER_ARROW_GAP;
+    uint32_t arrow_y = panel_y + ((panel_h > arrow_h) ? ((panel_h - arrow_h) / 2u) : 0u);
+
+    if (x) *x = arrow_x;
+    if (y) *y = arrow_y;
+    if (w) *w = arrow_w;
+    if (h) *h = arrow_h;
+}
+
+static void sl_launcher_arrow_rect(const sl_ctx_t *ctx,
+                                   uint32_t *x, uint32_t *y,
+                                   uint32_t *w, uint32_t *h) {
+    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
+    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
+    sl_launcher_arrow_rect_for_panel(panel_x, panel_y, panel_w, panel_h, x, y, w, h);
+}
+
+static int sl_rects_intersect(uint32_t ax, uint32_t ay, uint32_t aw, uint32_t ah,
+                              uint32_t bx, uint32_t by, uint32_t bw, uint32_t bh) {
+    if (aw == 0u || ah == 0u || bw == 0u || bh == 0u) return 0;
+    return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
 }
 
 static int sl_point_in_rect(uint32_t px, uint32_t py, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
@@ -621,21 +692,12 @@ static void sl_launcher_hover_label_rect(const sl_ctx_t *ctx, size_t index,
     if (tip_w < 48u) tip_w = 48u;
     uint32_t tip_h = SL_LAUNCHER_TOOLTIP_H;
 
-    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
-    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
-    (void)panel_y;
-    (void)panel_h;
-
     uint32_t item_x = 0u, item_y = 0u, item_w = 0u, item_h = 0u;
     sl_launcher_item_rect(ctx, index, &item_x, &item_y, &item_w, &item_h);
-    (void)item_x;
-    (void)item_w;
 
-    uint32_t tip_x = panel_x + panel_w + 8u;
-    uint32_t tip_y = item_y;
-    if (item_h > tip_h) {
-        tip_y = item_y + ((item_h - tip_h) / 2u);
-    }
+    int64_t centered_x = (int64_t)item_x + ((int64_t)item_w - (int64_t)tip_w) / 2;
+    uint32_t tip_x = (centered_x > 0) ? (uint32_t)centered_x : 0u;
+    uint32_t tip_y = (item_y > tip_h + 4u) ? (item_y - tip_h - 4u) : 0u;
 
     if (tip_x + tip_w > ctx->fb.width) {
         tip_x = (ctx->fb.width > tip_w + 4u) ? (ctx->fb.width - tip_w - 4u) : 0u;
@@ -676,16 +738,88 @@ static int sl_launcher_hit_test(const sl_ctx_t *ctx, uint32_t x, uint32_t y, siz
     if (panel_w == 0u || panel_h == 0u) return 0;
     if (!sl_point_in_rect(x, y, panel_x, panel_y, panel_w, panel_h)) return 0;
 
-    size_t visible_count = sl_launcher_visible_count();
-    for (size_t i = 0u; i < visible_count; i++) {
+    uint32_t content_right = panel_x + panel_w;
+
+    for (size_t i = 0u; i < g_launcher_count; i++) {
         uint32_t ix, iy, iw, ih;
         sl_launcher_item_rect(ctx, i, &ix, &iy, &iw, &ih);
+        if (ix + iw > content_right) continue;
         if (!sl_point_in_rect(x, y, ix, iy, iw, ih)) continue;
         if (out_index) *out_index = i;
         return 1;
     }
 
     return 0;
+}
+
+static uint32_t sl_launcher_expand_target(const sl_ctx_t *ctx) {
+    uint32_t desired = sl_launcher_desired_extra_width();
+    uint32_t base = sl_launcher_collapsed_width();
+    if (!ctx || desired == 0u) return desired;
+
+    uint32_t available = (ctx->fb.width > SL_LAUNCHER_MARGIN_LEFT)
+                             ? (ctx->fb.width - SL_LAUNCHER_MARGIN_LEFT)
+                             : ctx->fb.width;
+    uint32_t arrow_space = SL_LAUNCHER_ARROW_GAP + SL_LAUNCHER_ARROW_W;
+    available = (available > arrow_space) ? (available - arrow_space) : 0u;
+    if (available <= base) return 0u;
+    uint32_t maximum = available - base;
+    return (desired < maximum) ? desired : maximum;
+}
+
+static void sl_launcher_toggle(sl_ctx_t *ctx) {
+    if (!ctx || g_launcher_count <= SL_LAUNCHER_VISIBLE_MAX) return;
+
+    if (g_launcher_hover_index != (size_t)-1) {
+        uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
+        sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
+        if (tw > 0u && th > 0u) sl_dirty_add(ctx, tx, ty, tw, th);
+        g_launcher_hover_index = (size_t)-1;
+    }
+
+    g_launcher_expanded = g_launcher_expanded ? 0u : 1u;
+    uint32_t target = g_launcher_expanded ? sl_launcher_expand_target(ctx) : 0u;
+    if (target == 0u) g_launcher_expanded = 0u;
+    if (!sl_tween_to_u32(SL_LAUNCHER_TWEEN_ID, &g_launcher_extra_width, target,
+                         SL_LAUNCHER_ANIM_MS, SL_TWEEN_EASE_IN_OUT_CUBIC,
+                         NULL, NULL)) {
+        sl_tween_set_u32_immediate(&g_launcher_extra_width, target);
+    }
+}
+
+static void sl_launcher_track_animation_dirty(sl_ctx_t *ctx) {
+    if (!ctx) return;
+
+    sl_window_rect_snapshot_t current = {0u, 0u, 0u, 0u, 0u};
+    sl_launcher_panel_rect(ctx, &current.x, &current.y, &current.w, &current.h);
+    current.valid = (current.w > 0u && current.h > 0u) ? 1u : 0u;
+
+    uint8_t changed = (current.valid != g_launcher_last_rect.valid) ? 1u : 0u;
+    if (!changed && current.valid) {
+        changed = (current.x != g_launcher_last_rect.x ||
+                   current.y != g_launcher_last_rect.y ||
+                   current.w != g_launcher_last_rect.w ||
+                   current.h != g_launcher_last_rect.h) ? 1u : 0u;
+    }
+    if (!changed) return;
+
+    sl_dirty_add_snapshot(ctx, &g_launcher_last_rect);
+    sl_dirty_add_snapshot(ctx, &current);
+    if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX) {
+        uint32_t ax = 0u, ay = 0u, aw = 0u, ah = 0u;
+        if (g_launcher_last_rect.valid) {
+            sl_launcher_arrow_rect_for_panel(g_launcher_last_rect.x, g_launcher_last_rect.y,
+                                             g_launcher_last_rect.w, g_launcher_last_rect.h,
+                                             &ax, &ay, &aw, &ah);
+            sl_dirty_add(ctx, ax, ay, aw, ah);
+        }
+        if (current.valid) {
+            sl_launcher_arrow_rect_for_panel(current.x, current.y, current.w, current.h,
+                                             &ax, &ay, &aw, &ah);
+            sl_dirty_add(ctx, ax, ay, aw, ah);
+        }
+    }
+    g_launcher_last_rect = current;
 }
 
 static void sl_launcher_context_close(sl_ctx_t *ctx) {
@@ -1238,7 +1372,11 @@ void sl_windows_mark_focused_activity(void) {
 
 void sl_windows_tick_animations(sl_ctx_t *ctx) {
     uint8_t any_active = 0u;
-    if (!ctx || !g_windows || g_window_count == 0u) return;
+    if (!ctx) return;
+
+    /* The launcher tween must keep repainting even when the desktop has no windows. */
+    sl_launcher_track_animation_dirty(ctx);
+    if (!g_windows || g_window_count == 0u) return;
 
     for (size_t i = 0u; i < g_window_count; ) {
         sl_window_t *win = &g_windows[i];
@@ -1370,7 +1508,11 @@ uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx) {
     (void)panel_y;
     (void)panel_h;
     if (panel_w == 0u) return 0u;
-    return panel_x + panel_w + SL_LAUNCHER_RESERVED_GAP;
+    uint32_t right = panel_x + panel_w;
+    if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX) {
+        right += SL_LAUNCHER_ARROW_GAP + SL_LAUNCHER_ARROW_W;
+    }
+    return right + SL_LAUNCHER_RESERVED_GAP;
 }
 
 int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
@@ -1396,6 +1538,20 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
     sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
     if (panel_w == 0u || panel_h == 0u) return 0;
+
+    if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX) {
+        uint32_t arrow_x = 0u, arrow_y = 0u, arrow_w = 0u, arrow_h = 0u;
+        sl_launcher_arrow_rect(ctx, &arrow_x, &arrow_y, &arrow_w, &arrow_h);
+        if (sl_point_in_rect(x, y, arrow_x, arrow_y, arrow_w, arrow_h)) {
+            sl_dirty_add(ctx, arrow_x, arrow_y, arrow_w, arrow_h);
+            sl_launcher_toggle(ctx);
+            sl_dirty_add(ctx, panel_x, panel_y, panel_w, panel_h);
+            sl_launcher_arrow_rect(ctx, &arrow_x, &arrow_y, &arrow_w, &arrow_h);
+            sl_dirty_add(ctx, arrow_x, arrow_y, arrow_w, arrow_h);
+            return 1;
+        }
+    }
+
     if (x < panel_x || y < panel_y) return 0;
     if (x >= panel_x + panel_w || y >= panel_y + panel_h) return 0;
 
@@ -1460,6 +1616,12 @@ void sl_launcher_render(sl_ctx_t *ctx) {
     uint8_t needs_panel = sl_dirty_intersects_rect(panel_x, panel_y, panel_w, panel_h) ? 1u : 0u;
     uint8_t needs_tip = 0u;
     uint8_t needs_ctx = 0u;
+    uint8_t needs_arrow = 0u;
+    uint32_t arrow_x = 0u, arrow_y = 0u, arrow_w = 0u, arrow_h = 0u;
+    if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX) {
+        sl_launcher_arrow_rect(ctx, &arrow_x, &arrow_y, &arrow_w, &arrow_h);
+        needs_arrow = sl_dirty_intersects_rect(arrow_x, arrow_y, arrow_w, arrow_h) ? 1u : 0u;
+    }
     if (g_launcher_hover_index != (size_t)-1) {
         uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
         sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
@@ -1472,17 +1634,24 @@ void sl_launcher_render(sl_ctx_t *ctx) {
         sl_dirty_intersects_rect(g_launcher_ctx_x, g_launcher_ctx_y, g_launcher_ctx_w, g_launcher_ctx_h)) {
         needs_ctx = 1u;
     }
-    if (!needs_panel && !needs_tip && !needs_ctx) return;
+    if (!needs_panel && !needs_tip && !needs_ctx && !needs_arrow) return;
 
     sl_fill_rect(ctx, panel_x, panel_y, panel_w, panel_h, 16u, 20u, 26u);
     sl_fill_rect(ctx, panel_x + panel_w - 1u, panel_y, 1u, panel_h, 54u, 65u, 78u);
     sl_draw_text(ctx, panel_x + SL_LAUNCHER_PAD_X, panel_y + SL_LAUNCHER_PAD_Y, "APPS", 228u, 233u, 238u);
 
-    size_t visible_count = sl_launcher_visible_count();
-    for (size_t i = 0u; i < visible_count; i++) {
+    uint32_t content_right = panel_x + panel_w;
+
+    uint32_t content_w = (content_right > panel_x) ? (content_right - panel_x) : 0u;
+    sl_clip_set(ctx, panel_x, panel_y, content_w, panel_h);
+    for (size_t i = 0u; i < g_launcher_count; i++) {
         sl_launcher_item_t *item = &g_launcher_items[i];
         uint32_t ix, iy, iw, ih;
         sl_launcher_item_rect(ctx, i, &ix, &iy, &iw, &ih);
+        if (!sl_rects_intersect(ix, iy, iw, ih,
+                                panel_x, panel_y, content_w, panel_h)) {
+            continue;
+        }
         sl_launcher_try_load_icon(item);
 
         app_instance_t *app = sl_app_host_instance_peek_at(item->slot);
@@ -1525,6 +1694,29 @@ void sl_launcher_render(sl_ctx_t *ctx) {
             char short_label[13];
             sl_launcher_compact_label(item->title, short_label, sizeof(short_label));
             sl_draw_text(ctx, ix + 12u, iy + 15u, short_label, 242u, 244u, 247u);
+        }
+    }
+    sl_clip_clear(ctx);
+
+    if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX && arrow_w > 0u && arrow_h > 0u) {
+        sl_fill_rect(ctx, arrow_x, arrow_y, arrow_w, arrow_h, 29u, 36u, 46u);
+        sl_fill_rect(ctx, arrow_x, arrow_y, arrow_w, 1u, 71u, 85u, 101u);
+        sl_fill_rect(ctx, arrow_x, arrow_y + arrow_h - 1u, arrow_w, 1u, 71u, 85u, 101u);
+
+        uint32_t cx = arrow_x + arrow_w / 2u;
+        uint32_t cy = arrow_y + arrow_h / 2u;
+        if (g_launcher_expanded) {
+            sl_fill_rect(ctx, cx + 2u, cy - 6u, 2u, 3u, 228u, 233u, 238u);
+            sl_fill_rect(ctx, cx, cy - 3u, 2u, 3u, 228u, 233u, 238u);
+            sl_fill_rect(ctx, cx - 2u, cy, 2u, 2u, 228u, 233u, 238u);
+            sl_fill_rect(ctx, cx, cy + 2u, 2u, 3u, 228u, 233u, 238u);
+            sl_fill_rect(ctx, cx + 2u, cy + 5u, 2u, 3u, 228u, 233u, 238u);
+        } else {
+            sl_fill_rect(ctx, cx - 3u, cy - 6u, 2u, 3u, 228u, 233u, 238u);
+            sl_fill_rect(ctx, cx - 1u, cy - 3u, 2u, 3u, 228u, 233u, 238u);
+            sl_fill_rect(ctx, cx + 1u, cy, 2u, 2u, 228u, 233u, 238u);
+            sl_fill_rect(ctx, cx - 1u, cy + 2u, 2u, 3u, 228u, 233u, 238u);
+            sl_fill_rect(ctx, cx - 3u, cy + 5u, 2u, 3u, 228u, 233u, 238u);
         }
     }
 
