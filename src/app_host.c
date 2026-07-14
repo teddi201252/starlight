@@ -18,7 +18,7 @@
 #define ORBIT_EXEC_CHARS 160u
 #define ORBIT_ARGS_CHARS 160u
 #define ORBIT_KEY_BACKSPACE PEOS_KEY_BACKSPACE
-#define ORBIT_APP_SLOTS 8u
+#define ORBIT_APP_INITIAL_CAP 8u
 #define ORBIT_MAX_POLL_READS 32u
 #define ORBIT_POLL_INTERVAL_ACTIVE_NS 2000000ull
 #define ORBIT_POLL_INTERVAL_BUSY_NS   4000000ull
@@ -251,6 +251,7 @@ typedef struct {
     char title[ORBIT_TITLE_CHARS];
     char exec_path[ORBIT_EXEC_CHARS];
     char exec_args[ORBIT_ARGS_CHARS];
+    size_t slot_index;
     orbit_ui_state_t ui;
     orbit_surface_t surface;
     uint8_t esc_active;
@@ -259,10 +260,11 @@ typedef struct {
     size_t csi_len;
 } orbit_shell_t;
 
-static orbit_shell_t g_orbit[ORBIT_APP_SLOTS];
-static app_instance_t g_orbit_app[ORBIT_APP_SLOTS];
-static orbit_slot_cfg_t g_orbit_cfg[ORBIT_APP_SLOTS];
-static uint8_t g_orbit_apps_bound = 0u;
+static orbit_shell_t **g_orbit = NULL;
+static app_instance_t **g_orbit_app = NULL;
+static orbit_slot_cfg_t *g_orbit_cfg = NULL;
+static size_t g_orbit_slot_count = 0u;
+static size_t g_orbit_slot_cap = 0u;
 static uint8_t g_orbit_cfg_init = 0u;
 static uint32_t g_orbit_double_click_ms = ORBIT_UI_DOUBLE_CLICK_MS_DEFAULT;
 static uint8_t g_reload_display_requested = 0u;
@@ -4030,9 +4032,9 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         }
         sl_draw_text(ctx, text_x, text_y + ((history_rows - 1u) * cell_h), hint, 170u, 170u, 170u);
     } else {
-        size_t idx = (size_t)(shell - &g_orbit[0]);
-        if (idx < ORBIT_APP_SLOTS) {
-            g_orbit_app[idx].pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);
+        size_t idx = shell->slot_index;
+        if (idx < g_orbit_slot_count && g_orbit_app[idx]) {
+            g_orbit_app[idx]->pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);
         }
     }
 }
@@ -4053,8 +4055,9 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
         (void)sl_windows_open_app_bundle_path(ctx, g_open_app_bundle_path);
     }
     uint64_t now = peos_time_ns();
-    for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
-        orbit_shell_t *shell = &g_orbit[i];
+    for (size_t i = 0u; i < g_orbit_slot_count; i++) {
+        orbit_shell_t *shell = g_orbit[i];
+        if (!shell) continue;
         if (!shell->initialized) continue;
         shell->ui.double_click_ms = g_orbit_double_click_ms;
         if (shell->next_poll_ns > now) continue;
@@ -4065,33 +4068,79 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
             sl_windows_mark_app_dirty(ctx, shell);
         }
 
-        g_orbit_app[i].pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);
+        g_orbit_app[i]->pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);
     }
 }
 
-static void orbit_bind_apps(void) {
-    if (g_orbit_apps_bound) return;
-    for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
-        g_orbit_app[i].pid = 0u;
-        g_orbit_app[i].tid = 0u;
-        g_orbit_app[i].on_input = orbit_on_input;
-        g_orbit_app[i].on_render = orbit_on_render;
-        g_orbit_app[i].on_close = orbit_on_close;
-        g_orbit_app[i].userdata = &g_orbit[i];
+static int orbit_slots_reserve(size_t needed) {
+    if (needed <= g_orbit_slot_cap) return 1;
+    size_t new_cap = g_orbit_slot_cap ? g_orbit_slot_cap : ORBIT_APP_INITIAL_CAP;
+    while (new_cap < needed) {
+        if (new_cap > SIZE_MAX / 2u) return 0;
+        new_cap *= 2u;
     }
-    g_orbit_apps_bound = 1u;
+
+    orbit_shell_t **new_shells = (orbit_shell_t **)calloc(new_cap, sizeof(*new_shells));
+    app_instance_t **new_apps = (app_instance_t **)calloc(new_cap, sizeof(*new_apps));
+    orbit_slot_cfg_t *new_cfg = (orbit_slot_cfg_t *)calloc(new_cap, sizeof(*new_cfg));
+    if (!new_shells || !new_apps || !new_cfg) {
+        free(new_shells);
+        free(new_apps);
+        free(new_cfg);
+        return 0;
+    }
+    for (size_t i = 0u; i < g_orbit_slot_count; i++) {
+        new_shells[i] = g_orbit[i];
+        new_apps[i] = g_orbit_app[i];
+        new_cfg[i] = g_orbit_cfg[i];
+    }
+    free(g_orbit);
+    free(g_orbit_app);
+    free(g_orbit_cfg);
+    g_orbit = new_shells;
+    g_orbit_app = new_apps;
+    g_orbit_cfg = new_cfg;
+    g_orbit_slot_cap = new_cap;
+    return 1;
+}
+
+static int orbit_slots_ensure(size_t needed) {
+    if (!orbit_slots_reserve(needed)) return 0;
+    while (g_orbit_slot_count < needed) {
+        size_t index = g_orbit_slot_count;
+        orbit_shell_t *shell = (orbit_shell_t *)calloc(1u, sizeof(*shell));
+        app_instance_t *app = (app_instance_t *)calloc(1u, sizeof(*app));
+        if (!shell || !app) {
+            free(shell);
+            free(app);
+            return 0;
+        }
+        shell->slot_index = index;
+        shell->child_pid = -1;
+        shell->child_stdin_fd = -1;
+        shell->child_stdout_fd = -1;
+        app->on_input = orbit_on_input;
+        app->on_render = orbit_on_render;
+        app->on_close = orbit_on_close;
+        app->userdata = shell;
+        g_orbit[index] = shell;
+        g_orbit_app[index] = app;
+        g_orbit_slot_count++;
+    }
+    return 1;
 }
 
 static void orbit_cfg_apply_to_shell(size_t index) {
-    if (index >= ORBIT_APP_SLOTS) return;
-    g_orbit[index].enabled = g_orbit_cfg[index].enabled;
-    orbit_copy_str(g_orbit[index].title, sizeof(g_orbit[index].title), g_orbit_cfg[index].title);
-    orbit_copy_str(g_orbit[index].exec_path, sizeof(g_orbit[index].exec_path), g_orbit_cfg[index].exec_path);
-    orbit_copy_str(g_orbit[index].exec_args, sizeof(g_orbit[index].exec_args), g_orbit_cfg[index].exec_args);
+    if (index >= g_orbit_slot_count || !g_orbit[index]) return;
+    orbit_shell_t *shell = g_orbit[index];
+    shell->enabled = g_orbit_cfg[index].enabled;
+    orbit_copy_str(shell->title, sizeof(shell->title), g_orbit_cfg[index].title);
+    orbit_copy_str(shell->exec_path, sizeof(shell->exec_path), g_orbit_cfg[index].exec_path);
+    orbit_copy_str(shell->exec_args, sizeof(shell->exec_args), g_orbit_cfg[index].exec_args);
 }
 
 void sl_app_host_slots_clear(void) {
-    for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
+    for (size_t i = 0u; i < g_orbit_slot_count; i++) {
         g_orbit_cfg[i].enabled = 0u;
         g_orbit_cfg[i].title[0] = '\0';
         g_orbit_cfg[i].exec_path[0] = '\0';
@@ -4101,7 +4150,8 @@ void sl_app_host_slots_clear(void) {
 }
 
 int sl_app_host_slot_configure(size_t index, const char *title, const char *exec_path, const char *exec_args) {
-    if (index >= ORBIT_APP_SLOTS || !exec_path || exec_path[0] == '\0') return 0;
+    if (!exec_path || exec_path[0] == '\0' || index == SIZE_MAX) return 0;
+    if (!orbit_slots_ensure(index + 1u)) return 0;
     if (!g_orbit_cfg_init) sl_app_host_slots_clear();
 
     g_orbit_cfg[index].enabled = 1u;
@@ -4119,7 +4169,7 @@ void sl_app_host_slots_use_default(void) {
 size_t sl_app_host_slot_count_enabled(void) {
     if (!g_orbit_cfg_init) sl_app_host_slots_use_default();
     size_t count = 0u;
-    for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
+    for (size_t i = 0u; i < g_orbit_slot_count; i++) {
         if (g_orbit_cfg[i].enabled) count++;
     }
     return count;
@@ -4129,32 +4179,22 @@ void sl_app_host_reset(void) {
     if (!g_orbit_cfg_init) {
         sl_app_host_slots_use_default();
     }
-    orbit_bind_apps();
-    for (size_t i = 0u; i < ORBIT_APP_SLOTS; i++) {
-        orbit_stop_process(&g_orbit[i]);
-        orbit_ui_storage_free(&g_orbit[i].ui);
-        orbit_pending_line_free(&g_orbit[i]);
-        orbit_surface_free(&g_orbit[i]);
-        peos_memset(&g_orbit[i], 0, sizeof(g_orbit[i]));
+    for (size_t i = 0u; i < g_orbit_slot_count; i++) {
+        orbit_shell_t *shell = g_orbit[i];
+        if (!shell) continue;
+        orbit_stop_process(shell);
+        orbit_ui_storage_free(&shell->ui);
+        orbit_pending_line_free(shell);
+        orbit_surface_free(shell);
+        peos_memset(shell, 0, sizeof(*shell));
+        shell->slot_index = i;
         orbit_cfg_apply_to_shell(i);
-        g_orbit[i].child_pid = -1;
-        g_orbit[i].child_stdin_fd = -1;
-        g_orbit[i].child_stdout_fd = -1;
-        g_orbit[i].next_poll_ns = 0ull;
-        orbit_reset_buffer(&g_orbit[i]);
-
-        if (!g_orbit[i].enabled) {
-            g_orbit[i].initialized = 0u;
-            g_orbit_app[i].pid = 0u;
-            continue;
-        }
-
-        if (!orbit_spawn_process(&g_orbit[i])) {
-            orbit_push_line(&g_orbit[i], "failed to start app process");
-        }
-
-        g_orbit_app[i].pid = (uint32_t)((g_orbit[i].child_pid > 0) ? g_orbit[i].child_pid : 0u);
-        g_orbit[i].initialized = 1u;
+        shell->child_pid = -1;
+        shell->child_stdin_fd = -1;
+        shell->child_stdout_fd = -1;
+        orbit_reset_buffer(shell);
+        g_orbit_app[i]->pid = 0u;
+        g_orbit_app[i]->userdata = shell;
     }
 }
 
@@ -4162,36 +4202,44 @@ app_instance_t *sl_app_host_instance(void) {
     return sl_app_host_instance_at(0u);
 }
 
-app_instance_t *sl_app_host_instance_at(size_t index) {
-    orbit_bind_apps();
+app_instance_t *sl_app_host_instance_peek_at(size_t index) {
     if (!g_orbit_cfg_init) sl_app_host_slots_use_default();
-    if (index >= ORBIT_APP_SLOTS) return NULL;
-    if (!g_orbit_cfg[index].enabled) return NULL;
-    if (!g_orbit[index].initialized) {
-        orbit_ui_storage_free(&g_orbit[index].ui);
-        orbit_pending_line_free(&g_orbit[index]);
-        orbit_surface_free(&g_orbit[index]);
-        peos_memset(&g_orbit[index], 0, sizeof(g_orbit[index]));
-        orbit_cfg_apply_to_shell(index);
-        g_orbit[index].child_pid = -1;
-        g_orbit[index].child_stdin_fd = -1;
-        g_orbit[index].child_stdout_fd = -1;
-        g_orbit[index].next_poll_ns = 0ull;
-        orbit_reset_buffer(&g_orbit[index]);
+    if (index >= g_orbit_slot_count || !g_orbit_cfg[index].enabled) return NULL;
+    return g_orbit_app[index];
+}
 
-        if (!orbit_spawn_process(&g_orbit[index])) {
-            orbit_push_line(&g_orbit[index], "failed to start app process");
+app_instance_t *sl_app_host_instance_at(size_t index) {
+    if (!g_orbit_cfg_init) sl_app_host_slots_use_default();
+    if (index >= g_orbit_slot_count) return NULL;
+    if (!g_orbit_cfg[index].enabled) return NULL;
+    orbit_shell_t *shell = g_orbit[index];
+    app_instance_t *app = g_orbit_app[index];
+    if (!shell || !app) return NULL;
+    if (!shell->initialized) {
+        orbit_ui_storage_free(&shell->ui);
+        orbit_pending_line_free(shell);
+        orbit_surface_free(shell);
+        peos_memset(shell, 0, sizeof(*shell));
+        shell->slot_index = index;
+        orbit_cfg_apply_to_shell(index);
+        shell->child_pid = -1;
+        shell->child_stdin_fd = -1;
+        shell->child_stdout_fd = -1;
+        orbit_reset_buffer(shell);
+
+        if (!orbit_spawn_process(shell)) {
+            orbit_push_line(shell, "failed to start app process");
         }
 
-        g_orbit_app[index].pid = (uint32_t)((g_orbit[index].child_pid > 0) ? g_orbit[index].child_pid : 0u);
-        g_orbit[index].initialized = 1u;
+        app->pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);
+        shell->initialized = 1u;
     } else {
-        if (g_orbit[index].enabled && g_orbit[index].child_pid <= 0) {
-            if (!orbit_spawn_process(&g_orbit[index])) {
-                orbit_push_line(&g_orbit[index], "failed to start app process");
+        if (shell->enabled && shell->child_pid <= 0) {
+            if (!orbit_spawn_process(shell)) {
+                orbit_push_line(shell, "failed to start app process");
             }
         }
-        g_orbit_app[index].pid = (uint32_t)((g_orbit[index].child_pid > 0) ? g_orbit[index].child_pid : 0u);
+        app->pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);
     }
-    return &g_orbit_app[index];
+    return app;
 }
