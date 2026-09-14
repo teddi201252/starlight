@@ -1,6 +1,11 @@
 #include "render_ops.h"
 
+#if defined(__SSE2__)
 #include <emmintrin.h>
+#define SL_RENDER_HAS_SSE2 1
+#else
+#define SL_RENDER_HAS_SSE2 0
+#endif
 
 static uint8_t sl_render_blend_byte(uint8_t src, uint8_t dst, uint8_t alpha) {
     uint32_t value = (uint32_t)src * alpha + (uint32_t)dst * (255u - alpha) + 128u;
@@ -9,12 +14,14 @@ static uint8_t sl_render_blend_byte(uint8_t src, uint8_t dst, uint8_t alpha) {
 
 void sl_render_fill_bgra32(uint32_t *dst, size_t pixel_count, uint32_t packed_bgra) {
     if (!dst) return;
+#if SL_RENDER_HAS_SSE2
     __m128i value = _mm_set1_epi32((int)packed_bgra);
     while (pixel_count >= 4u) {
         _mm_storeu_si128((__m128i *)(void *)dst, value);
         dst += 4;
         pixel_count -= 4u;
     }
+#endif
     while (pixel_count-- > 0u) *dst++ = packed_bgra;
 }
 
@@ -28,6 +35,7 @@ void sl_render_blend_fill_bgra32(uint32_t *dst, size_t pixel_count,
         return;
     }
 
+#if SL_RENDER_HAS_SSE2
     __m128i zero = _mm_setzero_si128();
     __m128i src = _mm_set1_epi32((int)(0xFF000000u | ((uint32_t)r << 16u) |
                                            ((uint32_t)g << 8u) | b));
@@ -53,6 +61,7 @@ void sl_render_blend_fill_bgra32(uint32_t *dst, size_t pixel_count,
         dst += 4;
         pixel_count -= 4u;
     }
+#endif
 
     while (pixel_count-- > 0u) {
         uint8_t *d = (uint8_t *)(void *)dst;
@@ -67,6 +76,7 @@ void sl_render_blend_fill_bgra32(uint32_t *dst, size_t pixel_count,
 void sl_render_copy_opaque_rgba_to_bgra32(uint32_t *dst, const uint32_t *src,
                                           size_t pixel_count) {
     if (!dst || !src) return;
+#if SL_RENDER_HAS_SSE2
     __m128i rb_mask = _mm_set1_epi32(0x00FF00FF);
     __m128i g_mask = _mm_set1_epi32(0x0000FF00);
     __m128i alpha = _mm_set1_epi32((int)0xFF000000u);
@@ -81,6 +91,7 @@ void sl_render_copy_opaque_rgba_to_bgra32(uint32_t *dst, const uint32_t *src,
         dst += 4;
         pixel_count -= 4u;
     }
+#endif
     while (pixel_count-- > 0u) {
         uint32_t value = *src++;
         *dst++ = 0xFF000000u | ((value & 0x000000FFu) << 16u) |
