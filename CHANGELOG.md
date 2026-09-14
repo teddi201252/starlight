@@ -2,6 +2,10 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.12.0] - 2026-09-14
+- Enforce non-executable stacks for Starlight binaries
+- Clean up invalid source pragmas
+
 ## [0.11.2] - 2026-07-14
 - Fix literal minus translation in US and Italian keyboard layouts
 - Wrap long Orbit terminal lines instead of scrolling horizontally

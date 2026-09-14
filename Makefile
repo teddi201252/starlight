@@ -2,7 +2,7 @@ ROOT_DIR ?= ..
 
 CC := x86_64-elf-gcc
 CFLAGS ?= -std=gnu11 -O2 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pie -mno-red-zone -mcmodel=kernel
-LDFLAGS ?= -nostdlib -ffreestanding -fno-pie -Wl,-T,$(ROOT_DIR)/userland/linker.ld -Wl,-z,max-page-size=0x1000
+LDFLAGS ?= -nostdlib -ffreestanding -fno-pie -Wl,-T,$(ROOT_DIR)/userland/linker.ld -Wl,-z,max-page-size=0x1000 -Wl,-z,noexecstack
 
 SRC := $(shell find src -type f -name '*.c')
 OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
