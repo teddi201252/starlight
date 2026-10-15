@@ -3,6 +3,7 @@
 #include "context_menu_renderer.h"
 #include "render/pixels.h"
 #include "window.h"
+#include "peos/capability_parse.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -51,6 +52,7 @@ typedef struct {
     char icon[160];
     uint32_t width;
     uint32_t height;
+    uint64_t caps_mask;
 } sl_app_bundle_t;
 
 typedef struct {
@@ -386,6 +388,8 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
 
     peos_memset(out, 0, sizeof(*out));
     sl_copy_str(out->title, sizeof(out->title), "App");
+    // Without a `capabilities` key an app only gets read access to the filesystem.
+    out->caps_mask = PEOS_CAP_FS_READ;
 
     char raw_exec[160];
     raw_exec[0] = '\0';
@@ -439,6 +443,14 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
             sl_copy_str(out->args, sizeof(out->args), val);
         } else if (strcmp(key, "icon") == 0) {
             sl_copy_str(raw_icon, sizeof(raw_icon), val);
+        } else if (strcmp(key, "capabilities") == 0) {
+            peos_cap_mask_t parsed = 0u;
+            // An unknown capability name rejects the bundle instead of guessing.
+            if (peos_cap_parse_list(val, &parsed) != 0) {
+                fclose(f);
+                return 0;
+            }
+            out->caps_mask = parsed;
         } else if (strcmp(key, "width") == 0) {
             (void)sl_parse_u32(val, &out->width);
         } else if (strcmp(key, "height") == 0) {
@@ -501,6 +513,7 @@ static uint64_t sl_catalog_signature(const sl_scanned_app_t *entry) {
     hash = sl_catalog_hash_text(hash, entry->bundle_path);
     hash = sl_catalog_hash_text(hash, entry->app.title);
     hash = sl_catalog_hash_text(hash, entry->app.exec);
+    hash = sl_catalog_hash_bytes(hash, &entry->app.caps_mask, sizeof(entry->app.caps_mask));
     hash = sl_catalog_hash_text(hash, entry->app.args);
     hash = sl_catalog_hash_text(hash, entry->app.icon);
     hash = sl_catalog_hash_bytes(hash, &entry->app.width, sizeof(entry->app.width));
@@ -1408,6 +1421,7 @@ int sl_windows_open_app_bundle_path(sl_ctx_t *ctx, const char *bundle_path) {
 
     size_t slot = sl_app_host_next_slot_index();
     if (!sl_app_host_slot_configure(slot, app.title, app.exec, app.args)) return 0;
+    if (!sl_app_host_slot_restrict_caps(slot, app.caps_mask)) return 0;
     if (!sl_launcher_add_item(slot, &app, bundle_path)) return 0;
     sl_dirty_mark_full();
     return sl_windows_open_launcher_item(ctx, g_launcher_count - 1u);
@@ -1461,7 +1475,8 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
                           ? g_launcher_items[old_index].slot
                           : sl_app_host_next_slot_index();
         if (!sl_app_host_slot_configure(slot, entry->app.title,
-                                        entry->app.exec, entry->app.args)) {
+                                        entry->app.exec, entry->app.args) ||
+            !sl_app_host_slot_restrict_caps(slot, entry->app.caps_mask)) {
             continue;
         }
 
