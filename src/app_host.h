@@ -1,5 +1,6 @@
 #pragma once
 
+#include "peos/path_scope_abi.h"
 #include "window.h"
 
 #include <stddef.h>
@@ -14,6 +15,8 @@ void sl_app_host_slots_use_default(void);
 int sl_app_host_slot_configure(size_t index, const char *title, const char *exec_path, const char *exec_args);
 /* Limits the rights of the app started in this slot (call after slot_configure). */
 int sl_app_host_slot_restrict_caps(size_t index, uint64_t caps_mask);
+/* Limits the filesystem the app may touch (call after slot_configure). */
+int sl_app_host_slot_restrict_paths(size_t index, const peos_path_grant_t *grants, size_t count);
 size_t sl_app_host_next_slot_index(void);
 size_t sl_app_host_slot_count_enabled(void);
 int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t *frame,
