@@ -208,6 +208,9 @@ typedef struct {
     char exec_args[ORBIT_ARGS_CHARS];
     uint8_t caps_restrict;
     uint64_t caps_mask;
+    uint8_t paths_restrict;
+    uint32_t path_count;
+    peos_path_grant_t paths[PEOS_PATH_MAX_GRANTS];
 } orbit_slot_cfg_t;
 
 typedef struct {
@@ -2194,6 +2197,17 @@ static int orbit_spawn_process(orbit_shell_t *shell) {
             return 0;
         }
     }
+    if (shell->slot_index < g_orbit_slot_count && g_orbit_cfg[shell->slot_index].paths_restrict) {
+        const orbit_slot_cfg_t *cfg = &g_orbit_cfg[shell->slot_index];
+        if (peos_path_set_spawn_scope(cfg->paths, cfg->path_count) != 0) {
+            // Never fall back to the full filesystem when the scope cannot be applied.
+            (void)peos_fclose((uint64_t)child_stdin_rd);
+            (void)peos_fclose((uint64_t)child_stdout_wr);
+            (void)peos_fclose((uint64_t)parent_stdin_wr);
+            (void)peos_fclose((uint64_t)parent_stdout_rd);
+            return 0;
+        }
+    }
     int64_t pid = peos_spawnv(path, peos_strlen(path), arg,
                               child_stdin_rd, child_stdout_wr, child_stdout_wr);
 
@@ -4168,6 +4182,8 @@ void sl_app_host_slots_clear(void) {
         g_orbit_cfg[i].exec_args[0] = '\0';
         g_orbit_cfg[i].caps_restrict = 0u;
         g_orbit_cfg[i].caps_mask = 0u;
+        g_orbit_cfg[i].paths_restrict = 0u;
+        g_orbit_cfg[i].path_count = 0u;
     }
     g_orbit_cfg_init = 1u;
 }
@@ -4183,9 +4199,20 @@ int sl_app_host_slot_configure(size_t index, const char *title, const char *exec
     orbit_copy_str(g_orbit_cfg[index].exec_args, sizeof(g_orbit_cfg[index].exec_args), exec_args ? exec_args : "");
     g_orbit_cfg[index].caps_restrict = 0u;
     g_orbit_cfg[index].caps_mask = 0u;
+    g_orbit_cfg[index].paths_restrict = 0u;
+    g_orbit_cfg[index].path_count = 0u;
     if (g_orbit[index] && !g_orbit[index]->initialized) {
         orbit_cfg_apply_to_shell(index);
     }
+    return 1;
+}
+
+int sl_app_host_slot_restrict_paths(size_t index, const peos_path_grant_t *grants, size_t count) {
+    if (index >= g_orbit_slot_count || !g_orbit_cfg_init) return 0;
+    if (count > PEOS_PATH_MAX_GRANTS || (count != 0u && !grants)) return 0;
+    for (size_t i = 0; i < count; i++) g_orbit_cfg[index].paths[i] = grants[i];
+    g_orbit_cfg[index].path_count = (uint32_t)count;
+    g_orbit_cfg[index].paths_restrict = 1u;
     return 1;
 }
 
