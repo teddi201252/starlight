@@ -169,12 +169,21 @@ static int sl_dirty_coalesce_best_pair(void) {
     return 1;
 }
 
+// Bumped by every damage request, so the main loop can tell an idle frame.
+static uint32_t g_dirty_requests;
+
+uint32_t sl_dirty_request_count(void) {
+    return g_dirty_requests;
+}
+
 void sl_dirty_mark_full(void) {
+    g_dirty_requests++;
     g_dirty.full = 1u;
     g_dirty.count = 0;
 }
 
 void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    g_dirty_requests++;
     if (!ctx || g_dirty.full) return;
     if (w == 0u || h == 0u) return;
     if (x >= ctx->fb.width || y >= ctx->fb.height) return;
@@ -827,6 +836,7 @@ static void sl_load_background(sl_ctx_t *ctx, const char *path) {
 int sl_init(sl_ctx_t *ctx) {
     if (!ctx) return 0;
     peos_memset(ctx, 0, sizeof(*ctx));
+    ctx->input_fd = -1;
 
     sl_ensure_config_dirs();
     sl_load_display_config(ctx);
@@ -847,7 +857,9 @@ int sl_init(sl_ctx_t *ctx) {
 
     if (!sl_update_fb_info(ctx)) return 0;
 
-    if ((int64_t)peos_input_mode(PEOS_INPUT_MODE_RAW) == 0) {
+    // Input arrives on an endpoint Starlight can wait on; older kernels keep raw polling.
+    ctx->input_fd = peos_input_open();
+    if (ctx->input_fd < 0 && (int64_t)peos_input_mode(PEOS_INPUT_MODE_RAW) == 0) {
         ctx->input_raw = 1;
     }
     sl_input_state_reset();
@@ -869,6 +881,10 @@ void sl_shutdown(sl_ctx_t *ctx) {
     if (!ctx) return;
     if (ctx->hw_cursor) (void)peos_cursor_set_visible(0);
     if (ctx->input_raw) (void)peos_input_mode(PEOS_INPUT_MODE_COOKED);
+    if (ctx->input_fd >= 0) {
+        (void)peos_fclose((uint64_t)ctx->input_fd);
+        ctx->input_fd = -1;
+    }
     if (ctx->frame) (void)peos_munmap((uint64_t)(uintptr_t)ctx->frame, ctx->map_bytes);
     sl_font_shutdown();
 }
@@ -1157,16 +1173,50 @@ int sl_present(sl_ctx_t *ctx) {
     return 1;
 }
 
-void sl_frame_pace(uint64_t *next_deadline_ns) {
+// An input wake starts a frame early, but not sooner than this after the last one.
+#define SL_INPUT_MIN_FRAME_NS 4000000ull
+// After this many frames that drew nothing, tick slowly; input still wakes at once.
+#define SL_IDLE_AFTER_FRAMES 30u
+#define SL_IDLE_FRAME_NS 50000000ull
+
+// Wait for the next frame deadline. With an input endpoint the wait ends early
+// when input arrives (lower latency, no busy wait); without one, sleep then spin.
+void sl_frame_pace(uint64_t *next_deadline_ns, int64_t input_fd, int drew) {
+    static uint64_t last_frame_ns;
+    static uint32_t idle_frames;
     if (!next_deadline_ns) return;
+
+    if (drew) idle_frames = 0;
+    else if (idle_frames < SL_IDLE_AFTER_FRAMES) idle_frames++;
+    if (input_fd >= 0 && idle_frames >= SL_IDLE_AFTER_FRAMES && *next_deadline_ns != 0) {
+        uint64_t idle_deadline = last_frame_ns + SL_IDLE_FRAME_NS;
+        if (idle_deadline > *next_deadline_ns) *next_deadline_ns = idle_deadline;
+    }
 
     uint64_t now = peos_time_ns();
     if (*next_deadline_ns == 0) {
         *next_deadline_ns = now + SL_FRAME_NS;
+        last_frame_ns = now;
         return;
     }
 
-    if (now < *next_deadline_ns) {
+    if (now < *next_deadline_ns && input_fd >= 0) {
+        uint64_t earliest = last_frame_ns + SL_INPUT_MIN_FRAME_NS;
+        if (earliest > now && earliest < *next_deadline_ns) {
+            uint64_t ticks = (earliest - now + SL_TICK_NS - 1u) / SL_TICK_NS;
+            peos_sleep(ticks);
+            now = peos_time_ns();
+        }
+        if (now < *next_deadline_ns) {
+            peos_wait_item_t it = { (int32_t)input_fd, PEOS_WAIT_READ, 0 };
+            if (peos_wait(&it, 1u, *next_deadline_ns - now) > 0) {
+                last_frame_ns = peos_time_ns();
+                idle_frames = 0;
+                if (*next_deadline_ns > last_frame_ns + SL_FRAME_NS) *next_deadline_ns = last_frame_ns + SL_FRAME_NS;
+                return;   // input: render now, back to the regular frame rate
+            }
+        }
+    } else if (now < *next_deadline_ns) {
         uint64_t remaining = *next_deadline_ns - now;
         if (remaining > (SL_PACER_SPIN_NS + SL_TICK_NS)) {
             uint64_t sleep_ns = remaining - SL_PACER_SPIN_NS;
@@ -1176,9 +1226,12 @@ void sl_frame_pace(uint64_t *next_deadline_ns) {
         while ((now = peos_time_ns()) < *next_deadline_ns) {
             __asm__ volatile("pause");
         }
-    } else if ((now - *next_deadline_ns) > (SL_FRAME_NS * 4ull)) {
+    }
+    now = peos_time_ns();
+    if (now > *next_deadline_ns && (now - *next_deadline_ns) > (SL_FRAME_NS * 4ull)) {
         *next_deadline_ns = now;
     }
 
     *next_deadline_ns += SL_FRAME_NS;
+    last_frame_ns = now;
 }

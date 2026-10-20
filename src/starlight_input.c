@@ -213,6 +213,60 @@ void sl_input_state_reset(void) {
     peos_memset(&g_actionmod, 0, sizeof(g_actionmod));
 }
 
+static uint8_t g_endpoint_buttons = 0u;
+
+// Pending keys (up to `cap`) and the mouse motion since the last call: from the
+// input endpoint when Starlight has one, else from the legacy poll calls.
+static int sl_input_read(sl_ctx_t *ctx, peos_input_event_t *evs, uint64_t cap,
+                         uint64_t *n_out, peos_mouse_event_t *mev) {
+    if (ctx->input_fd < 0) {
+        uint64_t n = peos_input_poll(evs, cap);
+        int64_t mr = peos_input_mouse(mev);
+        if ((int64_t)n < 0 || mr < 0) return -1;
+        *n_out = n;
+        return 0;
+    }
+
+    peos_memset(mev, 0, sizeof(*mev));
+    int32_t wheel_x = 0, wheel_y = 0;
+    uint64_t n = 0;
+    peos_input_record_t rec[16];
+    while (n < cap) {
+        // never take more keys than fit: what is left stays queued for the next frame
+        uint64_t want = cap - n;
+        if (want > sizeof(rec) / sizeof(rec[0])) want = sizeof(rec) / sizeof(rec[0]);
+        uint64_t got = peos_fread_nb((uint64_t)ctx->input_fd, rec, (size_t)want * sizeof(rec[0]));
+        if (got == (uint64_t)-1 || got < sizeof(rec[0])) break;
+        got /= sizeof(rec[0]);
+        for (uint64_t i = 0; i < got; i++) {
+            if (rec[i].type == PEOS_INPUT_KEY) {
+                evs[n].code = rec[i].code;
+                evs[n].pressed = rec[i].pressed;
+                evs[n].reserved = 0;
+                evs[n].time_ns = rec[i].time_ns;
+                n++;
+            } else if (rec[i].type == PEOS_INPUT_MOUSE) {
+                mev->dx += rec[i].dx;
+                mev->dy += rec[i].dy;
+                wheel_x += rec[i].wheel_x;
+                wheel_y += rec[i].wheel_y;
+                g_endpoint_buttons = rec[i].buttons;
+                mev->time_ns = rec[i].time_ns;
+            }
+        }
+        if (got < want) break;
+    }
+    if (wheel_x > 127) wheel_x = 127;
+    if (wheel_x < -128) wheel_x = -128;
+    if (wheel_y > 127) wheel_y = 127;
+    if (wheel_y < -128) wheel_y = -128;
+    mev->wheel_x = (int8_t)wheel_x;
+    mev->wheel_y = (int8_t)wheel_y;
+    mev->buttons = g_endpoint_buttons;
+    *n_out = n;
+    return 0;
+}
+
 int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
     if (!ctx || !out) return -1;
 
@@ -221,9 +275,9 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
 
     peos_input_event_t evs[16];
     peos_mouse_event_t mev;
-    uint64_t n = peos_input_poll(evs, 16);
-    int64_t mr = peos_input_mouse(&mev);
-    if ((int64_t)n < 0 || mr < 0) return -1;
+    uint64_t n = 0;
+    int64_t mr = sl_input_read(ctx, evs, 16, &n, &mev);
+    if (mr < 0) return -1;
     uint64_t now_ns = peos_time_ns();
 
     for (uint64_t i = 0; i < n; i++) {
