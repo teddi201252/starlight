@@ -678,6 +678,13 @@ static void orbit_send_fb_host_shared(orbit_shell_t *shell) {
         return;
     }
 
+    // Only the child running in this Orbit window (and what it spawns) may map it.
+    if (shell->child_pid <= 0 ||
+        peos_shm_allow(shell->surface.shared_id, (uint64_t)shell->child_pid) != 0) {
+        orbit_send_fb_host_windowed(shell);
+        return;
+    }
+
     char msg[96];
     int n = snprintf(msg, sizeof(msg), "@ORBITFB HOST SHM %llu %llu\n",
                      (unsigned long long)shell->surface.shared_id,
