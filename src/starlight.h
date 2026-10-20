@@ -20,6 +20,7 @@ typedef struct {
     uint8_t clip_enabled;
     uint8_t cursor_saved[36]; // 3x3 cursor * max 4 bytes/pixel
     int input_raw;
+    int64_t input_fd;      // input endpoint (wait-able), -1 = legacy input_poll/input_mouse
     uint32_t cursor_x;
     uint32_t cursor_y;
     uint32_t cursor_saved_x;

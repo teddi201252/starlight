@@ -89,6 +89,9 @@ int main(void) {
             }
             sl_sw_cursor_restore(&ctx);
         }
+        // Damage from here to the cursor redraw is real activity; the software
+        // cursor's own restore/redraw happens every frame and does not count.
+        uint32_t dirty_mark = sl_dirty_request_count();
 
         uint32_t old_x = ctx.cursor_x;
         uint32_t old_y = ctx.cursor_y;
@@ -134,6 +137,8 @@ int main(void) {
         sl_clipboard_render_overlay(&ctx);
         sl_fps_tick(&ctx, &fps_value_prev);
 
+        int frame_active = (sl_dirty_request_count() != dirty_mark) ||
+                           ctx.cursor_x != old_x || ctx.cursor_y != old_y;
         if (!ctx.hw_cursor) {
             sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);
             sl_render_cursor(&ctx);
@@ -142,7 +147,7 @@ int main(void) {
         sl_perf_add_render(peos_time_ns() - render_start_ns);
         if (!sl_present(&ctx)) break;
 
-        sl_frame_pace(&next_frame_ns);
+        sl_frame_pace(&next_frame_ns, ctx.input_fd, frame_active);
         sl_perf_frame_end(peos_time_ns());
 
     }
