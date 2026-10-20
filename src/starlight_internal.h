@@ -23,7 +23,7 @@ int sl_handle_input(sl_ctx_t *ctx);
 void sl_render_full(sl_ctx_t *ctx);
 void sl_render_dirty_background(sl_ctx_t *ctx);
 int sl_present(sl_ctx_t *ctx);
-void sl_frame_pace(uint64_t *next_deadline_ns);
+void sl_frame_pace(uint64_t *next_deadline_ns, int64_t input_fd, int drew);
 
 void sl_cursor_init(sl_ctx_t *ctx);
 void sl_render_cursor(sl_ctx_t *ctx);
@@ -52,6 +52,7 @@ uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx);
 void sl_dirty_reset(void);
 void sl_dirty_mark_full(void);
 void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+uint32_t sl_dirty_request_count(void);
 int sl_dirty_intersects_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 typedef void (*sl_dirty_rect_fn)(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                  void *userdata);
