@@ -121,6 +121,8 @@ static uint8_t g_launcher_expanded = 0u;
 static uint32_t g_launcher_extra_width = 0u;
 static sl_window_rect_snapshot_t g_launcher_last_rect;
 static uint64_t g_launcher_next_scan_ns = 0ull;
+static peos_stat_t g_launcher_dir_stat;      // SL_APP_DIR as of the last catalog scan
+static uint8_t g_launcher_dir_known = 0u;
 static sl_window_anim_t g_window_anims[SL_WIN_ANIM_MAX];
 
 static void sl_window_refresh_zorder(void);
@@ -1691,11 +1693,32 @@ static size_t sl_load_apps_from_system(sl_ctx_t *ctx) {
     return g_launcher_count;
 }
 
+// Records the app directory's stat and reports whether it changed since the
+// last call. Installing, removing or rebuilding a bundle (starbuild recreates
+// the bundle folder) adds or removes an entry, which moves the directory's
+// mtime; reading every manifest instead stalls the frame on each tick.
+static uint8_t sl_launcher_dir_changed(void) {
+    peos_stat_t st;
+    peos_memset(&st, 0, sizeof(st));
+    if ((int64_t)peos_stat(SL_APP_DIR, sizeof(SL_APP_DIR) - 1u, &st, sizeof(st)) < 0) {
+        g_launcher_dir_known = 0u;
+        return 0u;
+    }
+    uint8_t changed = !g_launcher_dir_known ||
+                      st.mtime_ns != g_launcher_dir_stat.mtime_ns ||
+                      st.ctime_ns != g_launcher_dir_stat.ctime_ns ||
+                      st.size != g_launcher_dir_stat.size;
+    g_launcher_dir_stat = st;
+    g_launcher_dir_known = 1u;
+    return changed;
+}
+
 static void sl_launcher_tick_catalog(sl_ctx_t *ctx) {
     if (!ctx) return;
     uint64_t now = peos_time_ns();
     if (now < g_launcher_next_scan_ns) return;
     g_launcher_next_scan_ns = now + SL_APP_CATALOG_SCAN_INTERVAL_NS;
+    if (!sl_launcher_dir_changed()) return;
 
     sl_scanned_app_t *entries = NULL;
     size_t count = 0u;
@@ -1802,6 +1825,7 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count) {
 void sl_windows_create_default(sl_ctx_t *ctx) {
     if (!ctx) return;
 
+    (void)sl_launcher_dir_changed();   // baseline for sl_launcher_tick_catalog
     size_t loaded = sl_load_apps_from_system(ctx);
     if (loaded == 0u) {
         sl_app_host_slots_use_default();
@@ -1969,6 +1993,7 @@ void sl_windows_destroy_all(void) {
     g_launcher_ctx_w = 0u;
     g_launcher_ctx_h = 0u;
     g_launcher_next_scan_ns = 0ull;
+    g_launcher_dir_known = 0u;
 }
 
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y) {
