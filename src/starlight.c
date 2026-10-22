@@ -174,6 +174,7 @@ int main(int argc, char **argv) {
     sl_tween_reset();
     sl_clipboard_shutdown();
     if (ctx.skin_loaded) sl_skin_free(&ctx.skin);
+    free(ctx.bg_frame);
     if (ctx.bg_loaded) {
         sl_image_free(&ctx.bg_image);
     }
