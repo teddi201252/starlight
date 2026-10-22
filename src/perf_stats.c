@@ -21,7 +21,9 @@ typedef struct {
     uint64_t frames;
     uint64_t full_frames;
     uint64_t samples[SL_PERF_SAMPLE_CAP];
+    uint64_t work_samples[SL_PERF_SAMPLE_CAP];
     size_t sample_count;
+    size_t work_count;
 } sl_perf_state_t;
 
 static sl_perf_state_t g_perf;
@@ -41,6 +43,14 @@ void sl_perf_init(uint8_t enabled) {
 
 void sl_perf_frame_begin(uint64_t now_ns) {
     if (g_perf.enabled) g_perf.frame_start_ns = now_ns;
+}
+
+// Frame work done: from frame_begin up to here, without the pacing wait.
+void sl_perf_frame_work_done(uint64_t now_ns) {
+    if (!g_perf.enabled || g_perf.frame_start_ns == 0u) return;
+    if (g_perf.work_count < SL_PERF_SAMPLE_CAP) {
+        g_perf.work_samples[g_perf.work_count++] = now_ns - g_perf.frame_start_ns;
+    }
 }
 
 void sl_perf_add_render(uint64_t elapsed_ns) {
@@ -85,18 +95,28 @@ void sl_perf_frame_end(uint64_t now_ns) {
     if (now_ns - g_perf.report_start_ns < SL_PERF_REPORT_NS) return;
 
     sl_perf_sort_samples(g_perf.samples, g_perf.sample_count);
-    uint64_t p50 = 0u, p95 = 0u;
+    sl_perf_sort_samples(g_perf.work_samples, g_perf.work_count);
+    uint64_t p50 = 0u, p95 = 0u, work_p50 = 0u, work_p95 = 0u;
     if (g_perf.sample_count > 0u) {
         p50 = g_perf.samples[(g_perf.sample_count - 1u) * 50u / 100u];
         p95 = g_perf.samples[(g_perf.sample_count - 1u) * 95u / 100u];
     }
+    if (g_perf.work_count > 0u) {
+        work_p50 = g_perf.work_samples[(g_perf.work_count - 1u) * 50u / 100u];
+        work_p95 = g_perf.work_samples[(g_perf.work_count - 1u) * 95u / 100u];
+    }
     uint64_t frames = g_perf.frames ? g_perf.frames : 1u;
+    // bg_us is the background repaint of the dirty rects, render_us everything
+    // drawn on top of it (windows, launcher, overlays, cursor).
     printf("[GFXPERF] frames=%llu frame_p50_us=%llu frame_p95_us=%llu "
-           "render_us=%llu composite_us=%llu copy_us=%llu flush_us=%llu "
+           "work_p50_us=%llu work_p95_us=%llu "
+           "render_us=%llu bg_us=%llu copy_us=%llu flush_us=%llu "
            "rects=%llu pixels=%llu bytes=%llu full=%llu\n",
            (unsigned long long)g_perf.frames,
            (unsigned long long)(p50 / 1000u),
            (unsigned long long)(p95 / 1000u),
+           (unsigned long long)(work_p50 / 1000u),
+           (unsigned long long)(work_p95 / 1000u),
            (unsigned long long)(g_perf.render_ns / frames / 1000u),
            (unsigned long long)(g_perf.composite_ns / frames / 1000u),
            (unsigned long long)(g_perf.copy_ns / frames / 1000u),

@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 void sl_perf_init(uint8_t enabled);
+void sl_perf_frame_work_done(uint64_t now_ns);
 void sl_perf_frame_begin(uint64_t now_ns);
 void sl_perf_add_render(uint64_t elapsed_ns);
 void sl_perf_add_composite(uint64_t elapsed_ns);

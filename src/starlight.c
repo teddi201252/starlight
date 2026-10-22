@@ -2,6 +2,8 @@
 #include "perf_stats.h"
 #include "render/pixels.h"
 
+#include <string.h>
+
 static void sl_fps_draw(sl_ctx_t *ctx, uint32_t fps_value) {
     if (!ctx) return;
     char fps_str[16];
@@ -41,11 +43,15 @@ static void sl_fps_tick(sl_ctx_t *ctx, uint32_t *prev_value) {
 }
 
 // Entry point of the Starlight desktop loop.
-int main(void) {
+int main(int argc, char **argv) {
     sl_ctx_t ctx;
     if (!sl_init(&ctx)) {
         peos_puts("starlight: init failed\n");
         peos_exit(1);
+    }
+    // `starlight --perf` turns the [GFXPERF] log on without touching settings.cfg.
+    for (int i = 1; i < argc; i++) {
+        if (argv[i] && strcmp(argv[i], "--perf") == 0) ctx.graphics_perf_enabled = 1u;
     }
     sl_perf_init(ctx.graphics_perf_enabled);
     sl_audio_init();
@@ -146,6 +152,7 @@ int main(void) {
         }
         sl_perf_add_render(peos_time_ns() - render_start_ns);
         if (!sl_present(&ctx)) break;
+        sl_perf_frame_work_done(peos_time_ns());
 
         sl_frame_pace(&next_frame_ns, ctx.input_fd, frame_active);
         sl_perf_frame_end(peos_time_ns());
