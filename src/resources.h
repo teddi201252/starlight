@@ -17,3 +17,4 @@
 #define SL_RESOURCE_START_WAV SL_RESOURCE_ROOT "/start.wav"
 #define SL_RESOURCE_COPYEFF_WAV SL_RESOURCE_ROOT "/copyeff.wav"
 #define SL_RESOURCE_APP_PLACEHOLDER SL_RESOURCE_ROOT "/app_placeholder.png"
+#define SL_RESOURCE_SKIN SL_RESOURCE_ROOT "/skin/skin.slsk"

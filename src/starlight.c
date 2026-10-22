@@ -2,6 +2,7 @@
 #include "perf_stats.h"
 #include "render/pixels.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static void sl_fps_draw(sl_ctx_t *ctx, uint32_t fps_value) {
@@ -54,6 +55,17 @@ int main(int argc, char **argv) {
         if (argv[i] && strcmp(argv[i], "--perf") == 0) ctx.graphics_perf_enabled = 1u;
     }
     sl_perf_init(ctx.graphics_perf_enabled);
+    {
+        uint64_t t0 = peos_time_ns();
+        ctx.skin_loaded = (uint8_t)sl_skin_load(&ctx.skin, SL_RESOURCE_SKIN);
+        if (ctx.skin_loaded) {
+            printf("starlight: skin %u entries, %u KiB, loaded in %u us\n",
+                   (unsigned)ctx.skin.count, (unsigned)(ctx.skin.len / 1024u),
+                   (unsigned)((peos_time_ns() - t0) / 1000u));
+        } else {
+            peos_puts("starlight: skin " SL_RESOURCE_SKIN " missing or invalid\n");
+        }
+    }
     sl_audio_init();
     peos_puts("starlight: minimal skeleton running\n");
     if (ctx.fb_direct) {
@@ -161,6 +173,7 @@ int main(int argc, char **argv) {
 
     sl_tween_reset();
     sl_clipboard_shutdown();
+    if (ctx.skin_loaded) sl_skin_free(&ctx.skin);
     if (ctx.bg_loaded) {
         sl_image_free(&ctx.bg_image);
     }
