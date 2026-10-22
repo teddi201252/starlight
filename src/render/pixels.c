@@ -2,6 +2,8 @@
 #include "font.h"
 #include "render_ops.h"
 
+#include <string.h>
+
 static inline uint8_t sl_blend_chan(uint8_t src, uint8_t dst, uint8_t a) {
     uint32_t inv = 255u - (uint32_t)a;
     uint32_t out = ((uint32_t)src * (uint32_t)a) + ((uint32_t)dst * inv) + 127u;
@@ -544,4 +546,37 @@ uint32_t sl_text_cell_h_px(uint32_t font_px) {
 
 uint32_t sl_text_measure_width_px(const char *text, uint32_t font_px) {
     return sl_font_measure_text_px(text, font_px);
+}
+
+sl_target_t sl_target_from_ctx(const sl_ctx_t *ctx) {
+    sl_target_t t;
+    memset(&t, 0, sizeof(t));
+    if (!ctx || !ctx->frame || (ctx->bytespp != 3u && ctx->bytespp != 4u)) return t;
+    t.px = ctx->frame;
+    t.stride = ctx->row_stride;
+    t.bpp = ctx->bytespp;
+    t.clip_x1 = (int32_t)ctx->fb.width;
+    t.clip_y1 = (int32_t)ctx->fb.height;
+    if (ctx->clip_enabled) {
+        int64_t cx1 = (int64_t)ctx->clip_x + ctx->clip_w;
+        int64_t cy1 = (int64_t)ctx->clip_y + ctx->clip_h;
+        if ((int64_t)ctx->clip_x > t.clip_x0) t.clip_x0 = (int32_t)(ctx->clip_x < ctx->fb.width ? ctx->clip_x : ctx->fb.width);
+        if ((int64_t)ctx->clip_y > t.clip_y0) t.clip_y0 = (int32_t)(ctx->clip_y < ctx->fb.height ? ctx->clip_y : ctx->fb.height);
+        if (cx1 < t.clip_x1) t.clip_x1 = (int32_t)cx1;
+        if (cy1 < t.clip_y1) t.clip_y1 = (int32_t)cy1;
+    }
+    return t;
+}
+
+void sl_draw_skin(sl_ctx_t *ctx, const slsk_entry_t *e, int32_t x, int32_t y, uint32_t w, uint32_t h) {
+    if (!ctx || !e || !ctx->skin_loaded) return;
+    sl_target_t t = sl_target_from_ctx(ctx);
+    sl_blit_sprite(&t, e, sl_skin_data(&ctx->skin, e), x - (int32_t)e->pad_l, y - (int32_t)e->pad_t,
+                   w + e->pad_l + e->pad_r, h + e->pad_t + e->pad_b);
+}
+
+int32_t sl_draw_text_face(sl_ctx_t *ctx, const slsk_font_t *font, int32_t x, int32_t baseline,
+                          const char *utf8, uint8_t r, uint8_t g, uint8_t b) {
+    sl_target_t t = sl_target_from_ctx(ctx);
+    return sl_text_draw(&t, font, x, baseline, utf8, r, g, b);
 }

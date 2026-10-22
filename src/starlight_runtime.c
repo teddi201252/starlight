@@ -906,6 +906,8 @@ void sl_reload_display(sl_ctx_t *ctx) {
         sl_image_free(&ctx->bg_image);
         ctx->bg_loaded = 0;
     }
+    free(ctx->bg_frame);   // baked again from the new image
+    ctx->bg_frame = NULL;
     sl_load_background(ctx, ctx->background_path);
 
     sl_cursor_init(ctx);
@@ -1074,39 +1076,51 @@ int sl_handle_input(sl_ctx_t *ctx) {
     return 0;
 }
 
-void sl_render_full(sl_ctx_t *ctx) {
-    if (!ctx || !ctx->frame || !ctx->bg_loaded) return;
-    if (ctx->bg_image.data && ctx->bg_image.channels >= 3u) {
-        sl_blit_image_stretch(ctx, 0, 0, ctx->fb.width, ctx->fb.height, &ctx->bg_image);
+// Scale the background to the screen once (the mode is set at start-up and
+// never changes) and keep it in the frame's format.
+static int sl_bg_bake(sl_ctx_t *ctx) {
+    if (ctx->bg_frame) return 1;
+    if (!ctx->bg_image.data || ctx->bg_image.channels < 3u) return 0;
+    size_t stride = (size_t)ctx->fb.width * ctx->bytespp;
+    uint8_t *buf = (uint8_t *)malloc(stride * ctx->fb.height);
+    if (!buf) return 0;
+    uint8_t clip_enabled = ctx->clip_enabled;
+    sl_clip_clear(ctx);
+    sl_blit_image_stretch(ctx, 0, 0, ctx->fb.width, ctx->fb.height, &ctx->bg_image);
+    for (uint32_t y = 0; y < ctx->fb.height; y++) {
+        memcpy(buf + (size_t)y * stride, ctx->frame + (size_t)y * ctx->row_stride, stride);
     }
+    ctx->clip_enabled = clip_enabled;
+    ctx->bg_frame = buf;
+    ctx->bg_frame_stride = stride;
+    // The source image is no longer needed: the baked copy replaces it.
+    sl_image_free(&ctx->bg_image);
+    return 1;
 }
 
 static void sl_render_bg_rect(sl_ctx_t *ctx, const sl_rect_t *r) {
-    uint8_t clip_enabled = 0u;
-    uint32_t clip_x = 0u;
-    uint32_t clip_y = 0u;
-    uint32_t clip_w = 0u;
-    uint32_t clip_h = 0u;
-    if (!ctx || !r || !ctx->frame || !ctx->bg_image.data) return;
-    if (ctx->bg_image.channels < 3u) return;
-    if (r->w == 0u || r->h == 0u) return;
+    if (!ctx || !r || !ctx->frame || !ctx->bg_frame) return;
+    uint32_t x0 = r->x, y0 = r->y;
+    if (x0 >= ctx->fb.width || y0 >= ctx->fb.height || r->w == 0u || r->h == 0u) return;
+    uint32_t w = r->w, h = r->h;
+    if (w > ctx->fb.width - x0) w = ctx->fb.width - x0;
+    if (h > ctx->fb.height - y0) h = ctx->fb.height - y0;
+    size_t off = (size_t)x0 * ctx->bytespp, bytes = (size_t)w * ctx->bytespp;
+    for (uint32_t y = y0; y < y0 + h; y++) {
+        memcpy(ctx->frame + (size_t)y * ctx->row_stride + off, ctx->bg_frame + (size_t)y * ctx->bg_frame_stride + off, bytes);
+    }
+}
 
-    clip_enabled = ctx->clip_enabled;
-    clip_x = ctx->clip_x;
-    clip_y = ctx->clip_y;
-    clip_w = ctx->clip_w;
-    clip_h = ctx->clip_h;
-
-    sl_clip_set(ctx, r->x, r->y, r->w, r->h);
-    sl_blit_image_stretch(ctx, 0, 0, ctx->fb.width, ctx->fb.height, &ctx->bg_image);
-
-    if (clip_enabled) sl_clip_set(ctx, clip_x, clip_y, clip_w, clip_h);
-    else sl_clip_clear(ctx);
+void sl_render_full(sl_ctx_t *ctx) {
+    if (!ctx || !ctx->frame || !ctx->bg_loaded) return;
+    if (!sl_bg_bake(ctx)) return;
+    sl_rect_t all = { 0u, 0u, ctx->fb.width, ctx->fb.height };
+    sl_render_bg_rect(ctx, &all);
 }
 
 void sl_render_dirty_background(sl_ctx_t *ctx) {
     if (!ctx || !ctx->frame || !ctx->bg_loaded) return;
-    if (!ctx->bg_image.data || ctx->bg_image.channels < 3u) return;
+    if (!sl_bg_bake(ctx)) return;
 
     if (g_dirty.full) {
         sl_render_full(ctx);
