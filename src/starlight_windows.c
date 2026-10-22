@@ -1,11 +1,13 @@
 #include "starlight_internal.h"
 #include "app_host.h"
 #include "context_menu_renderer.h"
+#include "render/font.h"
 #include "render/pixels.h"
 #include "window.h"
 #include "peos/capability_parse.h"
 #include "peos/path_scope_parse.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -117,6 +119,13 @@ static uint32_t g_launcher_ctx_y = 0u;
 static uint32_t g_launcher_ctx_w = 0u;
 static uint32_t g_launcher_ctx_h = 0u;
 static int32_t g_launcher_ctx_hover_row = -1;
+// The popup lists either the actions of the menu or the lines of the
+// Informazioni card; both are fixed when it opens.
+#define SL_LAUNCHER_CTX_ROWS_MAX 8u
+static uint8_t g_launcher_ctx_info = 0u;
+static uint32_t g_launcher_ctx_rows = 0u;
+static uint8_t g_launcher_ctx_actions[SL_LAUNCHER_CTX_ROWS_MAX];
+static char g_launcher_info_lines[SL_LAUNCHER_CTX_ROWS_MAX][128];
 static uint8_t g_launcher_expanded = 0u;
 static uint32_t g_launcher_extra_width = 0u;
 static sl_window_rect_snapshot_t g_launcher_last_rect;
@@ -165,6 +174,7 @@ static void sl_dirty_add_snapshot(const sl_ctx_t *ctx, const sl_window_rect_snap
 
 #define SL_LAUNCHER_CTX_ROW_H 20u
 #define SL_LAUNCHER_CTX_MIN_W 108u
+#define SL_LAUNCHER_CTX_PAD_X 8u
 
 static uint32_t sl_anim_tween_id(size_t slot, uint32_t channel) {
     return (uint32_t)(0xA1100000u + ((uint32_t)slot * 8u) + channel);
@@ -923,6 +933,58 @@ static size_t sl_dock_settings_item(void) {
     return (size_t)-1;
 }
 
+// The apps pinned to the dock, by bundle path, top to bottom. Until
+// dock.cfg exists the dock takes the first apps that fit; the first pin or
+// unpin starts from what it shows.
+static char g_dock_pins[SL_DOCK_MAX][256];
+static size_t g_dock_pin_count = 0u;
+static uint8_t g_dock_pins_set = 0u;
+
+static size_t sl_launcher_find_bundle(const char *bundle_path);
+
+static void sl_dock_pins_load(void) {
+    g_dock_pin_count = 0u;
+    g_dock_pins_set = 0u;
+    FILE *f = fopen(SL_RESOURCE_DOCK_FILE, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        size_t n = strlen(line);
+        while (n > 0u && (line[n - 1u] == '\n' || line[n - 1u] == '\r' || line[n - 1u] == ' ')) line[--n] = '\0';
+        if (n == 0u || line[0] == '#' || g_dock_pin_count >= SL_DOCK_MAX) continue;
+        sl_copy_str(g_dock_pins[g_dock_pin_count++], sizeof(g_dock_pins[0]), line);
+    }
+    fclose(f);
+    g_dock_pins_set = 1u;
+}
+
+static void sl_dock_pins_save(void) {
+    FILE *f = fopen(SL_RESOURCE_DOCK_FILE, "w");
+    if (!f) return;
+    (void)fprintf(f, "# Starlight dock: the pinned app bundles, top to bottom.\n");
+    for (size_t i = 0u; i < g_dock_pin_count; i++) (void)fprintf(f, "%s\n", g_dock_pins[i]);
+    fclose(f);
+}
+
+static size_t sl_dock_pin_find(const char *bundle_path) {
+    for (size_t i = 0u; i < g_dock_pin_count; i++) {
+        if (strcmp(g_dock_pins[i], bundle_path) == 0) return i;
+    }
+    return (size_t)-1;
+}
+
+// How many tiles fit in the dock, Impostazioni excluded.
+static size_t sl_dock_capacity(const sl_ctx_t *ctx, size_t settings) {
+    uint32_t fh = ctx->fb.height;
+    uint32_t room = fh > 2u * (SL_DOCK_MARGIN + SL_DOCK_PAD) + SL_DOCK_GAP + 2u
+                        ? fh - 2u * (SL_DOCK_MARGIN + SL_DOCK_PAD) - SL_DOCK_GAP - 2u
+                        : 0u;
+    size_t cap = (room + SL_DOCK_GAP) / (SL_DOCK_TILE + SL_DOCK_GAP);
+    if (cap < 1u) cap = 1u;
+    if (cap > SL_DOCK_MAX) cap = SL_DOCK_MAX;
+    return settings != (size_t)-1 ? cap - 1u : cap;
+}
+
 typedef struct {
     size_t count;                   // tiles in the dock
     size_t item[SL_DOCK_MAX];       // launcher item of each
@@ -945,23 +1007,25 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
     if (!ctx || g_launcher_count == 0u) return;
     uint32_t fh = ctx->fb.height, fw = ctx->fb.width;
 
-    // As many tiles as fit; Impostazioni always last, after a separator.
-    uint32_t room = fh > 2u * (SL_DOCK_MARGIN + SL_DOCK_PAD) + SL_DOCK_GAP + 2u
-                        ? fh - 2u * (SL_DOCK_MARGIN + SL_DOCK_PAD) - SL_DOCK_GAP - 2u
-                        : 0u;
-    size_t cap = (room + SL_DOCK_GAP) / (SL_DOCK_TILE + SL_DOCK_GAP);
-    if (cap < 1u) cap = 1u;
-    if (cap > SL_DOCK_MAX) cap = SL_DOCK_MAX;
+    // The pinned apps (else the first ones) as far as they fit; Impostazioni
+    // always last, after a separator.
     size_t settings = sl_dock_settings_item();
-    size_t others = g_launcher_count - (settings != (size_t)-1 ? 1u : 0u);
-    size_t take = others;
-    if (settings != (size_t)-1 && take > cap - 1u) take = cap - 1u;
-    if (settings == (size_t)-1 && take > cap) take = cap;
-    for (size_t i = 0u; i < g_launcher_count && L->count < take; i++) {
-        if (i != settings) L->item[L->count++] = i;
+    size_t take = sl_dock_capacity(ctx, settings);
+    if (g_dock_pins_set) {
+        for (size_t p = 0u; p < g_dock_pin_count && L->count < take; p++) {
+            size_t i = sl_launcher_find_bundle(g_dock_pins[p]);
+            if (i != (size_t)-1 && i != settings) L->item[L->count++] = i;
+        }
+    }
+    // No pins yet, or none of them left and nothing else to show.
+    if (!g_dock_pins_set || (L->count == 0u && settings == (size_t)-1)) {
+        for (size_t i = 0u; i < g_launcher_count && L->count < take; i++) {
+            if (i != settings) L->item[L->count++] = i;
+        }
     }
     L->has_sep = (settings != (size_t)-1 && L->count > 0u) ? 1u : 0u;
     if (settings != (size_t)-1) L->item[L->count++] = settings;
+    if (L->count == 0u) return;
 
     uint32_t h = 2u * SL_DOCK_PAD + (uint32_t)L->count * SL_DOCK_TILE + (uint32_t)(L->count - 1u) * SL_DOCK_GAP;
     if (L->has_sep) h += 2u + SL_DOCK_GAP;
@@ -1207,47 +1271,164 @@ static void sl_launcher_context_close(sl_ctx_t *ctx) {
     g_launcher_ctx_w = 0u;
     g_launcher_ctx_h = 0u;
     g_launcher_ctx_hover_row = -1;
+    g_launcher_ctx_info = 0u;
+    g_launcher_ctx_rows = 0u;
 }
 
-static uint32_t sl_launcher_context_action_count(const sl_launcher_item_t *item) {
-    if (!item) return 0u;
+enum { SL_CTX_OPEN, SL_CTX_SHOW, SL_CTX_CLOSE, SL_CTX_PIN, SL_CTX_UNPIN, SL_CTX_INFO };
+
+static const char *sl_launcher_context_action_name(uint8_t action) {
+    switch (action) {
+        case SL_CTX_OPEN: return "Apri";
+        case SL_CTX_SHOW: return "Mostra";
+        case SL_CTX_CLOSE: return "Chiudi";
+        case SL_CTX_PIN: return "Fissa nel dock";
+        case SL_CTX_UNPIN: return "Togli dal dock";
+        default: return "Informazioni";
+    }
+}
+
+// Pinned: listed in dock.cfg or, until it exists, shown in the dock.
+static uint8_t sl_dock_is_pinned(const sl_dock_layout_t *L, size_t item_index) {
+    if (g_dock_pins_set) return sl_dock_pin_find(g_launcher_items[item_index].bundle_path) != (size_t)-1;
+    for (size_t k = 0u; k < L->count; k++) {
+        if (L->item[k] == item_index) return 1u;
+    }
+    return 0u;
+}
+
+static uint32_t sl_launcher_context_build(const sl_ctx_t *ctx, size_t item_index, uint8_t *out) {
+    const sl_launcher_item_t *item = &g_launcher_items[item_index];
     app_instance_t *app = sl_app_host_instance_peek_at(item->slot);
     if (!app) return 0u;
-    return (sl_window_index_for_task(app) != (size_t)-1) ? 2u : 1u;
+    uint32_t n = 0u;
+    if (sl_window_index_for_task(app) != (size_t)-1) {
+        out[n++] = SL_CTX_SHOW;
+        out[n++] = SL_CTX_CLOSE;
+    } else {
+        out[n++] = SL_CTX_OPEN;
+    }
+    size_t settings = sl_dock_settings_item();
+    if (item->bundle_path[0] != '\0' && item_index != settings) {
+        sl_dock_layout_t L;
+        sl_dock_layout(ctx, &L);
+        size_t shown = L.count - (settings != (size_t)-1 && L.count > 0u ? 1u : 0u);
+        if (sl_dock_is_pinned(&L, item_index)) {
+            // Without Impostazioni the last tile stays: the dock never empties.
+            if (settings != (size_t)-1 || shown > 1u) out[n++] = SL_CTX_UNPIN;
+        } else if (shown < sl_dock_capacity(ctx, settings)) {
+            out[n++] = SL_CTX_PIN;
+        }
+    }
+    out[n++] = SL_CTX_INFO;
+    return n;
 }
 
-static void sl_launcher_context_action_text(const sl_launcher_item_t *item, uint32_t action,
-                                            char *out, size_t out_cap) {
-    if (!out || out_cap == 0u) return;
-    out[0] = '\0';
-    if (!item) return;
-    app_instance_t *app = sl_app_host_instance_peek_at(item->slot);
-    if (app && sl_window_index_for_task(app) != (size_t)-1) {
-        if (action == 0u) sl_copy_str(out, out_cap, "Focus");
-        else if (action == 1u) sl_copy_str(out, out_cap, "Close");
-        else sl_copy_str(out, out_cap, "(invalid)");
-    } else {
-        if (action == 0u) sl_copy_str(out, out_cap, "Open");
-        else sl_copy_str(out, out_cap, "(invalid)");
+static void sl_dock_pin_set(sl_ctx_t *ctx, size_t item_index, uint8_t pin) {
+    const char *path = g_launcher_items[item_index].bundle_path;
+    if (!g_dock_pins_set) {
+        // The first change starts from what the dock shows.
+        sl_dock_layout_t L;
+        sl_dock_layout(ctx, &L);
+        size_t settings = sl_dock_settings_item();
+        g_dock_pin_count = 0u;
+        for (size_t k = 0u; k < L.count; k++) {
+            const sl_launcher_item_t *shown = &g_launcher_items[L.item[k]];
+            if (L.item[k] == settings || shown->bundle_path[0] == '\0') continue;
+            sl_copy_str(g_dock_pins[g_dock_pin_count++], sizeof(g_dock_pins[0]), shown->bundle_path);
+        }
+        g_dock_pins_set = 1u;
     }
+    size_t at = sl_dock_pin_find(path);
+    if (pin && at == (size_t)-1 && g_dock_pin_count < SL_DOCK_MAX) {
+        sl_copy_str(g_dock_pins[g_dock_pin_count++], sizeof(g_dock_pins[0]), path);
+    } else if (!pin && at != (size_t)-1) {
+        for (size_t i = at; i + 1u < g_dock_pin_count; i++) {
+            peos_memcpy(g_dock_pins[i], g_dock_pins[i + 1u], sizeof(g_dock_pins[0]));
+        }
+        g_dock_pin_count--;
+    } else {
+        return;
+    }
+    sl_dock_pins_save();
+    sl_dirty_mark_full();   // the dock changes height
+}
+
+static void sl_launcher_info_append(uint32_t *n, const char *fmt, ...) {
+    if (*n >= SL_LAUNCHER_CTX_ROWS_MAX) return;
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(g_launcher_info_lines[*n], sizeof(g_launcher_info_lines[0]), fmt, ap);
+    va_end(ap);
+    (*n)++;
+}
+
+// The lines of the Informazioni card, read from the app's manifest.
+static uint32_t sl_launcher_info_build(size_t item_index) {
+    const sl_launcher_item_t *item = &g_launcher_items[item_index];
+    sl_app_bundle_t app;
+    peos_memset(&app, 0, sizeof(app));
+    uint8_t have = 0u;
+    char manifest[320];
+    if (item->bundle_path[0] != '\0' &&
+        sl_join_path(manifest, sizeof(manifest), item->bundle_path, SL_APP_MANIFEST)) {
+        have = (uint8_t)(sl_load_app_bundle(manifest, item->bundle_path, &app) ||
+                         sl_load_app_bundle(item->bundle_path, NULL, &app));
+    }
+
+    uint32_t n = 0u;
+    sl_launcher_info_append(&n, "%s", item->title);
+    if (item->bundle_path[0] != '\0') sl_launcher_info_append(&n, "Bundle: %s", item->bundle_path);
+    if (have) {
+        sl_launcher_info_append(&n, "Programma: %s", app.exec);
+        char list[112];
+        size_t len = 0u;
+        list[0] = '\0';
+        for (size_t i = 0u; i < sizeof(peos_cap_names) / sizeof(peos_cap_names[0]); i++) {
+            if (!(app.caps_mask & peos_cap_names[i].mask)) continue;
+            int w = snprintf(list + len, sizeof(list) - len, "%s%s", len ? ", " : "", peos_cap_names[i].name);
+            if (w < 0 || (size_t)w >= sizeof(list) - len) break;
+            len += (size_t)w;
+        }
+        sl_launcher_info_append(&n, "Permessi: %s", len ? list : "nessuno");
+        len = 0u;
+        list[0] = '\0';
+        for (uint32_t i = 0u; i < app.path_count && i < PEOS_PATH_MAX_GRANTS; i++) {
+            const peos_path_grant_t *g = &app.paths[i];
+            const char *rights = (g->rights & PEOS_PATH_WRITE) ? ((g->rights & PEOS_PATH_READ) ? "rw" : "w") : "r";
+            int w = snprintf(list + len, sizeof(list) - len, "%s%s:%s", len ? ", " : "", g->prefix, rights);
+            if (w < 0 || (size_t)w >= sizeof(list) - len) break;
+            len += (size_t)w;
+        }
+        sl_launcher_info_append(&n, "Cartelle: %s", len ? list : "nessuna");
+        sl_launcher_info_append(&n, "Finestra: %ux%u", (unsigned)app.width, (unsigned)app.height);
+    }
+    app_instance_t *inst = sl_app_host_instance_peek_at(item->slot);
+    sl_launcher_info_append(&n, "Stato: %s",
+                            (inst && sl_window_index_for_task(inst) != (size_t)-1) ? "aperta" : "chiusa");
+    return n;
 }
 
 static void sl_launcher_context_label_cb(uint32_t option_index, char *out, size_t out_cap, void *userdata) {
-    const sl_launcher_item_t *item = (const sl_launcher_item_t *)userdata;
-    sl_launcher_context_action_text(item, option_index, out, out_cap);
+    (void)userdata;
+    if (!out || out_cap == 0u) return;
+    out[0] = '\0';
+    if (option_index >= g_launcher_ctx_rows) return;
+    if (g_launcher_ctx_info) sl_copy_str(out, out_cap, g_launcher_info_lines[option_index]);
+    else sl_copy_str(out, out_cap, sl_launcher_context_action_name(g_launcher_ctx_actions[option_index]));
 }
 
-static void sl_launcher_context_open(sl_ctx_t *ctx, size_t item_index, uint32_t anchor_x, uint32_t anchor_y) {
-    if (!ctx || item_index >= g_launcher_count) return;
-    if (g_launcher_ctx_open && g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u) {
-        sl_launcher_invalidate_overlay(ctx, g_launcher_ctx_x, g_launcher_ctx_y,
-                                       g_launcher_ctx_w + 2u, g_launcher_ctx_h + 2u);
-    }
-    const sl_launcher_item_t *item = &g_launcher_items[item_index];
-    uint32_t action_count = sl_launcher_context_action_count(item);
-    if (action_count == 0u) return;
-
+// Opens the popup (menu or card) whose rows are already in place, as wide as
+// its longest row.
+static void sl_launcher_popup_open(sl_ctx_t *ctx, size_t item_index, uint32_t anchor_x, uint32_t anchor_y) {
+    uint32_t action_count = g_launcher_ctx_rows;
     uint32_t menu_w = SL_LAUNCHER_CTX_MIN_W;
+    for (uint32_t r = 0u; r < action_count; r++) {
+        char label[128];
+        sl_launcher_context_label_cb(r, label, sizeof(label), NULL);
+        uint32_t w = sl_font_measure_text(label) + 2u * SL_LAUNCHER_CTX_PAD_X;
+        if (w > menu_w) menu_w = w;
+    }
     uint32_t menu_h = action_count * SL_LAUNCHER_CTX_ROW_H + 2u;
     if (menu_w > ctx->fb.width) menu_w = ctx->fb.width;
     if (menu_h > ctx->fb.height) menu_h = ctx->fb.height;
@@ -1273,16 +1454,45 @@ static void sl_launcher_context_open(sl_ctx_t *ctx, size_t item_index, uint32_t 
                                    g_launcher_ctx_w + 2u, g_launcher_ctx_h + 2u);
 }
 
-static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint32_t action) {
+static void sl_launcher_context_open(sl_ctx_t *ctx, size_t item_index, uint32_t anchor_x, uint32_t anchor_y) {
+    if (!ctx || item_index >= g_launcher_count) return;
+    uint8_t actions[SL_LAUNCHER_CTX_ROWS_MAX];
+    uint32_t count = sl_launcher_context_build(ctx, item_index, actions);
+    if (count == 0u) return;
+    sl_launcher_context_close(ctx);
+    peos_memcpy(g_launcher_ctx_actions, actions, count);
+    g_launcher_ctx_rows = count;
+    g_launcher_ctx_info = 0u;
+    sl_launcher_popup_open(ctx, item_index, anchor_x, anchor_y);
+}
+
+static void sl_launcher_info_open(sl_ctx_t *ctx, size_t item_index, uint32_t anchor_x, uint32_t anchor_y) {
+    if (!ctx || item_index >= g_launcher_count) return;
+    sl_launcher_context_close(ctx);
+    g_launcher_ctx_rows = sl_launcher_info_build(item_index);
+    g_launcher_ctx_info = 1u;
+    sl_launcher_popup_open(ctx, item_index, anchor_x, anchor_y);
+}
+
+static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint8_t action,
+                                        uint32_t anchor_x, uint32_t anchor_y) {
     if (!ctx || item_index >= g_launcher_count) return 0;
     sl_launcher_item_t *item = &g_launcher_items[item_index];
+    if (action == SL_CTX_PIN || action == SL_CTX_UNPIN) {
+        sl_dock_pin_set(ctx, item_index, action == SL_CTX_PIN);
+        return 1;
+    }
+    if (action == SL_CTX_INFO) {
+        sl_launcher_info_open(ctx, item_index, anchor_x, anchor_y);
+        return 1;
+    }
     app_instance_t *app = sl_app_host_instance_peek_at(item->slot);
     if (!app) return 0;
     item->instance = app;
 
     size_t existing = sl_window_index_for_task(app);
     if (existing != (size_t)-1) {
-        if (action == 0u) {
+        if (action == SL_CTX_SHOW || action == SL_CTX_OPEN) {
             sl_window_rect_snapshot_t prev_focus = sl_window_snapshot_index(g_focused_window);
             sl_window_rect_snapshot_t target = sl_window_snapshot_index(existing);
             sl_focus_window(existing);
@@ -1291,7 +1501,7 @@ static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint32
             sl_dirty_add_snapshot(ctx, &target);
             return 1;
         }
-        if (action == 1u) {
+        if (action == SL_CTX_CLOSE) {
             if (!sl_window_is_closing(&g_windows[existing])) {
                 sl_window_rect_snapshot_t closing = sl_window_snapshot_index(existing);
                 sl_anim_start_close(g_windows[existing].task, (int32_t)g_windows[existing].y);
@@ -1303,15 +1513,15 @@ static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint32
         return 0;
     }
 
-    if (action == 0u) return sl_windows_open_launcher_item(ctx, item_index);
+    if (action == SL_CTX_OPEN) return sl_windows_open_launcher_item(ctx, item_index);
     return 0;
 }
 
 void sl_launcher_handle_context_hover(sl_ctx_t *ctx) {
     if (!ctx || !g_launcher_ctx_open || g_launcher_ctx_item_index >= g_launcher_count) return;
     if (g_launcher_ctx_w == 0u || g_launcher_ctx_h == 0u) return;
-    const sl_launcher_item_t *item = &g_launcher_items[g_launcher_ctx_item_index];
-    uint32_t action_count = sl_launcher_context_action_count(item);
+    if (g_launcher_ctx_info) return;   // the card has nothing to pick
+    uint32_t action_count = g_launcher_ctx_rows;
     if (action_count == 0u) return;
 
     int32_t next_row = -1;
@@ -1826,6 +2036,7 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
     if (!ctx) return;
 
     (void)sl_launcher_dir_changed();   // baseline for sl_launcher_tick_catalog
+    sl_dock_pins_load();
     size_t loaded = sl_load_apps_from_system(ctx);
     if (loaded == 0u) {
         sl_app_host_slots_use_default();
@@ -1994,6 +2205,10 @@ void sl_windows_destroy_all(void) {
     g_launcher_ctx_h = 0u;
     g_launcher_next_scan_ns = 0ull;
     g_launcher_dir_known = 0u;
+    g_launcher_ctx_info = 0u;
+    g_launcher_ctx_rows = 0u;
+    g_dock_pin_count = 0u;
+    g_dock_pins_set = 0u;
 }
 
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y) {
@@ -2030,11 +2245,12 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
         if (inside_menu) {
             uint32_t rel_y = (y >= g_launcher_ctx_y + 1u) ? (y - (g_launcher_ctx_y + 1u)) : 0u;
             uint32_t row = rel_y / SL_LAUNCHER_CTX_ROW_H;
-            uint32_t action_count = sl_launcher_context_action_count(&g_launcher_items[g_launcher_ctx_item_index]);
-            if (row < action_count) {
-                (void)sl_launcher_context_activate(ctx, g_launcher_ctx_item_index, row);
-            }
-            sl_launcher_context_close(ctx);
+            uint8_t picked = (!g_launcher_ctx_info && row < g_launcher_ctx_rows) ? 1u : 0u;
+            uint8_t action = picked ? g_launcher_ctx_actions[row] : 0u;
+            size_t item_index = g_launcher_ctx_item_index;
+            uint32_t ax = g_launcher_ctx_x, ay = g_launcher_ctx_y;
+            sl_launcher_context_close(ctx);   // before acting: Informazioni opens its own card
+            if (picked) (void)sl_launcher_context_activate(ctx, item_index, action, ax, ay);
             return 1;
         }
         sl_launcher_context_close(ctx);
@@ -2262,12 +2478,12 @@ static void sl_dock_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, vo
     sl_dock_draw(ctx);
     if (g_launcher_ctx_open && g_launcher_ctx_item_index < g_launcher_count &&
         g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u) {
-        const sl_launcher_item_t *item = &g_launcher_items[g_launcher_ctx_item_index];
-        uint32_t action_count = sl_launcher_context_action_count(item);
-        if (action_count > 0u) {
+        uint32_t rows = g_launcher_ctx_rows;
+        if (rows > 0u) {
             sl_context_menu_draw(ctx, g_launcher_ctx_x, g_launcher_ctx_y, g_launcher_ctx_w, g_launcher_ctx_h,
-                                 SL_LAUNCHER_CTX_ROW_H, action_count, 0u, action_count, g_launcher_ctx_hover_row,
-                                 0u, sl_launcher_context_label_cb, (void *)item);
+                                 SL_LAUNCHER_CTX_ROW_H, rows, 0u, rows,
+                                 g_launcher_ctx_info ? -1 : g_launcher_ctx_hover_row,
+                                 0u, sl_launcher_context_label_cb, NULL);
         }
     }
     sl_clip_clear(ctx);
