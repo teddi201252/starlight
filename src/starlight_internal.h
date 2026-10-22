@@ -36,6 +36,9 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count);
 void sl_windows_create_default(sl_ctx_t *ctx);
 void sl_windows_render_all(sl_ctx_t *ctx);
 void sl_windows_focus_at_cursor(uint32_t x, uint32_t y);
+// The opaque inside of the top window on screen, which covers whatever is
+// under it this frame (none while it fades or if every window is minimized).
+int sl_windows_top_opaque_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_windows_destroy_all(void);
 void sl_windows_mark_focused_activity(void);

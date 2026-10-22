@@ -604,10 +604,8 @@ uint8_t sl_ui_select_cycle_state_ex(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t body_top = 0u;
     uint32_t body_bottom = ui->ctx->fb.height;
     if (ui->win) {
-        uint32_t by = ui->win->y + ui->win->top_bar_height + 1u;
-        uint32_t bh = (ui->win->height > (ui->win->top_bar_height + 3u))
-            ? (ui->win->height - ui->win->top_bar_height - 3u)
-            : 0u;
+        uint32_t by, bh;
+        sl_window_body_rect(ui->win, NULL, &by, NULL, &bh);
         if (bh > 0u) {
             body_top = by;
             body_bottom = by + bh;

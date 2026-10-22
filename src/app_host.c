@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define ORBIT_MAX_LINES 256u
 #define ORBIT_LINE_CHARS 160u
@@ -162,6 +163,10 @@ typedef struct {
     uint32_t clipboard_cmds;
     uint8_t key_event_count;
     uint8_t committed;
+    // The last text of the field being edited that Starlight sent to the app
+    // and the app has not yet given back (hash, 0 = none), and since when.
+    uint32_t pending_text_hash;
+    uint64_t pending_text_ns;
     sl_ui_ctx_t ui;
     peos_input_event_t key_events[16];
     orbit_ui_cmd_t *cmds;
@@ -1248,9 +1253,58 @@ static void orbit_write_fd_u32(int64_t fd, uint32_t v) {
     (void)peos_fwrite((uint64_t)fd, num, n);
 }
 
+static uint32_t orbit_text_hash(const char *text) {
+    uint32_t h = 2166136261u;   // FNV-1a
+    for (const unsigned char *p = (const unsigned char *)(text ? text : ""); *p; p++) h = (h ^ *p) * 16777619u;
+    return h;
+}
+
+static void orbit_ui_note_sent_text(orbit_shell_t *shell, const char *text) {
+    shell->ui.pending_text_hash = orbit_text_hash(text) | 1u;   // never 0
+    shell->ui.pending_text_ns = peos_time_ns();
+}
+
+// The app's answer to an edit can take a while: an edit pending longer than
+// this lets the app's text win again (an app may rewrite what was typed).
+#define ORBIT_UI_ECHO_WAIT_NS 500000000ull
+
+// The user types into a field of Starlight's, which sends each new text to
+// the app; until the app's frames carry that text back, they still carry an
+// older one. Committing it would step the field back under the caret (a
+// letter typed then shows up further on, or not at all). So while an edit
+// of the focused field is pending, the local text stays; once the app gives
+// it back, or after ORBIT_UI_ECHO_WAIT_NS, the app's text is taken again.
+static void orbit_ui_keep_local_text(orbit_shell_t *shell) {
+    uint32_t id = shell->ui.ui.focused_id;
+    if (!shell->ui.pending_text_hash) return;
+    if (!id || !shell->ui.staged_cmds ||
+        peos_time_ns() - shell->ui.pending_text_ns > ORBIT_UI_ECHO_WAIT_NS) {
+        shell->ui.pending_text_hash = 0u;
+        return;
+    }
+    for (size_t i = 0u; i < shell->ui.staged_count; i++) {
+        orbit_ui_cmd_t *in = &shell->ui.staged_cmds[i];
+        if (in->id != id || (in->type != ORBIT_UI_CMD_TEXT_INPUT && in->type != ORBIT_UI_CMD_TEXT_AREA)) continue;
+        const char *incoming = in->text ? in->text : "";
+        if ((orbit_text_hash(incoming) | 1u) == shell->ui.pending_text_hash) {
+            shell->ui.pending_text_hash = 0u;   // caught up
+            return;
+        }
+        for (size_t j = 0u; j < shell->ui.cmd_count; j++) {
+            const orbit_ui_cmd_t *cur = &shell->ui.cmds[j];
+            if (cur->id != id || cur->type != in->type || !cur->text) continue;
+            size_t len = strlen(cur->text);
+            if (orbit_cmd_text_reserve(in, len + 1u)) memcpy(in->text, cur->text, len + 1u);
+            return;
+        }
+        return;
+    }
+}
+
 static void orbit_send_ui_event_text_input(orbit_shell_t *shell, uint32_t id, const char *text) {
     if (!shell || shell->child_stdin_fd < 0) return;
     if (!text) text = "";
+    orbit_ui_note_sent_text(shell, text);
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "@SLUI EVENT TEXT_INPUT ", peos_strlen("@SLUI EVENT TEXT_INPUT "));
     orbit_write_fd_u32(shell->child_stdin_fd, id);
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, " ", 1u);
@@ -1265,6 +1319,7 @@ static void orbit_send_ui_event_text_input(orbit_shell_t *shell, uint32_t id, co
 static void orbit_send_ui_event_text_area(orbit_shell_t *shell, uint32_t id, const char *text) {
     if (!shell || shell->child_stdin_fd < 0) return;
     if (!text) text = "";
+    orbit_ui_note_sent_text(shell, text);
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "@SLUI EVENT TEXT_AREA ", peos_strlen("@SLUI EVENT TEXT_AREA "));
     orbit_write_fd_u32(shell->child_stdin_fd, id);
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, " ", 1u);
@@ -1404,6 +1459,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
     }
 
     if (orbit_token_is(cmd_tok, cmd_len, "COMMIT")) {
+        orbit_ui_keep_local_text(shell);
         orbit_ui_cmd_release_array(shell->ui.cmds, shell->ui.cmd_count);
         shell->ui.enabled = shell->ui.staged_enabled;
     if (!orbit_ui_cmd_reserve(&shell->ui.cmds, &shell->ui.cmd_cap, shell->ui.staged_count)) {
@@ -2618,10 +2674,8 @@ static uint8_t orbit_clip_intersect(uint32_t ax, uint32_t ay, uint32_t aw, uint3
 static uint8_t orbit_ui_body_rect(const sl_window_t *win,
                                   uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
     if (!win || !x || !y || !w || !h) return 0u;
-    uint32_t bx = win->x + 2u;
-    uint32_t by = win->y + win->top_bar_height + 1u;
-    uint32_t bw = (win->width > 4u) ? (win->width - 4u) : 0u;
-    uint32_t bh = (win->height > (win->top_bar_height + 3u)) ? (win->height - win->top_bar_height - 3u) : 0u;
+    uint32_t bx, by, bw, bh;
+    sl_window_body_rect(win, &bx, &by, &bw, &bh);
     if (bw == 0u || bh == 0u) return 0u;
     *x = bx; *y = by; *w = bw; *h = bh;
     return 1u;
@@ -3504,16 +3558,12 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     orbit_shell_t *shell = (orbit_shell_t *)userdata;
     if (!ctx || !win || !shell) return;
 
-    uint32_t body_x = win->x + 2u;
-    uint32_t body_y = win->y + win->top_bar_height + 1u;
-    uint32_t body_w = (win->width > 4u) ? (win->width - 4u) : 0u;
-    uint32_t body_h = (win->height > (win->top_bar_height + 3u)) ? (win->height - win->top_bar_height - 3u) : 0u;
-
+    uint32_t body_x, body_y, body_w, body_h;
+    sl_window_body_rect(win, &body_x, &body_y, &body_w, &body_h);
     if (body_w == 0u || body_h == 0u) return;
 
+    // The title is the window frame's: the app draws its body only.
     sl_fill_rect(ctx, body_x, body_y, body_w, body_h, 12u, 12u, 12u);
-    const char *title = shell->title[0] ? shell->title : "App";
-    sl_draw_text(ctx, win->x + 6u, win->y + 6u, title, 20u, 20u, 20u);
 
     if (shell->surface.active) {
         orbit_draw_surface(ctx, shell, body_x, body_y, body_w, body_h);
@@ -3992,7 +4042,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         if (select_open_before != shell->ui.ui.select_open_id ||
             context_open_before != shell->ui.context_open_id) {
             // Ensure all controls refresh visual state immediately when dropdown opens/closes.
-            sl_dirty_add(ctx, win->x, win->y, win->width, win->height);
+            sl_window_dirty_body(ctx, win);
         }
 
         if (!shell->ui.mouse_down) shell->ui.active_panel_id = 0u;
