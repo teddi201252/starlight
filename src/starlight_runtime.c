@@ -46,7 +46,6 @@
 #define SL_DIRTY_MAX_RECTS 256u
 #define SL_PRESENT_MAX_RECTS 32u
 #define SL_DIRTY_FULL_AREA_THRESHOLD_PCT 65u
-#define SL_DRAG_DIRTY_PADDING 8u
 
 typedef sl_damage_rect_t sl_rect_t;
 
@@ -58,6 +57,12 @@ static struct {
 
 static sl_window_t *g_drag_window = NULL;
 static uint8_t g_drag_active = 0u;
+
+static void sl_drag_stop(void) {
+    if (g_drag_window) g_drag_window->dragging = 0u;
+    g_drag_active = 0u;
+    g_drag_window = NULL;
+}
 static int32_t g_drag_grab_offset_x = 0;
 static int32_t g_drag_grab_offset_y = 0;
 
@@ -140,6 +145,23 @@ static size_t sl_dirty_build_present_rects(const sl_ctx_t *ctx,
     return count;
 }
 
+// Grow rects[i] over every other rect it overlaps or touches, so the list
+// stays disjoint: what blends over the restored background (window shadows)
+// must be drawn once per pixel.
+static void sl_dirty_absorb(size_t i) {
+    for (size_t j = 0; j < g_dirty.count;) {
+        if (j != i && sl_rects_overlap_or_touch(&g_dirty.rects[i], &g_dirty.rects[j])) {
+            g_dirty.rects[i] = sl_rect_union(&g_dirty.rects[i], &g_dirty.rects[j]);
+            g_dirty.rects[j] = g_dirty.rects[g_dirty.count - 1u];
+            g_dirty.count--;
+            if (i == g_dirty.count) i = j;   // rects[i] was the one moved into j
+            j = 0;                            // the union grew: look again
+            continue;
+        }
+        j++;
+    }
+}
+
 static int sl_dirty_coalesce_best_pair(void) {
     if (g_dirty.count < 2u) return 0;
 
@@ -166,6 +188,8 @@ static int sl_dirty_coalesce_best_pair(void) {
     g_dirty.rects[best_i] = sl_rect_union(&g_dirty.rects[best_i], &g_dirty.rects[best_j]);
     g_dirty.rects[best_j] = g_dirty.rects[g_dirty.count - 1u];
     g_dirty.count--;
+    if (best_i == g_dirty.count) best_i = best_j;   // it was the last one, now moved
+    sl_dirty_absorb(best_i);
     return 1;
 }
 
@@ -199,20 +223,7 @@ void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint3
     for (size_t i = 0; i < g_dirty.count; i++) {
         if (sl_rects_overlap_or_touch(&g_dirty.rects[i], &in)) {
             g_dirty.rects[i] = sl_rect_union(&g_dirty.rects[i], &in);
-
-            for (size_t j = 0; j < g_dirty.count;) {
-                if (j == i) {
-                    j++;
-                    continue;
-                }
-                if (sl_rects_overlap_or_touch(&g_dirty.rects[i], &g_dirty.rects[j])) {
-                    g_dirty.rects[i] = sl_rect_union(&g_dirty.rects[i], &g_dirty.rects[j]);
-                    g_dirty.rects[j] = g_dirty.rects[g_dirty.count - 1u];
-                    g_dirty.count--;
-                    continue;
-                }
-                j++;
-            }
+            sl_dirty_absorb(i);
             return;
         }
     }
@@ -227,29 +238,6 @@ void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint3
         }
     }
     g_dirty.rects[g_dirty.count++] = in;
-}
-
-static void sl_dirty_add_padded(const sl_ctx_t *ctx, uint32_t x, uint32_t y,
-                                uint32_t w, uint32_t h, uint32_t pad) {
-    if (!ctx || w == 0u || h == 0u) return;
-
-    int64_t x0 = (int64_t)x - (int64_t)pad;
-    int64_t y0 = (int64_t)y - (int64_t)pad;
-    int64_t x1 = (int64_t)x + (int64_t)w + (int64_t)pad;
-    int64_t y1 = (int64_t)y + (int64_t)h + (int64_t)pad;
-
-    if (x1 <= 0 || y1 <= 0) return;
-    if (x0 >= (int64_t)ctx->fb.width || y0 >= (int64_t)ctx->fb.height) return;
-
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > (int64_t)ctx->fb.width) x1 = (int64_t)ctx->fb.width;
-    if (y1 > (int64_t)ctx->fb.height) y1 = (int64_t)ctx->fb.height;
-
-    uint32_t cw = (uint32_t)(x1 - x0);
-    uint32_t ch = (uint32_t)(y1 - y0);
-    if (cw == 0u || ch == 0u) return;
-    sl_dirty_add(ctx, (uint32_t)x0, (uint32_t)y0, cw, ch);
 }
 
 static void sl_copy_text(char *dst, size_t cap, const char *src) {
@@ -950,24 +938,27 @@ int sl_handle_input(sl_ctx_t *ctx) {
     uint8_t clipboard_cmds_pending = (input.clipboard_cmds != 0u) ? 1u : 0u;
 
     sl_window_t *focused = sl_window_get_focused();
+    // While a window is dragged by its title bar the moves are the drag's,
+    // not the app's: forwarding them would make it redraw every frame.
+    uint8_t drag_move_only = g_drag_active && !input.mouse_left_pressed && !input.mouse_left_released;
     if (focused && focused->task && focused->task->on_input &&
-        !mouse_on_launcher &&
+        !mouse_on_launcher && !drag_move_only &&
         (input.mouse_updated || input.mouse_left_pressed || input.mouse_left_released ||
          input.mouse_moved || clipboard_cmds_pending)) {
         focused->task->on_input(ctx, &input, NULL, focused->task->userdata);
         sl_windows_mark_focused_activity();
         if (input.mouse_left_pressed || input.mouse_left_released ||
             input.mouse_right_pressed || input.mouse_right_released) {
-            sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
+            sl_window_dirty_body(ctx, focused);
         } else {
             uint32_t dx = 0u, dy = 0u, dw = 0u, dh = 0u;
             if (sl_app_host_input_dirty_rect(focused, &input, focused->task->userdata, &dx, &dy, &dw, &dh)) {
                 sl_dirty_add(ctx, dx, dy, dw, dh);
             } else if (clipboard_cmds_pending) {
-                sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
+                sl_window_dirty_body(ctx, focused);
             } else if (input.mouse_wheel_x != 0 || input.mouse_wheel_y != 0 ||
                        (input.mouse_moved && (input.mouse_buttons & 0x01u))) {
-                sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
+                sl_window_dirty_body(ctx, focused);
             }
         }
     }
@@ -977,42 +968,31 @@ int sl_handle_input(sl_ctx_t *ctx) {
             focused->task->on_input(ctx, &input, &input.key_events[i], focused->task->userdata);
         }
         sl_windows_mark_focused_activity();
-        sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
+        sl_window_dirty_body(ctx, focused);   // typing changes the app, not the frame
     }
 
     if (input.quit_requested) return 1;
 
     if (input.mouse_right_pressed) {
         if (sl_launcher_handle_right_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
-            g_drag_active = 0u;
-            g_drag_window = NULL;
+            sl_drag_stop();
             return 0;
         }
     }
 
     if (input.mouse_left_pressed) {
-        uint8_t had_prev_focus = 0u;
-        uint32_t prev_focus_x = 0u;
-        uint32_t prev_focus_y = 0u;
-        uint32_t prev_focus_w = 0u;
-        uint32_t prev_focus_h = 0u;
-        if (focused) {
-            had_prev_focus = 1u;
-            prev_focus_x = focused->x;
-            prev_focus_y = focused->y;
-            prev_focus_w = focused->width;
-            prev_focus_h = focused->height;
-        }
+        // A click can move the focus: then both frames change (raised or
+        // flat). Windows are reordered on focus, so remember the task.
+        const app_instance_t *prev_task = focused ? focused->task : NULL;
+        sl_win_rect_t prev_outer = focused ? sl_window_outer_rect(focused) : (sl_win_rect_t){ 0, 0, 0u, 0u };
 
         if (sl_launcher_handle_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
-            g_drag_active = 0u;
-            g_drag_window = NULL;
+            sl_drag_stop();
             return 0;
         }
 
         if (sl_windows_close_at_cursor(ctx, ctx->cursor_x, ctx->cursor_y)) {
-            g_drag_active = 0u;
-            g_drag_window = NULL;
+            sl_drag_stop();
             return 0;
         }
 
@@ -1022,15 +1002,14 @@ int sl_handle_input(sl_ctx_t *ctx) {
             focused->task->on_input(ctx, &input, NULL, focused->task->userdata);
         }
         sl_windows_mark_focused_activity();
-        if (had_prev_focus) {
-            sl_dirty_add(ctx, prev_focus_x, prev_focus_y, prev_focus_w, prev_focus_h);
-        }
-        if (focused) {
-            sl_dirty_add(ctx, focused->x, focused->y, focused->width, focused->height);
+        if (focused && focused->task != prev_task) {
+            int64_t px = prev_outer.x < 0 ? 0 : prev_outer.x, py = prev_outer.y < 0 ? 0 : prev_outer.y;
+            int64_t pw = (int64_t)prev_outer.x + prev_outer.w - px, ph = (int64_t)prev_outer.y + prev_outer.h - py;
+            if (pw > 0 && ph > 0) sl_dirty_add(ctx, (uint32_t)px, (uint32_t)py, (uint32_t)pw, (uint32_t)ph);
+            sl_window_dirty_all(ctx, focused);
         }
 
-        g_drag_active = 0u;
-        g_drag_window = NULL;
+        sl_drag_stop();
         if (focused) {
             uint32_t top_bar_h = focused->top_bar_height;
             if (top_bar_h > focused->height) top_bar_h = focused->height;
@@ -1042,6 +1021,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
             if (inside_x && inside_topbar) {
                 g_drag_active = 1u;
                 g_drag_window = focused;
+                focused->dragging = 1u;
                 g_drag_grab_offset_x = (int32_t)(ctx->cursor_x - focused->x);
                 g_drag_grab_offset_y = (int32_t)(ctx->cursor_y - focused->y);
             }
@@ -1049,8 +1029,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
     }
 
     if (input.mouse_left_released) {
-        g_drag_active = 0u;
-        g_drag_window = NULL;
+        sl_drag_stop();
     }
 
     if (input.mouse_moved && (input.mouse_buttons & 0x01u) && g_drag_active && g_drag_window) {
@@ -1064,13 +1043,13 @@ int sl_handle_input(sl_ctx_t *ctx) {
 
         sl_window_move(g_drag_window, (uint32_t)new_x, (uint32_t)new_y);
         if (g_drag_window->x != old_x || g_drag_window->y != old_y) {
-            sl_windows_mark_focused_activity();
-            sl_dirty_add_padded(ctx, old_x, old_y,
-                                g_drag_window->width, g_drag_window->height,
-                                SL_DRAG_DIRTY_PADDING);
-            sl_dirty_add_padded(ctx, g_drag_window->x, g_drag_window->y,
-                                g_drag_window->width, g_drag_window->height,
-                                SL_DRAG_DIRTY_PADDING);
+            // Moving does not change what the app shows: its cached inside is
+            // copied to the new place, the app is not asked to redraw.
+            // Where it was and where it is, shadows included.
+            sl_window_dirty_all(ctx, &(sl_window_t){ .x = old_x, .y = old_y,
+                                                     .width = g_drag_window->width,
+                                                     .height = g_drag_window->height });
+            sl_window_dirty_all(ctx, g_drag_window);
         }
     }
     return 0;
@@ -1118,6 +1097,27 @@ void sl_render_full(sl_ctx_t *ctx) {
     sl_render_bg_rect(ctx, &all);
 }
 
+// The background of r, except where `skip` (the opaque inside of the top
+// window, painted over anyway this frame) covers it: up to four strips.
+static void sl_render_bg_rect_except(sl_ctx_t *ctx, const sl_rect_t *r, const sl_rect_t *skip) {
+    uint64_t x0 = r->x, y0 = r->y, x1 = (uint64_t)r->x + r->w, y1 = (uint64_t)r->y + r->h;
+    uint64_t sx0 = skip->x, sy0 = skip->y, sx1 = (uint64_t)skip->x + skip->w, sy1 = (uint64_t)skip->y + skip->h;
+    if (!skip->w || !skip->h || sx1 <= x0 || sx0 >= x1 || sy1 <= y0 || sy0 >= y1) {
+        sl_render_bg_rect(ctx, r);
+        return;
+    }
+    uint64_t my0 = sy0 > y0 ? sy0 : y0, my1 = sy1 < y1 ? sy1 : y1;
+    sl_rect_t strips[4] = {
+        { r->x, r->y, r->w, (uint32_t)(my0 - y0) },                                   // above
+        { r->x, (uint32_t)my1, r->w, (uint32_t)(y1 - my1) },                          // below
+        { r->x, (uint32_t)my0, (uint32_t)(sx0 > x0 ? sx0 - x0 : 0u), (uint32_t)(my1 - my0) },   // left
+        { (uint32_t)(sx1 < x1 ? sx1 : x1), (uint32_t)my0, (uint32_t)(sx1 < x1 ? x1 - sx1 : 0u), (uint32_t)(my1 - my0) },
+    };
+    for (int k = 0; k < 4; k++) {
+        if (strips[k].w && strips[k].h) sl_render_bg_rect(ctx, &strips[k]);
+    }
+}
+
 void sl_render_dirty_background(sl_ctx_t *ctx) {
     if (!ctx || !ctx->frame || !ctx->bg_loaded) return;
     if (!sl_bg_bake(ctx)) return;
@@ -1127,8 +1127,10 @@ void sl_render_dirty_background(sl_ctx_t *ctx) {
         return;
     }
 
+    sl_rect_t skip = { 0u, 0u, 0u, 0u };
+    (void)sl_windows_top_opaque_rect(ctx, &skip.x, &skip.y, &skip.w, &skip.h);
     for (size_t i = 0; i < g_dirty.count; i++) {
-        sl_render_bg_rect(ctx, &g_dirty.rects[i]);
+        sl_render_bg_rect_except(ctx, &g_dirty.rects[i], &skip);
     }
 }
 

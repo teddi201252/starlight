@@ -124,6 +124,7 @@ static void sl_window_refresh_zorder(void);
 static void sl_launcher_compact_label(const char *src, char *dst, size_t cap);
 static size_t sl_window_index_for_task(const app_instance_t *task);
 static void sl_focus_window(size_t index);
+static void sl_focus_top_visible(void);
 static int sl_window_is_closing(const sl_window_t *win);
 static void sl_anim_start_close(app_instance_t *task, int32_t current_y);
 static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index);
@@ -131,10 +132,15 @@ static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index);
 static sl_window_rect_snapshot_t sl_window_snapshot(const sl_window_t *win) {
     sl_window_rect_snapshot_t snap = {0u, 0u, 0u, 0u, 0u};
     if (!win || win->width == 0u || win->height == 0u) return snap;
-    snap.x = win->x;
-    snap.y = win->y;
-    snap.w = win->width;
-    snap.h = win->height;
+    // Everything the window paints, shadow included.
+    sl_win_rect_t o = sl_window_outer_rect(win);
+    int64_t x0 = o.x < 0 ? 0 : o.x, y0 = o.y < 0 ? 0 : o.y;
+    int64_t x1 = (int64_t)o.x + o.w, y1 = (int64_t)o.y + o.h;
+    if (x1 <= x0 || y1 <= y0) return snap;
+    snap.x = (uint32_t)x0;
+    snap.y = (uint32_t)y0;
+    snap.w = (uint32_t)(x1 - x0);
+    snap.h = (uint32_t)(y1 - y0);
     snap.valid = 1u;
     return snap;
 }
@@ -1198,25 +1204,10 @@ static int sl_window_is_closing(const sl_window_t *win) {
 }
 
 static int sl_window_contains_point(const sl_window_t *win, uint32_t x, uint32_t y) {
-    if (!win) return 0;
+    if (!win || win->minimized) return 0;
     if (x < win->x || y < win->y) return 0;
     if (x >= (win->x + win->width)) return 0;
     if (y >= (win->y + win->height)) return 0;
-    return 1;
-}
-
-static int sl_window_close_btn_hit(const sl_window_t *win, uint32_t x, uint32_t y) {
-    if (!win) return 0;
-    if (!sl_window_contains_point(win, x, y)) return 0;
-    if (y >= win->y + win->top_bar_height) return 0;
-    if (win->width <= (SL_WIN_CLOSE_BTN_W + SL_WIN_CLOSE_BTN_MARGIN + 2u)) return 0;
-    if (win->top_bar_height <= (SL_WIN_CLOSE_BTN_H + 2u)) return 0;
-
-    uint32_t cb_x = win->x + win->width - SL_WIN_CLOSE_BTN_MARGIN - SL_WIN_CLOSE_BTN_W - 1u;
-    uint32_t cb_y = win->y + 1u + ((win->top_bar_height - 2u - SL_WIN_CLOSE_BTN_H) / 2u);
-    if (x < cb_x || y < cb_y) return 0;
-    if (x >= cb_x + SL_WIN_CLOSE_BTN_W) return 0;
-    if (y >= cb_y + SL_WIN_CLOSE_BTN_H) return 0;
     return 1;
 }
 
@@ -1242,10 +1233,7 @@ static void sl_window_close_index(size_t index) {
         return;
     }
 
-    if (g_focused_window >= g_window_count) {
-        g_focused_window = g_window_count - 1u;
-    }
-    sl_window_refresh_zorder();
+    sl_focus_top_visible();
 }
 
 static void sl_window_refresh_zorder(void) {
@@ -1278,6 +1266,18 @@ static void sl_focus_window(size_t index) {
     }
     g_windows[g_window_count - 1u] = win;
     g_focused_window = g_window_count - 1u;
+    sl_window_refresh_zorder();
+}
+
+// Focus the topmost window still on screen (none if all are minimized).
+static void sl_focus_top_visible(void) {
+    g_focused_window = (size_t)-1;
+    for (size_t i = g_window_count; i > 0u; i--) {
+        if (!g_windows[i - 1u].minimized) {
+            g_focused_window = i - 1u;
+            break;
+        }
+    }
     sl_window_refresh_zorder();
 }
 
@@ -1342,8 +1342,10 @@ static void sl_launcher_pick_window_rect(const sl_ctx_t *ctx, const sl_launcher_
                    : ((ctx->fb.width > reserved_left + 20u) ? (ctx->fb.width - reserved_left - 20u) : ctx->fb.width);
     uint32_t def_h = (ctx->fb.height > 380u) ? 360u : ctx->fb.height;
 
-    uint32_t w = (item && item->width > 0u) ? item->width : def_w;
-    uint32_t h = (item && item->height > 0u) ? item->height : def_h;
+    // The app's size is its body as it always was; the soft UI frame goes
+    // around it.
+    uint32_t w = ((item && item->width > 0u) ? item->width : def_w) + SL_WIN_FRAME_EXTRA_W;
+    uint32_t h = ((item && item->height > 0u) ? item->height : def_h) + SL_WIN_FRAME_EXTRA_H;
 
     if (w > max_w) w = max_w;
     if (h > max_h) h = max_h;
@@ -1380,6 +1382,8 @@ static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index) {
     size_t existing = sl_window_index_for_task(app);
     if (existing != (size_t)-1) {
         sl_window_rect_snapshot_t prev_focus = sl_window_snapshot_index(g_focused_window);
+        g_windows[existing].minimized = 0u;   // the dock brings a minimized window back
+        g_windows[existing].force_redraw = 1u;
         sl_window_rect_snapshot_t target = sl_window_snapshot_index(existing);
         sl_focus_window(existing);
         sl_windows_mark_focused_activity();
@@ -1397,6 +1401,7 @@ static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index) {
     if (!sl_window_init(&win, ctx, app, x, y, w, h)) {
         return 0;
     }
+    sl_copy_str(win.title, sizeof(win.title), item->title);
     sl_window_set_fps_profile(&win, 30u, 8u);
 
     sl_window_t *new_windows =
@@ -1584,19 +1589,61 @@ void sl_windows_focus_at_cursor(uint32_t x, uint32_t y) {
     }
 }
 
+// Title bar buttons of the focused window: close, minimize, maximize.
 int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
-    if (!ctx || !g_windows || g_window_count == 0u) return 0;
-    for (size_t i = g_window_count; i > 0u; i--) {
-        size_t idx = i - 1u;
-        if (sl_window_is_closing(&g_windows[idx])) continue;
-        if (!sl_window_close_btn_hit(&g_windows[idx], x, y)) continue;
-        sl_window_rect_snapshot_t closing = sl_window_snapshot_index(idx);
-        sl_anim_start_close(g_windows[idx].task, (int32_t)g_windows[idx].y);
-        sl_windows_mark_focused_activity();
-        sl_dirty_add_snapshot(ctx, &closing);
+    if (!ctx || !g_windows || g_focused_window >= g_window_count) return 0;
+    size_t idx = g_focused_window;
+    sl_window_t *win = &g_windows[idx];
+    if (sl_window_is_closing(win)) return 0;
+    int b = sl_window_button_at(win, x, y);
+    if (b == SL_WIN_BTN_NONE) return 0;
+    sl_window_rect_snapshot_t before = sl_window_snapshot_index(idx);
+    sl_windows_mark_focused_activity();
+    if (b == SL_WIN_BTN_CLOSE) {
+        sl_anim_start_close(win->task, (int32_t)win->y);
+        sl_dirty_add_snapshot(ctx, &before);
         return 1;
     }
-    return 0;
+    if (b == SL_WIN_BTN_MIN) {
+        // Hidden at the bottom of the stack; focus goes to the next one.
+        sl_window_t moved = *win;
+        moved.minimized = 1u;
+        for (size_t i = idx; i > 0u; i--) g_windows[i] = g_windows[i - 1u];
+        g_windows[0] = moved;
+        sl_focus_top_visible();
+        sl_dirty_add_snapshot(ctx, &before);
+        sl_window_rect_snapshot_t now_focused = sl_window_snapshot_index(g_focused_window);
+        sl_dirty_add_snapshot(ctx, &now_focused);
+        return 1;
+    }
+    // Maximize: the space right of the dock, with a margin for the shadow;
+    // again to go back.
+    if (!win->maximized) {
+        uint32_t left = sl_launcher_reserved_left(ctx) + 24u;
+        uint32_t m = 24u;
+        if (ctx->fb.width <= left + m + 200u || ctx->fb.height <= 2u * m + 150u) return 1;
+        win->restore_x = win->x;
+        win->restore_y = win->y;
+        win->restore_w = win->width;
+        win->restore_h = win->height;
+        win->x = left;
+        win->y = m;
+        win->width = ctx->fb.width - left - m;
+        win->height = ctx->fb.height - 2u * m;
+        win->maximized = 1u;
+    } else {
+        win->x = win->restore_x;
+        win->y = win->restore_y;
+        win->width = win->restore_w;
+        win->height = win->restore_h;
+        win->maximized = 0u;
+    }
+    win->force_redraw = 1u;
+    win->next_render_ns = 0ull;
+    sl_dirty_add_snapshot(ctx, &before);
+    sl_window_rect_snapshot_t after = sl_window_snapshot_index(idx);
+    sl_dirty_add_snapshot(ctx, &after);
+    return 1;
 }
 
 void sl_windows_create_test(sl_ctx_t *ctx, size_t count) {
@@ -1645,7 +1692,7 @@ void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata) {
         if (!g_windows[i].task) continue;
         if (g_windows[i].task->userdata != userdata) continue;
         sl_window_mark_activity(&g_windows[i], now);
-        sl_dirty_add(ctx, g_windows[i].x, g_windows[i].y, g_windows[i].width, g_windows[i].height);
+        sl_window_dirty_body(ctx, &g_windows[i]);
     }
 }
 
@@ -1675,10 +1722,7 @@ void sl_windows_tick_animations(sl_ctx_t *ctx) {
         }
 
         sl_window_anim_t *anim = &g_window_anims[(size_t)anim_idx];
-        uint32_t old_x = win->x;
-        uint32_t old_y = win->y;
-        uint32_t old_w = win->width;
-        uint32_t old_h = win->height;
+        sl_window_rect_snapshot_t before = sl_window_snapshot(win);
 
         int32_t y = (int32_t)(anim->y_value + 0.5f);
         if (y < 0) y = 0;
@@ -1690,8 +1734,8 @@ void sl_windows_tick_animations(sl_ctx_t *ctx) {
         win->next_render_ns = 0ull;
         sl_window_mark_activity(win, peos_time_ns());
 
-        sl_dirty_add(ctx, old_x, old_y, old_w, old_h);
-        sl_dirty_add(ctx, win->x, win->y, win->width, win->height);
+        sl_dirty_add_snapshot(ctx, &before);
+        sl_window_dirty_all(ctx, win);
 
         if (anim->close_ready) {
             sl_window_rect_snapshot_t closing = sl_window_snapshot(win);
@@ -1734,13 +1778,35 @@ void sl_windows_tick_animations(sl_ctx_t *ctx) {
     (void)any_active;
 }
 
+int sl_windows_top_opaque_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!ctx || !g_windows) return 0;
+    for (size_t i = g_window_count; i > 0u; i--) {
+        const sl_window_t *win = &g_windows[i - 1u];
+        if (win->minimized) continue;
+        // A fading window blends with what is under it: that must be there.
+        if (win->anim_opacity < 255u || sl_window_is_closing(win)) return 0;
+        if (win->width <= 2u * SL_WIN_OPAQUE_INSET || win->height <= 2u * SL_WIN_OPAQUE_INSET) return 0;
+        uint64_t x1 = (uint64_t)win->x + win->width - SL_WIN_OPAQUE_INSET;
+        uint64_t y1 = (uint64_t)win->y + win->height - SL_WIN_OPAQUE_INSET;
+        if (x1 > ctx->fb.width) x1 = ctx->fb.width;
+        if (y1 > ctx->fb.height) y1 = ctx->fb.height;
+        uint32_t x0 = win->x + SL_WIN_OPAQUE_INSET, y0 = win->y + SL_WIN_OPAQUE_INSET;
+        if (x1 <= x0 || y1 <= y0) return 0;
+        *x = x0;
+        *y = y0;
+        *w = (uint32_t)(x1 - x0);
+        *h = (uint32_t)(y1 - y0);
+        return 1;
+    }
+    return 0;
+}
+
 void sl_windows_render_all(sl_ctx_t *ctx) {
     if (!ctx || !g_windows || g_window_count == 0u) return;
     for (size_t i = 0; i < g_window_count; i++) {
-        if (!sl_dirty_intersects_rect(g_windows[i].x, g_windows[i].y,
-                                      g_windows[i].width, g_windows[i].height)) {
-            continue;
-        }
+        if (g_windows[i].minimized) continue;
+        sl_window_rect_snapshot_t r = sl_window_snapshot(&g_windows[i]);
+        if (!r.valid || !sl_dirty_intersects_rect(r.x, r.y, r.w, r.h)) continue;
         sl_window_render(&g_windows[i]);
     }
 }

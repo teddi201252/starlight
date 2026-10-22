@@ -98,3 +98,69 @@ void sl_render_copy_opaque_rgba_to_bgra32(uint32_t *dst, const uint32_t *src,
                  (value & 0x0000FF00u) | ((value & 0x00FF0000u) >> 16u);
     }
 }
+
+static inline uint32_t sl_render_premul_px(uint32_t s, uint32_t d) {
+    uint32_t a = s >> 24;
+    if (a == 0u) return d;
+    if (a == 255u) return s;
+    uint32_t inv = 255u - a, out = 0xFF000000u;
+    for (int c = 0; c < 24; c += 8) {
+        uint32_t t = ((d >> c) & 0xFFu) * inv + 128u;
+        t = (t + (t >> 8)) >> 8;
+        out |= (((s >> c) & 0xFFu) + t) << c;
+    }
+    return out;
+}
+
+void sl_render_blend_premul_bgra32(uint32_t *dst, const uint32_t *src, size_t pixel_count) {
+    if (!dst || !src) return;
+#if SL_RENDER_HAS_SSE2
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i ff = _mm_set1_epi16(255);
+    const __m128i rounding = _mm_set1_epi16(128);
+    const __m128i alpha_out = _mm_set1_epi32((int)0xFF000000u);
+    while (pixel_count >= 4u) {
+        __m128i s = _mm_loadu_si128((const __m128i *)(const void *)src);
+        __m128i a32 = _mm_srli_epi32(s, 24);
+        // Whole groups that are clear or solid are common in shadows and bodies.
+        __m128i is_zero = _mm_cmpeq_epi32(a32, zero);
+        if (_mm_movemask_epi8(is_zero) == 0xFFFF) {
+            src += 4;
+            dst += 4;
+            pixel_count -= 4u;
+            continue;
+        }
+        if (_mm_movemask_epi8(_mm_cmpeq_epi32(a32, _mm_set1_epi32(255))) == 0xFFFF) {
+            _mm_storeu_si128((__m128i *)(void *)dst, s);
+            src += 4;
+            dst += 4;
+            pixel_count -= 4u;
+            continue;
+        }
+        __m128i d = _mm_loadu_si128((const __m128i *)(const void *)dst);
+        // Per-channel inverse alpha, 16 bits: alpha copied into every lane of its pixel.
+        __m128i a16 = _mm_packs_epi32(a32, a32);               // a0 a1 a2 a3 a0 a1 a2 a3
+        __m128i a_lo = _mm_unpacklo_epi16(a16, a16);           // a0 a0 a1 a1 a2 a2 a3 a3
+        __m128i inv_lo = _mm_sub_epi16(ff, _mm_unpacklo_epi32(a_lo, a_lo));   // pixels 0,1
+        __m128i inv_hi = _mm_sub_epi16(ff, _mm_unpackhi_epi32(a_lo, a_lo));   // pixels 2,3
+        __m128i d_lo = _mm_unpacklo_epi8(d, zero);
+        __m128i d_hi = _mm_unpackhi_epi8(d, zero);
+        __m128i t_lo = _mm_add_epi16(_mm_mullo_epi16(d_lo, inv_lo), rounding);
+        __m128i t_hi = _mm_add_epi16(_mm_mullo_epi16(d_hi, inv_hi), rounding);
+        t_lo = _mm_srli_epi16(_mm_add_epi16(t_lo, _mm_srli_epi16(t_lo, 8)), 8);
+        t_hi = _mm_srli_epi16(_mm_add_epi16(t_hi, _mm_srli_epi16(t_hi, 8)), 8);
+        __m128i out = _mm_add_epi8(s, _mm_packus_epi16(t_lo, t_hi));
+        // A clear source pixel leaves the destination as it was (alpha too).
+        out = _mm_or_si128(out, alpha_out);
+        out = _mm_or_si128(_mm_and_si128(is_zero, d), _mm_andnot_si128(is_zero, out));
+        _mm_storeu_si128((__m128i *)(void *)dst, out);
+        src += 4;
+        dst += 4;
+        pixel_count -= 4u;
+    }
+#endif
+    while (pixel_count-- > 0u) {
+        *dst = sl_render_premul_px(*src++, *dst);
+        dst++;
+    }
+}
