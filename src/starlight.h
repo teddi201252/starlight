@@ -52,6 +52,10 @@ typedef struct {
     // Background
     sl_image_t bg_image;
     uint8_t bg_loaded;
+    // The background already scaled to the screen, in the frame's format:
+    // restoring it under a dirty rect is a row copy.
+    uint8_t *bg_frame;
+    size_t bg_frame_stride;
 
     // Baked sprites and font atlases (tools/slskin), read in place.
     sl_skin_t skin;
