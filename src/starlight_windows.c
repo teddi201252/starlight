@@ -15,7 +15,6 @@
 #define SL_APP_CATALOG_SCAN_INTERVAL_NS 1000000000ull
 #define SL_APP_DIRECTORY_BUFFER_INITIAL 4096u
 #define SL_APP_DIRECTORY_BUFFER_MAX (1024u * 1024u)
-#define SL_LAUNCHER_VISIBLE_MAX 8u
 #define SL_APP_CATALOG_INITIAL_CAP 16u
 #define SL_WIN_ANIM_MAX 32u
 #define SL_WIN_ANIM_OPEN_OFFSET_Y 28.0f
@@ -76,6 +75,13 @@ typedef struct {
     uint32_t height;
     uint64_t signature;
     app_instance_t *instance;
+    // Dock and app manager tiles (render/slsk.h), resolved on first draw.
+#define SL_DOCK_TILE_SETS 5
+    uint8_t tiles_ready;
+    uint8_t tile_custom;            // a baked tile of its own, not the blank one
+    const slsk_entry_t *tiles[SL_DOCK_TILE_SETS];
+    uint8_t *own_icon[2];           // its own icon scaled to 44 and 66 px, or NULL
+    char initial[8];                // else its initial, on the blank tile
 } sl_launcher_item_t;
 
 typedef struct {
@@ -103,9 +109,6 @@ static size_t g_focused_window = (size_t)-1;
 static sl_launcher_item_t *g_launcher_items = NULL;
 static size_t g_launcher_count = 0u;
 static size_t g_launcher_cap = 0u;
-static sl_image_t g_launcher_placeholder_icon;
-static uint8_t g_launcher_placeholder_loaded = 0u;
-static uint8_t g_launcher_placeholder_failed = 0u;
 static size_t g_launcher_hover_index = (size_t)-1;
 static uint8_t g_launcher_ctx_open = 0u;
 static size_t g_launcher_ctx_item_index = (size_t)-1;
@@ -661,6 +664,8 @@ static void sl_launcher_items_reset(void) {
         if (g_launcher_items[i].icon_image.data) {
             sl_image_free(&g_launcher_items[i].icon_image);
         }
+        free(g_launcher_items[i].own_icon[0]);
+        free(g_launcher_items[i].own_icon[1]);
     }
     if (g_launcher_items && g_launcher_cap > 0u) {
         peos_memset(g_launcher_items, 0,
@@ -677,12 +682,6 @@ static void sl_launcher_items_reset(void) {
     g_launcher_expanded = 0u;
     sl_tween_set_u32_immediate(&g_launcher_extra_width, 0u);
     g_launcher_last_rect.valid = 0u;
-}
-
-static size_t sl_launcher_visible_count(void) {
-    return (g_launcher_count < SL_LAUNCHER_VISIBLE_MAX)
-               ? g_launcher_count
-               : SL_LAUNCHER_VISIBLE_MAX;
 }
 
 static int sl_launcher_reserve(size_t needed) {
@@ -727,134 +726,7 @@ static int sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app,
     return 1;
 }
 
-static uint32_t sl_launcher_content_width(void) {
-    uint32_t icon_w = SL_LAUNCHER_ICON_SIZE;
-    uint32_t header_w = 4u * 8u; // "APPS"
-    return (icon_w > header_w) ? icon_w : header_w;
-}
-
-static size_t sl_launcher_column_count(void) {
-    if (g_launcher_count == 0u) return 0u;
-    return (g_launcher_count + SL_LAUNCHER_VISIBLE_MAX - 1u) /
-           SL_LAUNCHER_VISIBLE_MAX;
-}
-
-static uint32_t sl_launcher_collapsed_width(void) {
-    return SL_LAUNCHER_PAD_X * 2u + sl_launcher_content_width();
-}
-
-static uint32_t sl_launcher_desired_extra_width(void) {
-    size_t columns = sl_launcher_column_count();
-    if (columns <= 1u) return 0u;
-
-    size_t extra_columns = columns - 1u;
-    uint32_t stride = sl_launcher_content_width() + SL_LAUNCHER_COLUMN_GAP;
-    if (extra_columns > UINT32_MAX / stride) return UINT32_MAX;
-    return (uint32_t)extra_columns * stride;
-}
-
-static uint32_t sl_launcher_item_height(void) {
-    uint32_t min_h = SL_LAUNCHER_ITEM_H;
-    uint32_t icon_h = SL_LAUNCHER_ICON_SIZE + 2u;
-    return (icon_h > min_h) ? icon_h : min_h;
-}
-
-static uint32_t sl_launcher_width(void) {
-    if (g_launcher_count == 0u) return 0u;
-    uint32_t base = sl_launcher_collapsed_width();
-    if (g_launcher_extra_width > UINT32_MAX - base) return UINT32_MAX;
-    return base + g_launcher_extra_width;
-}
-
-static uint32_t sl_launcher_panel_height(void) {
-    if (g_launcher_count == 0u) return 0u;
-    uint32_t count = (uint32_t)sl_launcher_visible_count();
-    uint32_t item_h = sl_launcher_item_height();
-    uint32_t items_h = count * item_h;
-    if (count > 1u) {
-        items_h += (count - 1u) * SL_LAUNCHER_ITEM_GAP;
-    }
-    return SL_LAUNCHER_PAD_Y + SL_LAUNCHER_HEADER_H + 8u + items_h + SL_LAUNCHER_PAD_Y;
-}
-
-static void sl_launcher_panel_rect(const sl_ctx_t *ctx,
-                                   uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
-    uint32_t panel_w = sl_launcher_width();
-    uint32_t panel_h = sl_launcher_panel_height();
-    uint32_t panel_x = SL_LAUNCHER_MARGIN_LEFT;
-    uint32_t panel_y = 0u;
-
-    if (ctx) {
-        uint32_t available_w = (ctx->fb.width > panel_x)
-                                   ? (ctx->fb.width - panel_x)
-                                   : ctx->fb.width;
-        if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX) {
-            uint32_t arrow_space = SL_LAUNCHER_ARROW_GAP + SL_LAUNCHER_ARROW_W;
-            available_w = (available_w > arrow_space) ? (available_w - arrow_space) : 0u;
-        }
-        if (panel_x >= ctx->fb.width) panel_x = 0u;
-        if (panel_w > available_w) panel_w = available_w;
-        if (panel_h > ctx->fb.height) panel_h = ctx->fb.height;
-        if (ctx->fb.height > panel_h) {
-            panel_y = (ctx->fb.height - panel_h) / 2u;
-        }
-    }
-
-    if (x) *x = panel_x;
-    if (y) *y = panel_y;
-    if (w) *w = panel_w;
-    if (h) *h = panel_h;
-}
-
-static void sl_launcher_item_rect(const sl_ctx_t *ctx, size_t index,
-                                  uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
-    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
-    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
-    (void)panel_h;
-
-    uint32_t item_h = sl_launcher_item_height();
-    uint32_t column = (uint32_t)(index / SL_LAUNCHER_VISIBLE_MAX);
-    uint32_t row = (uint32_t)(index % SL_LAUNCHER_VISIBLE_MAX);
-    uint32_t item_x = panel_x + SL_LAUNCHER_PAD_X +
-                      column * (sl_launcher_content_width() + SL_LAUNCHER_COLUMN_GAP);
-    uint32_t item_y = panel_y + SL_LAUNCHER_PAD_Y + SL_LAUNCHER_HEADER_H + 8u +
-                      row * (item_h + SL_LAUNCHER_ITEM_GAP);
-    uint32_t item_w = sl_launcher_content_width();
-
-    if (x) *x = item_x;
-    if (y) *y = item_y;
-    if (w) *w = item_w;
-    if (h) *h = item_h;
-}
-
-static void sl_launcher_arrow_rect_for_panel(uint32_t panel_x, uint32_t panel_y,
-                                             uint32_t panel_w, uint32_t panel_h,
-                                             uint32_t *x, uint32_t *y,
-                                             uint32_t *w, uint32_t *h) {
-    uint32_t arrow_w = SL_LAUNCHER_ARROW_W;
-    uint32_t arrow_h = (panel_h < SL_LAUNCHER_ARROW_H) ? panel_h : SL_LAUNCHER_ARROW_H;
-    uint32_t arrow_x = panel_x + panel_w + SL_LAUNCHER_ARROW_GAP;
-    uint32_t arrow_y = panel_y + ((panel_h > arrow_h) ? ((panel_h - arrow_h) / 2u) : 0u);
-
-    if (x) *x = arrow_x;
-    if (y) *y = arrow_y;
-    if (w) *w = arrow_w;
-    if (h) *h = arrow_h;
-}
-
-static void sl_launcher_arrow_rect(const sl_ctx_t *ctx,
-                                   uint32_t *x, uint32_t *y,
-                                   uint32_t *w, uint32_t *h) {
-    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
-    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
-    sl_launcher_arrow_rect_for_panel(panel_x, panel_y, panel_w, panel_h, x, y, w, h);
-}
-
-static int sl_rects_intersect(uint32_t ax, uint32_t ay, uint32_t aw, uint32_t ah,
-                              uint32_t bx, uint32_t by, uint32_t bw, uint32_t bh) {
-    if (aw == 0u || ah == 0u || bw == 0u || bh == 0u) return 0;
-    return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
-}
+static void sl_launcher_try_load_icon(sl_launcher_item_t *item);
 
 static int sl_point_in_rect(uint32_t px, uint32_t py, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (w == 0u || h == 0u) return 0;
@@ -863,187 +735,460 @@ static int sl_point_in_rect(uint32_t px, uint32_t py, uint32_t x, uint32_t y, ui
     return 1;
 }
 
-static void sl_launcher_hover_label_rect(const sl_ctx_t *ctx, size_t index,
-                                         uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
-    if (!ctx || index >= g_launcher_count) {
-        if (x) *x = 0u;
-        if (y) *y = 0u;
-        if (w) *w = 0u;
-        if (h) *h = 0u;
-        return;
-    }
-
-    const sl_launcher_item_t *item = &g_launcher_items[index];
-    char label[26];
-    sl_launcher_compact_label(item->title, label, sizeof(label));
-
-    uint32_t text_w = sl_text_measure_width(label);
-    if (text_w == 0u && label[0] != '\0') text_w = (uint32_t)strlen(label) * 8u;
-    uint32_t tip_w = text_w + SL_LAUNCHER_TOOLTIP_PAD_X * 2u;
-    if (tip_w > SL_LAUNCHER_TOOLTIP_W_MAX) tip_w = SL_LAUNCHER_TOOLTIP_W_MAX;
-    if (tip_w < 48u) tip_w = 48u;
-    uint32_t tip_h = SL_LAUNCHER_TOOLTIP_H;
-
-    uint32_t item_x = 0u, item_y = 0u, item_w = 0u, item_h = 0u;
-    sl_launcher_item_rect(ctx, index, &item_x, &item_y, &item_w, &item_h);
-
-    int64_t centered_x = (int64_t)item_x + ((int64_t)item_w - (int64_t)tip_w) / 2;
-    uint32_t tip_x = (centered_x > 0) ? (uint32_t)centered_x : 0u;
-    uint32_t tip_y = (item_y > tip_h + 4u) ? (item_y - tip_h - 4u) : 0u;
-
-    if (tip_x + tip_w > ctx->fb.width) {
-        tip_x = (ctx->fb.width > tip_w + 4u) ? (ctx->fb.width - tip_w - 4u) : 0u;
-    }
-    if (tip_y + tip_h > ctx->fb.height) {
-        tip_y = (ctx->fb.height > tip_h) ? (ctx->fb.height - tip_h) : 0u;
-    }
-
-    if (x) *x = tip_x;
-    if (y) *y = tip_y;
-    if (w) *w = tip_w;
-    if (h) *h = tip_h;
-}
-
-static void sl_launcher_draw_hover_label(sl_ctx_t *ctx, size_t index) {
-    if (!ctx || index >= g_launcher_count) return;
-
-    const sl_launcher_item_t *item = &g_launcher_items[index];
-    char label[26];
-    sl_launcher_compact_label(item->title, label, sizeof(label));
-
-    uint32_t tip_x = 0u, tip_y = 0u, tip_w = 0u, tip_h = 0u;
-    sl_launcher_hover_label_rect(ctx, index, &tip_x, &tip_y, &tip_w, &tip_h);
-    if (tip_w == 0u || tip_h == 0u) return;
-
-    sl_clip_set(ctx, tip_x, tip_y, tip_w, tip_h);
-    sl_fill_rect(ctx, tip_x, tip_y, tip_w, tip_h, 20u, 25u, 34u);
-    sl_fill_rect(ctx, tip_x, tip_y, tip_w, 1u, 90u, 110u, 132u);
-    sl_fill_rect(ctx, tip_x, tip_y + tip_h - 1u, tip_w, 1u, 90u, 110u, 132u);
-    sl_fill_rect(ctx, tip_x, tip_y, 1u, tip_h, 90u, 110u, 132u);
-    sl_fill_rect(ctx, tip_x + tip_w - 1u, tip_y, 1u, tip_h, 90u, 110u, 132u);
-    uint32_t text_y = tip_y + ((tip_h > 8u) ? ((tip_h - 8u) / 2u) : 0u);
-    sl_draw_text(ctx, tip_x + SL_LAUNCHER_TOOLTIP_PAD_X, text_y, label, 242u, 244u, 247u);
-    sl_clip_clear(ctx);
-}
-
-static void sl_launcher_invalidate_overlay(sl_ctx_t *ctx,
-                                           uint32_t x, uint32_t y,
-                                           uint32_t w, uint32_t h) {
+// A context menu (opaque, old style) was or will be at this rect.
+static void sl_launcher_invalidate_overlay(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (!ctx || w == 0u || h == 0u) return;
-
-    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
-    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
-
-    int64_t x0 = (x < panel_x) ? x : panel_x;
-    int64_t y0 = (y < panel_y) ? y : panel_y;
-    int64_t x1 = (int64_t)x + w;
-    int64_t y1 = (int64_t)y + h;
-    int64_t panel_x1 = (int64_t)panel_x + panel_w;
-    int64_t panel_y1 = (int64_t)panel_y + panel_h;
-    if (panel_x1 > x1) x1 = panel_x1;
-    if (panel_y1 > y1) y1 = panel_y1;
-
-    x0 -= 2;
-    y0 -= 2;
-    x1 += 2;
-    y1 += 2;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > (int64_t)ctx->fb.width) x1 = ctx->fb.width;
-    if (y1 > (int64_t)ctx->fb.height) y1 = ctx->fb.height;
-    if (x1 <= x0 || y1 <= y0) return;
-    sl_dirty_add(ctx, (uint32_t)x0, (uint32_t)y0,
-                 (uint32_t)(x1 - x0), (uint32_t)(y1 - y0));
+    sl_dirty_add(ctx, x > 2u ? x - 2u : 0u, y > 2u ? y - 2u : 0u, w + 4u, h + 4u);
 }
 
-static int sl_launcher_hit_test(const sl_ctx_t *ctx, uint32_t x, uint32_t y, size_t *out_index) {
-    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
-    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
-    if (panel_w == 0u || panel_h == 0u) return 0;
-    if (!sl_point_in_rect(x, y, panel_x, panel_y, panel_w, panel_h)) return 0;
+// ------------------------------------------------------------------- dock
+//
+// The soft UI dock (design/starlight-soft-ui, tavole Desktop e App manager):
+// a raised pill on the left, centred, with the app tiles baked by slskin
+// (rest, under the mouse, pressed) and Impostazioni after a separator. A fin
+// grows out of its right edge while the mouse is on it; a click widens the
+// dock into the app manager, a grid of every app in the folder.
+//
+// Everything is a ready sprite: the dock and its tiles blend over the
+// wallpaper, so they are drawn only inside dirty rects.
 
-    uint32_t content_right = panel_x + panel_w;
+#define SL_DOCK_X 28u
+#define SL_DOCK_W 92u
+#define SL_DOCK_PAD 22u
+#define SL_DOCK_TILE 60u
+#define SL_DOCK_HI 66u
+#define SL_DOCK_GAP 18u
+#define SL_DOCK_SEP_W 44u
+#define SL_DOCK_MARGIN 28u          // from the screen edges, top and bottom
+#define SL_DOCK_MAX 32u
+#define SL_FIN_W 26u
+#define SL_FIN_H 146u
+#define SL_PILL_H 36u
+#define SL_PILL_PAD 18u
+// The app manager (the dock fully widened).
+#define SL_MGR_RIGHT 46u            // margin to the right edge of the screen
+#define SL_MGR_LINE_X 112u          // the vertical line, from the dock's left edge
+#define SL_MGR_GRID_X 152u          // the grid, from the dock's left edge
+#define SL_MGR_TILE 96u
+#define SL_MGR_HI 104u
+#define SL_MGR_CELL_MIN 150u
+#define SL_MGR_COLS_MAX 8u
+#define SL_MGR_ROW_H (SL_MGR_TILE + 12u + 20u + 34u)
+#define SL_DOCK_ANIM_FULL 1000u     // g_launcher_extra_width: 0 = dock, 1000 = app manager
 
+static struct {
+    uint8_t ready;
+    const slsk_entry_t *panel, *pill, *dot, *bar, *fin, *fin_close;
+    const slsk_entry_t *hi_pad_ref;   // a dock-hi tile, for its shadow margins
+    const slsk_font_t *label, *initial, *initial_big, *title;
+} g_dock;
+
+static uint8_t g_dock_hot = 0u;            // the mouse is on the dock: the fin shows
+static size_t g_dock_pressed = (size_t)-1; // item whose tile is pressed
+static uint64_t g_dock_indicators = 0u;    // running/focused bits last drawn
+static uint8_t g_dock_hover_in_mgr = 0u;   // the hovered item is a manager tile, not a dock one
+
+static int sl_dock_ready(const sl_ctx_t *ctx) {
+    if (g_dock.ready) return g_dock.ready == 1u;
+    g_dock.ready = 2u;
+    if (!ctx || !ctx->skin_loaded) return 0;
+    const sl_skin_t *s = &ctx->skin;
+    const slsk_entry_t *f1 = sl_skin_find(s, "ui-15");
+    const slsk_entry_t *f2 = sl_skin_find(s, "ui-22-mid");
+    const slsk_entry_t *f3 = sl_skin_find(s, "ui-34-light");
+    const slsk_entry_t *f4 = sl_skin_find(s, "ui-30-light");
+    g_dock.panel = sl_skin_find(s, "dock-a");
+    g_dock.pill = sl_skin_find(s, "pill-a");
+    g_dock.dot = sl_skin_find(s, "ind-dot-a");
+    g_dock.bar = sl_skin_find(s, "ind-bar-a");
+    g_dock.fin = sl_skin_find(s, "fin");
+    g_dock.fin_close = sl_skin_find(s, "fin-close");
+    g_dock.hi_pad_ref = sl_skin_find(s, "dock-hi-blank");
+    if (!f1 || !f2 || !f3 || !f4 || !g_dock.panel || !g_dock.pill || !g_dock.dot || !g_dock.bar ||
+        !g_dock.fin || !g_dock.fin_close || !g_dock.hi_pad_ref) {
+        peos_puts("starlight: skin lacks the dock\n");
+        return 0;
+    }
+    g_dock.label = sl_skin_font(s, f1);
+    g_dock.initial = sl_skin_font(s, f2);
+    g_dock.title = sl_skin_font(s, f3);
+    g_dock.initial_big = sl_skin_font(s, f4);
+    g_dock.ready = 1u;
+    return 1;
+}
+
+// The baked tile set of an app: by its title, as the icons are named.
+static const char *sl_dock_skin_key(const char *title) {
+    static const struct { const char *title, *key; } map[] = {
+        { "orbit", "orbit" }, { "voyager", "voyager" }, { "calcolatrice", "calcolatrice" },
+        { "curiosity", "curiosity" }, { "impostazioni", "impostazioni" }, { "installa peos", "installer" },
+        { "installer", "installer" }, { "musica", "musica" }, { "rete", "rete" },
+        { "monitor", "monitor" }, { "sistema", "sistema" },
+    };
+    char low[64];
+    size_t i = 0u;
+    for (; title && title[i] && i + 1u < sizeof(low); i++) {
+        char c = title[i];
+        low[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    low[i] = '\0';
+    for (size_t k = 0u; k < sizeof(map) / sizeof(map[0]); k++) {
+        if (strcmp(low, map[k].title) == 0) return map[k].key;
+    }
+    return NULL;
+}
+
+// An icon of the app's own, scaled once to size x size, premultiplied BGRA.
+static uint8_t *sl_dock_scale_icon(const sl_image_t *img, uint32_t size) {
+    if (!img || !img->data || img->width == 0u || img->height == 0u || img->channels < 3u) return NULL;
+    uint8_t *out = (uint8_t *)malloc((size_t)size * size * 4u);
+    if (!out) return NULL;
+    for (uint32_t y = 0; y < size; y++) {
+        uint32_t sy0 = y * img->height / size, sy1 = (y + 1u) * img->height / size;
+        if (sy1 <= sy0) sy1 = sy0 + 1u;
+        for (uint32_t x = 0; x < size; x++) {
+            uint32_t sx0 = x * img->width / size, sx1 = (x + 1u) * img->width / size;
+            if (sx1 <= sx0) sx1 = sx0 + 1u;
+            uint32_t acc[4] = { 0u, 0u, 0u, 0u }, n = 0u;
+            for (uint32_t sy = sy0; sy < sy1 && sy < img->height; sy++) {
+                const uint8_t *row = img->data + (size_t)sy * img->stride;
+                for (uint32_t sx = sx0; sx < sx1 && sx < img->width; sx++) {
+                    const uint8_t *p = row + (size_t)sx * img->channels;
+                    uint32_t a = img->channels >= 4u ? p[3] : 255u;
+                    acc[0] += p[2] * a;   // B
+                    acc[1] += p[1] * a;   // G
+                    acc[2] += p[0] * a;   // R
+                    acc[3] += a;
+                    n++;
+                }
+            }
+            uint8_t *d = out + ((size_t)y * size + x) * 4u;
+            d[0] = (uint8_t)(acc[0] / (255u * n));
+            d[1] = (uint8_t)(acc[1] / (255u * n));
+            d[2] = (uint8_t)(acc[2] / (255u * n));
+            d[3] = (uint8_t)(acc[3] / n);
+        }
+    }
+    return out;
+}
+
+// Resolve once: the item's tiles, or a blank tile with its icon or initial.
+static void sl_dock_resolve(const sl_ctx_t *ctx, sl_launcher_item_t *item) {
+    if (item->tiles_ready || !ctx->skin_loaded) return;
+    item->tiles_ready = 1u;
+    static const char *sets[SL_DOCK_TILE_SETS] = { "dock", "dock-hi", "dock-down", "manager", "manager-hi" };
+    const char *key = sl_dock_skin_key(item->title);
+    for (int k = 0; k < SL_DOCK_TILE_SETS; k++) {
+        char name[SLSK_NAME_MAX];
+        const slsk_entry_t *e = NULL;
+        if (key) {
+            snprintf(name, sizeof(name), "%s-%s", sets[k], key);
+            e = sl_skin_find(&ctx->skin, name);
+        }
+        if (k == 0) item->tile_custom = (uint8_t)(e != NULL);
+        if (!e) {
+            snprintf(name, sizeof(name), "%s-blank", sets[k]);
+            e = sl_skin_find(&ctx->skin, name);
+        }
+        item->tiles[k] = e;
+    }
+    if (item->tile_custom) return;
+    // No baked tile: its own icon if it has one, else its initial.
+    sl_launcher_try_load_icon(item);
+    if (item->icon_loaded && item->icon_image.data) {
+        item->own_icon[0] = sl_dock_scale_icon(&item->icon_image, 44u);
+        item->own_icon[1] = sl_dock_scale_icon(&item->icon_image, 66u);
+        sl_image_free(&item->icon_image);   // the scaled copies are all that is drawn
+    }
+    unsigned char c = (unsigned char)item->title[0];
+    item->initial[0] = (char)((c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c);
+    item->initial[1] = '\0';
+    if (c >= 0x80u) {   // keep a whole UTF-8 character
+        size_t n = 1u;
+        while (n < sizeof(item->initial) - 1u && ((unsigned char)item->title[n] & 0xC0u) == 0x80u) {
+            item->initial[n] = item->title[n];
+            n++;
+        }
+        item->initial[n] = '\0';
+    }
+}
+
+static size_t sl_dock_settings_item(void) {
     for (size_t i = 0u; i < g_launcher_count; i++) {
-        uint32_t ix, iy, iw, ih;
-        sl_launcher_item_rect(ctx, i, &ix, &iy, &iw, &ih);
-        if (ix + iw > content_right) continue;
-        if (!sl_point_in_rect(x, y, ix, iy, iw, ih)) continue;
-        if (out_index) *out_index = i;
-        return 1;
+        const char *key = sl_dock_skin_key(g_launcher_items[i].title);
+        if (key && strcmp(key, "impostazioni") == 0) return i;
+    }
+    return (size_t)-1;
+}
+
+typedef struct {
+    size_t count;                   // tiles in the dock
+    size_t item[SL_DOCK_MAX];       // launcher item of each
+    uint32_t tile_y[SL_DOCK_MAX];
+    uint8_t has_sep;
+    uint32_t sep_y;
+    uint32_t px, py, pw, ph;        // the dock
+    uint32_t ex, ey, ew, eh;        // the app manager
+    uint32_t cx, cy, cw, ch;        // now (while it widens or narrows)
+    uint32_t gx, gy, gw, cols, cell_w, grid_top;
+} sl_dock_layout_t;
+
+static uint32_t sl_lerp_u32(uint32_t a, uint32_t b, uint32_t t) {
+    int64_t v = (int64_t)a + ((int64_t)b - (int64_t)a) * (int64_t)t / (int64_t)SL_DOCK_ANIM_FULL;
+    return (uint32_t)(v < 0 ? 0 : v);
+}
+
+static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
+    peos_memset(L, 0, sizeof(*L));
+    if (!ctx || g_launcher_count == 0u) return;
+    uint32_t fh = ctx->fb.height, fw = ctx->fb.width;
+
+    // As many tiles as fit; Impostazioni always last, after a separator.
+    uint32_t room = fh > 2u * (SL_DOCK_MARGIN + SL_DOCK_PAD) + SL_DOCK_GAP + 2u
+                        ? fh - 2u * (SL_DOCK_MARGIN + SL_DOCK_PAD) - SL_DOCK_GAP - 2u
+                        : 0u;
+    size_t cap = (room + SL_DOCK_GAP) / (SL_DOCK_TILE + SL_DOCK_GAP);
+    if (cap < 1u) cap = 1u;
+    if (cap > SL_DOCK_MAX) cap = SL_DOCK_MAX;
+    size_t settings = sl_dock_settings_item();
+    size_t others = g_launcher_count - (settings != (size_t)-1 ? 1u : 0u);
+    size_t take = others;
+    if (settings != (size_t)-1 && take > cap - 1u) take = cap - 1u;
+    if (settings == (size_t)-1 && take > cap) take = cap;
+    for (size_t i = 0u; i < g_launcher_count && L->count < take; i++) {
+        if (i != settings) L->item[L->count++] = i;
+    }
+    L->has_sep = (settings != (size_t)-1 && L->count > 0u) ? 1u : 0u;
+    if (settings != (size_t)-1) L->item[L->count++] = settings;
+
+    uint32_t h = 2u * SL_DOCK_PAD + (uint32_t)L->count * SL_DOCK_TILE + (uint32_t)(L->count - 1u) * SL_DOCK_GAP;
+    if (L->has_sep) h += 2u + SL_DOCK_GAP;
+    L->px = SL_DOCK_X;
+    L->pw = SL_DOCK_W;
+    L->ph = h;
+    L->py = fh > h ? (fh - h) / 2u : 0u;
+    uint32_t y = L->py + SL_DOCK_PAD;
+    for (size_t k = 0u; k < L->count; k++) {
+        if (L->has_sep && k == L->count - 1u) {
+            L->sep_y = y;
+            y += 2u + SL_DOCK_GAP;
+        }
+        L->tile_y[k] = y;
+        y += SL_DOCK_TILE + SL_DOCK_GAP;
     }
 
+    L->ex = SL_DOCK_X;
+    L->ey = SL_DOCK_MARGIN;
+    L->ew = fw > SL_DOCK_X + SL_MGR_RIGHT + SL_DOCK_W ? fw - SL_DOCK_X - SL_MGR_RIGHT : SL_DOCK_W;
+    L->eh = fh > 2u * SL_DOCK_MARGIN ? fh - 2u * SL_DOCK_MARGIN : fh;
+    uint32_t t = g_launcher_extra_width;
+    L->cx = L->px;
+    L->cy = sl_lerp_u32(L->py, L->ey, t);
+    L->cw = sl_lerp_u32(L->pw, L->ew, t);
+    L->ch = sl_lerp_u32(L->ph, L->eh, t);
+
+    L->gx = L->ex + SL_MGR_GRID_X;
+    L->gy = L->ey + 32u;
+    L->gw = L->ex + L->ew > L->gx + 38u ? L->ex + L->ew - L->gx - 38u : 0u;
+    L->cols = (L->gw + 20u) / SL_MGR_CELL_MIN;
+    if (L->cols > SL_MGR_COLS_MAX) L->cols = SL_MGR_COLS_MAX;
+    if (L->cols < 1u) L->cols = 1u;
+    L->cell_w = L->gw / L->cols;
+    L->grid_top = L->gy + 34u + 40u;
+}
+
+static void sl_dock_tile_rect(const sl_dock_layout_t *L, size_t k, uint32_t *x, uint32_t *y) {
+    *x = L->px + (SL_DOCK_W - SL_DOCK_TILE) / 2u;
+    *y = L->tile_y[k];
+}
+
+static void sl_mgr_tile_rect(const sl_dock_layout_t *L, size_t i, uint32_t *x, uint32_t *y) {
+    uint32_t col = (uint32_t)(i % L->cols), row = (uint32_t)(i / L->cols);
+    *x = L->gx + col * L->cell_w + (L->cell_w > SL_MGR_TILE ? (L->cell_w - SL_MGR_TILE) / 2u : 0u);
+    *y = L->grid_top + row * SL_MGR_ROW_H;
+}
+
+static void sl_fin_rect(const sl_dock_layout_t *L, uint32_t *x, uint32_t *y) {
+    *x = L->cx + L->cw - 1u;
+    *y = L->cy + (L->ch > SL_FIN_H ? (L->ch - SL_FIN_H) / 2u : 0u);
+}
+
+static uint8_t sl_dock_expanded_fully(void) {
+    return g_launcher_extra_width >= SL_DOCK_ANIM_FULL ? 1u : 0u;
+}
+
+// Hit tests: a dock tile (launcher item) or a manager tile.
+static int sl_dock_hit_tile(const sl_dock_layout_t *L, uint32_t x, uint32_t y, size_t *out) {
+    for (size_t k = 0u; k < L->count; k++) {
+        uint32_t tx, ty;
+        sl_dock_tile_rect(L, k, &tx, &ty);
+        if (sl_point_in_rect(x, y, tx, ty, SL_DOCK_TILE, SL_DOCK_TILE)) {
+            *out = L->item[k];
+            return 1;
+        }
+    }
     return 0;
 }
 
-static uint32_t sl_launcher_expand_target(const sl_ctx_t *ctx) {
-    uint32_t desired = sl_launcher_desired_extra_width();
-    uint32_t base = sl_launcher_collapsed_width();
-    if (!ctx || desired == 0u) return desired;
+static int sl_mgr_hit_tile(const sl_dock_layout_t *L, uint32_t x, uint32_t y, size_t *out) {
+    if (!sl_dock_expanded_fully()) return 0;
+    for (size_t i = 0u; i < g_launcher_count; i++) {
+        uint32_t tx, ty;
+        sl_mgr_tile_rect(L, i, &tx, &ty);
+        if (ty + SL_MGR_TILE > L->ey + L->eh) break;
+        if (sl_point_in_rect(x, y, tx, ty, SL_MGR_TILE, SL_MGR_TILE + 32u)) {
+            *out = i;
+            return 1;
+        }
+    }
+    return 0;
+}
 
-    uint32_t available = (ctx->fb.width > SL_LAUNCHER_MARGIN_LEFT)
-                             ? (ctx->fb.width - SL_LAUNCHER_MARGIN_LEFT)
-                             : ctx->fb.width;
-    uint32_t arrow_space = SL_LAUNCHER_ARROW_GAP + SL_LAUNCHER_ARROW_W;
-    available = (available > arrow_space) ? (available - arrow_space) : 0u;
-    if (available <= base) return 0u;
-    uint32_t maximum = available - base;
-    return (desired < maximum) ? desired : maximum;
+static int sl_launcher_hit_test(const sl_ctx_t *ctx, uint32_t x, uint32_t y, size_t *out_index) {
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    size_t i = 0u;
+    if (sl_dock_hit_tile(&L, x, y, &i) || sl_mgr_hit_tile(&L, x, y, &i)) {
+        if (out_index) *out_index = i;
+        return 1;
+    }
+    return 0;
+}
+
+// Dirty: a sprite's whole footprint (shadow included) for a shape at x,y.
+static void sl_dirty_add_i64(const sl_ctx_t *ctx, int64_t x, int64_t y, int64_t w, int64_t h) {
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
+    if (w > 0 && h > 0) sl_dirty_add(ctx, (uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h);
+}
+
+static void sl_dirty_sprite(const sl_ctx_t *ctx, const slsk_entry_t *e, int64_t x, int64_t y, uint32_t w, uint32_t h) {
+    if (!e) return;
+    sl_dirty_add_i64(ctx, x - e->pad_l, y - e->pad_t, (int64_t)w + e->pad_l + e->pad_r, (int64_t)h + e->pad_t + e->pad_b);
+}
+
+static uint32_t sl_dock_pill_width(const sl_launcher_item_t *item) {
+    char label[26];
+    sl_launcher_compact_label(item->title, label, sizeof(label));
+    return sl_text_width(g_dock.label, label) + 2u * SL_PILL_PAD;
+}
+
+// The pill with the app's name, right of the fin, level with its tile.
+static int sl_dock_pill_rect(const sl_dock_layout_t *L, size_t item, uint32_t *x, uint32_t *y, uint32_t *w) {
+    if (item >= g_launcher_count || g_launcher_extra_width != 0u || g_dock.ready != 1u) return 0;
+    for (size_t k = 0u; k < L->count; k++) {
+        if (L->item[k] != item) continue;
+        *x = L->px + L->pw + SL_FIN_W + 10u;
+        *y = L->tile_y[k] + (SL_DOCK_TILE - SL_PILL_H) / 2u;
+        *w = sl_dock_pill_width(&g_launcher_items[item]);
+        return 1;
+    }
+    return 0;
+}
+
+// Everything a hovered or pressed item touches: its tile (grown) and its pill.
+static void sl_dock_dirty_item(const sl_ctx_t *ctx, size_t item) {
+    if (item >= g_launcher_count || g_dock.ready != 1u) return;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    for (size_t k = 0u; k < L.count; k++) {
+        if (L.item[k] != item) continue;
+        uint32_t tx, ty;
+        sl_dock_tile_rect(&L, k, &tx, &ty);
+        sl_dirty_sprite(ctx, g_dock.hi_pad_ref, (int64_t)tx - 3, (int64_t)ty - 3, SL_DOCK_HI, SL_DOCK_HI);
+        uint32_t px, py, pw;
+        if (sl_dock_pill_rect(&L, item, &px, &py, &pw)) sl_dirty_sprite(ctx, g_dock.pill, px, py, pw, SL_PILL_H);
+    }
+    if (sl_dock_expanded_fully()) {
+        uint32_t tx, ty;
+        sl_mgr_tile_rect(&L, item, &tx, &ty);
+        sl_dirty_add_i64(ctx, (int64_t)tx - 40, (int64_t)ty - 40, SL_MGR_HI + 80, SL_MGR_HI + 80);
+    }
+}
+
+static void sl_dock_dirty_fin(const sl_ctx_t *ctx, const sl_dock_layout_t *L) {
+    uint32_t fx, fy;
+    sl_fin_rect(L, &fx, &fy);
+    sl_dirty_sprite(ctx, g_dock.fin, fx, fy, SL_FIN_W, SL_FIN_H);
+}
+
+static void sl_dock_dirty_panel(const sl_ctx_t *ctx, const sl_dock_layout_t *L) {
+    sl_dirty_sprite(ctx, g_dock.panel, L->cx, L->cy, L->cw, L->ch);
+}
+
+static void sl_dock_set_hover_at(sl_ctx_t *ctx, size_t next, uint8_t in_mgr) {
+    if (next == g_launcher_hover_index && in_mgr == g_dock_hover_in_mgr) return;
+    sl_dock_dirty_item(ctx, g_launcher_hover_index);
+    sl_dock_dirty_item(ctx, next);
+    g_launcher_hover_index = next;
+    g_dock_hover_in_mgr = in_mgr;
+}
+
+static void sl_dock_set_hover(sl_ctx_t *ctx, size_t next) {
+    sl_dock_set_hover_at(ctx, next, 0u);
 }
 
 static void sl_launcher_toggle(sl_ctx_t *ctx) {
-    if (!ctx || g_launcher_count <= SL_LAUNCHER_VISIBLE_MAX) return;
-
-    if (g_launcher_hover_index != (size_t)-1) {
-        uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
-        sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
-        if (tw > 0u && th > 0u) sl_launcher_invalidate_overlay(ctx, tx, ty, tw, th);
-        g_launcher_hover_index = (size_t)-1;
-    }
-
+    if (!ctx) return;
+    sl_dock_set_hover(ctx, (size_t)-1);
     g_launcher_expanded = g_launcher_expanded ? 0u : 1u;
-    uint32_t target = g_launcher_expanded ? sl_launcher_expand_target(ctx) : 0u;
-    if (target == 0u) g_launcher_expanded = 0u;
+    uint32_t target = g_launcher_expanded ? SL_DOCK_ANIM_FULL : 0u;
     if (!sl_tween_to_u32(SL_LAUNCHER_TWEEN_ID, &g_launcher_extra_width, target,
-                         SL_LAUNCHER_ANIM_MS, SL_TWEEN_EASE_IN_OUT_CUBIC,
-                         NULL, NULL)) {
+                         SL_LAUNCHER_ANIM_MS, SL_TWEEN_EASE_IN_OUT_CUBIC, NULL, NULL)) {
         sl_tween_set_u32_immediate(&g_launcher_extra_width, target);
     }
 }
 
+// Running and focused apps, one bit each per dock tile: when they change,
+// the indicators left of the tiles are redrawn.
+static uint64_t sl_dock_indicator_bits(const sl_dock_layout_t *L) {
+    uint64_t bits = 0u;
+    for (size_t k = 0u; k < L->count && k < 32u; k++) {
+        app_instance_t *app = sl_app_host_instance_peek_at(g_launcher_items[L->item[k]].slot);
+        size_t w = app ? sl_window_index_for_task(app) : (size_t)-1;
+        if (w == (size_t)-1) continue;
+        bits |= 1ull << (2u * k);
+        if (w == g_focused_window && !g_windows[w].minimized) bits |= 2ull << (2u * k);
+    }
+    return bits;
+}
+
 static void sl_launcher_track_animation_dirty(sl_ctx_t *ctx) {
-    if (!ctx) return;
+    if (!ctx || !sl_dock_ready(ctx)) return;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
 
-    sl_window_rect_snapshot_t current = {0u, 0u, 0u, 0u, 0u};
-    sl_launcher_panel_rect(ctx, &current.x, &current.y, &current.w, &current.h);
-    current.valid = (current.w > 0u && current.h > 0u) ? 1u : 0u;
-
-    uint8_t changed = (current.valid != g_launcher_last_rect.valid) ? 1u : 0u;
-    if (!changed && current.valid) {
-        changed = (current.x != g_launcher_last_rect.x ||
-                   current.y != g_launcher_last_rect.y ||
-                   current.w != g_launcher_last_rect.w ||
-                   current.h != g_launcher_last_rect.h) ? 1u : 0u;
-    }
-    if (!changed) return;
-
-    sl_dirty_add_snapshot(ctx, &g_launcher_last_rect);
-    sl_dirty_add_snapshot(ctx, &current);
-    if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX) {
-        uint32_t ax = 0u, ay = 0u, aw = 0u, ah = 0u;
+    sl_window_rect_snapshot_t current = { L.cx, L.cy, L.cw, L.ch, (uint8_t)(L.cw && L.ch) };
+    uint8_t changed = current.valid != g_launcher_last_rect.valid ||
+                      (current.valid && (current.x != g_launcher_last_rect.x || current.y != g_launcher_last_rect.y ||
+                                         current.w != g_launcher_last_rect.w || current.h != g_launcher_last_rect.h));
+    if (changed) {
+        // Where the panel and its fin were, and where they are.
         if (g_launcher_last_rect.valid) {
-            sl_launcher_arrow_rect_for_panel(g_launcher_last_rect.x, g_launcher_last_rect.y,
-                                             g_launcher_last_rect.w, g_launcher_last_rect.h,
-                                             &ax, &ay, &aw, &ah);
-            sl_dirty_add(ctx, ax, ay, aw, ah);
+            sl_dock_layout_t old = L;
+            old.cx = g_launcher_last_rect.x;
+            old.cy = g_launcher_last_rect.y;
+            old.cw = g_launcher_last_rect.w;
+            old.ch = g_launcher_last_rect.h;
+            sl_dock_dirty_panel(ctx, &old);
+            sl_dock_dirty_fin(ctx, &old);
         }
-        if (current.valid) {
-            sl_launcher_arrow_rect_for_panel(current.x, current.y, current.w, current.h,
-                                             &ax, &ay, &aw, &ah);
-            sl_dirty_add(ctx, ax, ay, aw, ah);
-        }
+        sl_dock_dirty_panel(ctx, &L);
+        sl_dock_dirty_fin(ctx, &L);
+        g_launcher_last_rect = current;
     }
-    g_launcher_last_rect = current;
+
+    uint64_t bits = sl_dock_indicator_bits(&L);
+    if (bits != g_dock_indicators) {
+        g_dock_indicators = bits;
+        sl_dirty_add_i64(ctx, (int64_t)L.px - 4, L.py, 40, L.ph);
+    }
 }
 
 static void sl_launcher_context_close(sl_ctx_t *ctx) {
@@ -1121,12 +1266,7 @@ static void sl_launcher_context_open(sl_ctx_t *ctx, size_t item_index, uint32_t 
     g_launcher_ctx_w = menu_w;
     g_launcher_ctx_h = menu_h;
     g_launcher_ctx_hover_row = -1;
-    if (g_launcher_hover_index != (size_t)-1) {
-        uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
-        sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
-        if (tw > 0u && th > 0u) sl_launcher_invalidate_overlay(ctx, tx, ty, tw, th);
-        g_launcher_hover_index = (size_t)-1;
-    }
+    sl_dock_set_hover(ctx, (size_t)-1);
     sl_launcher_invalidate_overlay(ctx, g_launcher_ctx_x, g_launcher_ctx_y,
                                    g_launcher_ctx_w + 2u, g_launcher_ctx_h + 2u);
 }
@@ -1317,15 +1457,6 @@ static void sl_launcher_try_load_icon(sl_launcher_item_t *item) {
     }
 }
 
-static void sl_launcher_try_load_placeholder_icon(void) {
-    if (g_launcher_placeholder_loaded || g_launcher_placeholder_failed) return;
-    if (sl_decode_image_file(SL_RESOURCE_APP_PLACEHOLDER, &g_launcher_placeholder_icon)) {
-        g_launcher_placeholder_loaded = 1u;
-    } else {
-        g_launcher_placeholder_failed = 1u;
-    }
-}
-
 static void sl_launcher_pick_window_rect(const sl_ctx_t *ctx, const sl_launcher_item_t *item,
                                          uint32_t *out_x, uint32_t *out_y,
                                          uint32_t *out_w, uint32_t *out_h) {
@@ -1474,6 +1605,8 @@ static void sl_launcher_release_items(sl_launcher_item_t *items, size_t count) {
     if (!items) return;
     for (size_t i = 0u; i < count; i++) {
         if (items[i].icon_image.data) sl_image_free(&items[i].icon_image);
+        free(items[i].own_icon[0]);
+        free(items[i].own_icon[1]);
     }
     free(items);
 }
@@ -1482,6 +1615,7 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
                                          sl_scanned_app_t *entries,
                                          size_t count,
                                          uint8_t force) {
+    (void)ctx;
     if (!force && sl_launcher_catalog_matches(entries, count)) return 0;
 
     sl_launcher_item_t *next = NULL;
@@ -1509,6 +1643,12 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
         if (old_index != (size_t)-1) {
             *item = g_launcher_items[old_index];
             g_launcher_items[old_index].icon_image.data = NULL;
+            g_launcher_items[old_index].own_icon[0] = NULL;   // moved with the item
+            g_launcher_items[old_index].own_icon[1] = NULL;
+            item->tiles_ready = 0u;                            // the title may have changed
+            free(item->own_icon[0]);
+            free(item->own_icon[1]);
+            item->own_icon[0] = item->own_icon[1] = NULL;
             if (strcmp(item->icon_path, entry->app.icon) != 0) {
                 if (item->icon_image.data) sl_image_free(&item->icon_image);
                 peos_memset(&item->icon_image, 0, sizeof(item->icon_image));
@@ -1536,15 +1676,7 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
     g_launcher_ctx_open = 0u;
     g_launcher_ctx_item_index = (size_t)-1;
 
-    uint32_t target = (g_launcher_expanded && g_launcher_count > SL_LAUNCHER_VISIBLE_MAX)
-                          ? sl_launcher_expand_target(ctx)
-                          : 0u;
-    if (target == 0u) g_launcher_expanded = 0u;
-    if (!sl_tween_to_u32(SL_LAUNCHER_TWEEN_ID, &g_launcher_extra_width, target,
-                         SL_LAUNCHER_ANIM_MS, SL_TWEEN_EASE_IN_OUT_CUBIC,
-                         NULL, NULL)) {
-        sl_tween_set_u32_immediate(&g_launcher_extra_width, target);
-    }
+    g_dock_pressed = (size_t)-1;
     sl_dirty_mark_full();
     return 1;
 }
@@ -1829,11 +1961,6 @@ void sl_windows_destroy_all(void) {
     g_window_count = 0u;
     g_focused_window = (size_t)-1;
     sl_launcher_items_reset();
-    if (g_launcher_placeholder_icon.data) {
-        sl_image_free(&g_launcher_placeholder_icon);
-    }
-    g_launcher_placeholder_loaded = 0u;
-    g_launcher_placeholder_failed = 0u;
     g_launcher_hover_index = (size_t)-1;
     g_launcher_ctx_open = 0u;
     g_launcher_ctx_item_index = (size_t)-1;
@@ -1856,16 +1983,17 @@ sl_window_t* sl_window_get_focused(void) {
 }
 
 uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx) {
-    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
-    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
-    (void)panel_y;
-    (void)panel_h;
-    if (panel_w == 0u) return 0u;
-    uint32_t right = panel_x + panel_w;
-    if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX) {
-        right += SL_LAUNCHER_ARROW_GAP + SL_LAUNCHER_ARROW_W;
-    }
-    return right + SL_LAUNCHER_RESERVED_GAP;
+    (void)ctx;
+    if (g_launcher_count == 0u) return 0u;
+    // The dock and its fin; the app manager covers windows, it does not push them.
+    return SL_DOCK_X + SL_DOCK_W + SL_FIN_W + SL_LAUNCHER_RESERVED_GAP;
+}
+
+int sl_launcher_covers_point(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || g_launcher_extra_width == 0u) return 0;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    return sl_point_in_rect(x, y, L.cx, L.cy, L.cw + SL_FIN_W, L.ch);
 }
 
 int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
@@ -1888,33 +2016,48 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
         if (x < sl_launcher_reserved_left(ctx)) return 1;
     }
 
-    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
-    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
-    if (panel_w == 0u || panel_h == 0u) return 0;
-
-    if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX) {
-        uint32_t arrow_x = 0u, arrow_y = 0u, arrow_w = 0u, arrow_h = 0u;
-        sl_launcher_arrow_rect(ctx, &arrow_x, &arrow_y, &arrow_w, &arrow_h);
-        if (sl_point_in_rect(x, y, arrow_x, arrow_y, arrow_w, arrow_h)) {
-            sl_dirty_add(ctx, arrow_x, arrow_y, arrow_w, arrow_h);
-            sl_launcher_toggle(ctx);
-            sl_dirty_add(ctx, panel_x, panel_y, panel_w, panel_h);
-            sl_launcher_arrow_rect(ctx, &arrow_x, &arrow_y, &arrow_w, &arrow_h);
-            sl_dirty_add(ctx, arrow_x, arrow_y, arrow_w, arrow_h);
-            return 1;
-        }
-    }
-
-    if (x < panel_x || y < panel_y) return 0;
-    if (x >= panel_x + panel_w || y >= panel_y + panel_h) return 0;
-
+    if (!sl_dock_ready(ctx)) return 0;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    if (L.count == 0u) return 0;
+    uint32_t fx, fy;
+    sl_fin_rect(&L, &fx, &fy);
     size_t index = 0u;
-    if (sl_launcher_hit_test(ctx, x, y, &index)) {
-        (void)sl_windows_open_launcher_item(ctx, index);
+
+    if (g_launcher_extra_width != 0u) {
+        // The app manager is open (or opening): it takes every click.
+        if (sl_dock_expanded_fully()) {
+            if (sl_point_in_rect(x, y, fx, fy, SL_FIN_W, SL_FIN_H)) {
+                sl_launcher_toggle(ctx);
+                return 1;
+            }
+            if (sl_dock_hit_tile(&L, x, y, &index) || sl_mgr_hit_tile(&L, x, y, &index)) {
+                sl_launcher_toggle(ctx);
+                (void)sl_windows_open_launcher_item(ctx, index);
+                return 1;
+            }
+            if (!sl_point_in_rect(x, y, L.cx, L.cy, L.cw, L.ch)) sl_launcher_toggle(ctx);   // outside: close
+        }
+        return 1;
     }
 
-    sl_dirty_add(ctx, panel_x, panel_y, panel_w, panel_h);
-    return 1;
+    if (g_dock_hot && sl_point_in_rect(x, y, fx, fy, SL_FIN_W, SL_FIN_H)) {
+        sl_launcher_toggle(ctx);
+        return 1;
+    }
+    if (sl_dock_hit_tile(&L, x, y, &index)) {
+        g_dock_pressed = index;
+        sl_dock_dirty_item(ctx, index);
+        (void)sl_windows_open_launcher_item(ctx, index);
+        return 1;
+    }
+    return sl_point_in_rect(x, y, L.px, L.py, L.pw, L.ph) ? 1 : 0;
+}
+
+void sl_launcher_handle_release(sl_ctx_t *ctx) {
+    if (!ctx || g_dock_pressed == (size_t)-1) return;
+    sl_dock_dirty_item(ctx, g_dock_pressed);
+    g_dock_pressed = (size_t)-1;
 }
 
 int sl_launcher_handle_right_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
@@ -1932,160 +2075,189 @@ int sl_launcher_handle_right_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
 }
 
 void sl_launcher_handle_hover(sl_ctx_t *ctx) {
-    if (!ctx) return;
+    if (!ctx || !sl_dock_ready(ctx)) return;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    if (L.count == 0u) return;
+
+    // The fin shows while the mouse is on the dock or on the fin itself.
+    uint32_t fx, fy;
+    sl_fin_rect(&L, &fx, &fy);
+    uint32_t x = ctx->cursor_x, y = ctx->cursor_y;
+    uint8_t hot = (g_launcher_extra_width == 0u &&
+                   (sl_point_in_rect(x, y, L.px, L.py, L.pw, L.ph) ||
+                    (g_dock_hot && sl_point_in_rect(x, y, fx, fy, SL_FIN_W, SL_FIN_H)))) ? 1u : 0u;
+    if (hot != g_dock_hot) {
+        g_dock_hot = hot;
+        sl_dock_dirty_fin(ctx, &L);
+    }
+
     if (g_launcher_ctx_open) return;
-
-    size_t next_hover = (size_t)-1;
-    (void)sl_launcher_hit_test(ctx, ctx->cursor_x, ctx->cursor_y, &next_hover);
-    if (next_hover == g_launcher_hover_index) return;
-
-    if (g_launcher_hover_index != (size_t)-1) {
-        uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
-        sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
-        if (tw > 0u && th > 0u) sl_launcher_invalidate_overlay(ctx, tx, ty, tw, th);
-    }
-    if (next_hover != (size_t)-1) {
-        uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
-        sl_launcher_hover_label_rect(ctx, next_hover, &tx, &ty, &tw, &th);
-        if (tw > 0u && th > 0u) sl_launcher_invalidate_overlay(ctx, tx, ty, tw, th);
-    }
-
-    g_launcher_hover_index = next_hover;
+    size_t next = (size_t)-1;
+    uint8_t in_mgr = 0u;
+    if (!sl_dock_hit_tile(&L, x, y, &next)) in_mgr = (uint8_t)sl_mgr_hit_tile(&L, x, y, &next);
+    sl_dock_set_hover_at(ctx, next, in_mgr);
+    if (g_dock_pressed != (size_t)-1 && next != g_dock_pressed) sl_launcher_handle_release(ctx);
 }
 
-void sl_launcher_render(sl_ctx_t *ctx) {
-    if (!ctx) return;
-
-    uint32_t panel_x = 0u, panel_y = 0u, panel_w = 0u, panel_h = 0u;
-    sl_launcher_panel_rect(ctx, &panel_x, &panel_y, &panel_w, &panel_h);
-    if (panel_w == 0u || panel_h == 0u) return;
-
-    uint8_t needs_panel = sl_dirty_intersects_rect(panel_x, panel_y, panel_w, panel_h) ? 1u : 0u;
-    uint8_t needs_tip = 0u;
-    uint8_t needs_ctx = 0u;
-    uint8_t needs_arrow = 0u;
-    uint32_t arrow_x = 0u, arrow_y = 0u, arrow_w = 0u, arrow_h = 0u;
-    if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX) {
-        sl_launcher_arrow_rect(ctx, &arrow_x, &arrow_y, &arrow_w, &arrow_h);
-        needs_arrow = sl_dirty_intersects_rect(arrow_x, arrow_y, arrow_w, arrow_h) ? 1u : 0u;
+// Draw one tile: its state's sprite, then its own icon or initial if it has
+// no baked one. set: 0 dock, 1 dock-hi, 2 dock-down, 3 manager, 4 manager-hi.
+static void sl_dock_draw_tile(sl_ctx_t *ctx, const sl_target_t *t, sl_launcher_item_t *item, int set,
+                              int32_t x, int32_t y, uint32_t size) {
+    sl_dock_resolve(ctx, item);
+    const slsk_entry_t *e = item->tiles[set];
+    if (e) sl_draw_skin(ctx, e, x, y, size, size);
+    if (item->tile_custom) return;
+    int big = set >= 3;
+    if (item->own_icon[big]) {
+        uint32_t is = big ? 66u : 44u;
+        slsk_entry_t fake;
+        peos_memset(&fake, 0, sizeof(fake));
+        fake.kind = SLSK_KIND_PREMUL;
+        fake.width = (uint16_t)is;
+        fake.height = (uint16_t)is;
+        sl_blit_sprite(t, &fake, item->own_icon[big], x + (int32_t)(size - is) / 2, y + (int32_t)(size - is) / 2, is, is);
+        return;
     }
-    if (g_launcher_hover_index != (size_t)-1) {
-        uint32_t tx = 0u, ty = 0u, tw = 0u, th = 0u;
-        sl_launcher_hover_label_rect(ctx, g_launcher_hover_index, &tx, &ty, &tw, &th);
-        if (tw > 0u && th > 0u && sl_dirty_intersects_rect(tx, ty, tw, th)) {
-            needs_tip = 1u;
-        }
+    const slsk_font_t *f = big ? g_dock.initial_big : g_dock.initial;
+    uint32_t tw = sl_text_width(f, item->initial);
+    int32_t base = y + (int32_t)size / 2 + (f->ascent - f->descent) / 2;
+    sl_text_draw(t, f, x + ((int32_t)size - (int32_t)tw) / 2, base, item->initial, 0xEA, 0xF4, 0xFF);
+}
+
+static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_target_t *inp);
+
+static void sl_dock_draw(sl_ctx_t *ctx) {
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    if (L.count == 0u) return;
+    sl_target_t t = sl_target_from_ctx(ctx);
+    uint32_t prog = g_launcher_extra_width;
+
+    sl_draw_skin(ctx, g_dock.panel, (int32_t)L.cx, (int32_t)L.cy, L.cw, L.ch);
+    if (L.has_sep) {
+        sl_fill_rect(ctx, L.px + (SL_DOCK_W - SL_DOCK_SEP_W) / 2u, L.sep_y, SL_DOCK_SEP_W, 2u, 0xC9, 0xCD, 0xD6);
     }
-    if (g_launcher_ctx_open && g_launcher_ctx_item_index < g_launcher_count &&
-        g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u &&
-        sl_dirty_intersects_rect(g_launcher_ctx_x, g_launcher_ctx_y, g_launcher_ctx_w, g_launcher_ctx_h)) {
-        needs_ctx = 1u;
-    }
-    if (!needs_panel && !needs_tip && !needs_ctx && !needs_arrow) return;
 
-    sl_fill_rect(ctx, panel_x, panel_y, panel_w, panel_h, 16u, 20u, 26u);
-    sl_fill_rect(ctx, panel_x + panel_w - 1u, panel_y, 1u, panel_h, 54u, 65u, 78u);
-    sl_draw_text(ctx, panel_x + SL_LAUNCHER_PAD_X, panel_y + SL_LAUNCHER_PAD_Y, "APPS", 228u, 233u, 238u);
-
-    uint32_t content_right = panel_x + panel_w;
-
-    uint32_t content_w = (content_right > panel_x) ? (content_right - panel_x) : 0u;
-    sl_clip_set(ctx, panel_x, panel_y, content_w, panel_h);
-    for (size_t i = 0u; i < g_launcher_count; i++) {
+    for (size_t k = 0u; k < L.count; k++) {
+        size_t i = L.item[k];
         sl_launcher_item_t *item = &g_launcher_items[i];
-        uint32_t ix, iy, iw, ih;
-        sl_launcher_item_rect(ctx, i, &ix, &iy, &iw, &ih);
-        if (!sl_rects_intersect(ix, iy, iw, ih,
-                                panel_x, panel_y, content_w, panel_h)) {
-            continue;
-        }
-        sl_launcher_try_load_icon(item);
-
-        app_instance_t *app = sl_app_host_instance_peek_at(item->slot);
-        item->instance = app;
-        size_t win_idx = app ? sl_window_index_for_task(app) : (size_t)-1;
-        uint8_t running = (win_idx != (size_t)-1) ? 1u : 0u;
-        uint8_t focused = (running && win_idx == g_focused_window) ? 1u : 0u;
-
-        const sl_image_t *icon_img = NULL;
-        if (item->icon_loaded && item->icon_image.data) {
-            icon_img = &item->icon_image;
+        uint32_t tx, ty;
+        sl_dock_tile_rect(&L, k, &tx, &ty);
+        if (i == g_dock_pressed) {
+            sl_dock_draw_tile(ctx, &t, item, 2, (int32_t)tx, (int32_t)ty, SL_DOCK_TILE);
+        } else if (i == g_launcher_hover_index && !g_dock_hover_in_mgr) {
+            sl_dock_draw_tile(ctx, &t, item, 1, (int32_t)tx - 3, (int32_t)ty - 3, SL_DOCK_HI);
         } else {
-            sl_launcher_try_load_placeholder_icon();
-            if (g_launcher_placeholder_loaded && g_launcher_placeholder_icon.data) {
-                icon_img = &g_launcher_placeholder_icon;
-            }
+            sl_dock_draw_tile(ctx, &t, item, 0, (int32_t)tx, (int32_t)ty, SL_DOCK_TILE);
         }
-
-        uint8_t drew_icon = 0u;
-        uint32_t icon_size = SL_LAUNCHER_ICON_SIZE;
-        uint32_t icon_x = ix + ((iw > icon_size) ? ((iw - icon_size) / 2u) : 0u);
-        uint32_t icon_y = iy + ((ih > icon_size) ? ((ih - icon_size) / 2u) : 0u);
-
-        if (icon_img && icon_img->data) {
-            sl_blit_image_stretch(ctx, icon_x, icon_y, icon_size, icon_size, icon_img);
-            drew_icon = 1u;
-        }
-
-        if (running) {
-            uint32_t bar_w = focused ? 4u : 3u;
-            uint32_t bar_x = icon_x;
-            uint32_t bar_h = icon_size;
-            uint8_t gr = focused ? 188u : 173u;
-            uint8_t gg = focused ? 242u : 228u;
-            uint8_t gb = focused ? 130u : 109u;
-            sl_fill_rect(ctx, bar_x, icon_y, bar_w, bar_h, gr, gg, gb);
-        }
-
-        if (!drew_icon) {
-            char short_label[13];
-            sl_launcher_compact_label(item->title, short_label, sizeof(short_label));
-            sl_draw_text(ctx, ix + 12u, iy + 15u, short_label, 242u, 244u, 247u);
+        // Left of the tile: a dot if the app is open, a bar if it is focused.
+        uint64_t bits = g_dock_indicators >> (2u * k);
+        if (k < 32u && (bits & 1u)) {
+            uint32_t ih = (bits & 2u) ? 24u : 6u;
+            sl_draw_skin(ctx, (bits & 2u) ? g_dock.bar : g_dock.dot, (int32_t)tx - 14, (int32_t)(ty + (SL_DOCK_TILE - ih) / 2u),
+                         6u, ih);
         }
     }
-    sl_clip_clear(ctx);
 
-    if (g_launcher_count > SL_LAUNCHER_VISIBLE_MAX && arrow_w > 0u && arrow_h > 0u) {
-        sl_fill_rect(ctx, arrow_x, arrow_y, arrow_w, arrow_h, 29u, 36u, 46u);
-        sl_fill_rect(ctx, arrow_x, arrow_y, arrow_w, 1u, 71u, 85u, 101u);
-        sl_fill_rect(ctx, arrow_x, arrow_y + arrow_h - 1u, arrow_w, 1u, 71u, 85u, 101u);
+    if (prog == 0u) {
+        if (g_dock_hot) {
+            uint32_t fx, fy;
+            sl_fin_rect(&L, &fx, &fy);
+            sl_draw_skin(ctx, g_dock.fin, (int32_t)fx, (int32_t)fy, SL_FIN_W, SL_FIN_H);
+        }
+        uint32_t px, py, pw;
+        if (g_launcher_hover_index != (size_t)-1 && sl_dock_pill_rect(&L, g_launcher_hover_index, &px, &py, &pw)) {
+            char label[26];
+            sl_launcher_compact_label(g_launcher_items[g_launcher_hover_index].title, label, sizeof(label));
+            sl_draw_skin(ctx, g_dock.pill, (int32_t)px, (int32_t)py, pw, SL_PILL_H);
+            const slsk_font_t *f = g_dock.label;
+            sl_text_draw(&t, f, (int32_t)(px + SL_PILL_PAD), (int32_t)(py + SL_PILL_H / 2u) + (f->ascent - f->descent) / 2,
+                         label, 0x1A, 0x1D, 0x26);
+        }
+        return;
+    }
 
-        uint32_t cx = arrow_x + arrow_w / 2u;
-        uint32_t cy = arrow_y + arrow_h / 2u;
-        if (g_launcher_expanded) {
-            sl_fill_rect(ctx, cx + 2u, cy - 6u, 2u, 3u, 228u, 233u, 238u);
-            sl_fill_rect(ctx, cx, cy - 3u, 2u, 3u, 228u, 233u, 238u);
-            sl_fill_rect(ctx, cx - 2u, cy, 2u, 2u, 228u, 233u, 238u);
-            sl_fill_rect(ctx, cx, cy + 2u, 2u, 3u, 228u, 233u, 238u);
-            sl_fill_rect(ctx, cx + 2u, cy + 5u, 2u, 3u, 228u, 233u, 238u);
+    // The app manager, revealed by the widening panel.
+    sl_target_t in = t;
+    int64_t ix1 = (int64_t)L.cx + L.cw - 20, iy1 = (int64_t)L.cy + L.ch - 20;
+    if ((int64_t)L.cx + 20 > in.clip_x0) in.clip_x0 = (int32_t)(L.cx + 20u);
+    if ((int64_t)L.cy + 20 > in.clip_y0) in.clip_y0 = (int32_t)(L.cy + 20u);
+    if (ix1 < in.clip_x1) in.clip_x1 = (int32_t)ix1;
+    if (iy1 < in.clip_y1) in.clip_y1 = (int32_t)iy1;
+    if (in.clip_x1 > in.clip_x0 && in.clip_y1 > in.clip_y0) sl_mgr_draw(ctx, &L, &in);
+
+    if (sl_dock_expanded_fully()) {
+        uint32_t fx, fy;
+        sl_fin_rect(&L, &fx, &fy);
+        sl_draw_skin(ctx, g_dock.fin_close, (int32_t)fx, (int32_t)fy, SL_FIN_W, SL_FIN_H);
+    }
+}
+
+// The grid of every app, inside the clip `in` (the panel, less its edge).
+static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_target_t *inp) {
+    sl_dock_layout_t L = *Lp;
+    sl_target_t in = *inp;
+    uint8_t saved = ctx->clip_enabled;
+    uint32_t scx = ctx->clip_x, scy = ctx->clip_y, scw = ctx->clip_w, sch = ctx->clip_h;
+    sl_clip_set(ctx, (uint32_t)in.clip_x0, (uint32_t)in.clip_y0, (uint32_t)(in.clip_x1 - in.clip_x0),
+                (uint32_t)(in.clip_y1 - in.clip_y0));
+    if (L.ch > 76u) sl_fill_rect(ctx, L.px + SL_MGR_LINE_X, L.cy + 38u, 2u, L.ch - 76u, 0xCD, 0xD1, 0xD9);
+
+    const slsk_font_t *title = g_dock.title;
+    int32_t base = (int32_t)L.gy + title->ascent;
+    int32_t end = sl_text_draw(&in, title, (int32_t)L.gx, base, "App", 0x1A, 0x1D, 0x26);
+    char count[40];
+    snprintf(count, sizeof(count), "%u nella cartella", (unsigned)g_launcher_count);
+    sl_text_draw(&in, g_dock.label, end + 14, base, count, 0x5A, 0x60, 0x6E);
+
+    for (size_t i = 0u; i < g_launcher_count; i++) {
+        uint32_t tx, ty;
+        sl_mgr_tile_rect(&L, i, &tx, &ty);
+        if (ty + SL_MGR_TILE > L.ey + L.eh) break;
+        sl_launcher_item_t *item = &g_launcher_items[i];
+        if (i == g_launcher_hover_index && g_dock_hover_in_mgr && sl_dock_expanded_fully()) {
+            sl_dock_draw_tile(ctx, &in, item, 4, (int32_t)tx - 4, (int32_t)ty - 4, SL_MGR_HI);
         } else {
-            sl_fill_rect(ctx, cx - 3u, cy - 6u, 2u, 3u, 228u, 233u, 238u);
-            sl_fill_rect(ctx, cx - 1u, cy - 3u, 2u, 3u, 228u, 233u, 238u);
-            sl_fill_rect(ctx, cx + 1u, cy, 2u, 2u, 228u, 233u, 238u);
-            sl_fill_rect(ctx, cx - 1u, cy + 2u, 2u, 3u, 228u, 233u, 238u);
-            sl_fill_rect(ctx, cx - 3u, cy + 5u, 2u, 3u, 228u, 233u, 238u);
+            sl_dock_draw_tile(ctx, &in, item, 3, (int32_t)tx, (int32_t)ty, SL_MGR_TILE);
         }
+        char label[26];
+        sl_launcher_compact_label(item->title, label, sizeof(label));
+        uint32_t lw = sl_text_width(g_dock.label, label);
+        sl_text_draw(&in, g_dock.label, (int32_t)(tx + SL_MGR_TILE / 2u) - (int32_t)lw / 2,
+                     (int32_t)(ty + SL_MGR_TILE + 12u) + g_dock.label->ascent, label, 0x1A, 0x1D, 0x26);
     }
+    if (saved) sl_clip_set(ctx, scx, scy, scw, sch);
+    else sl_clip_clear(ctx);
+}
 
-    if (g_launcher_hover_index != (size_t)-1) {
-        sl_launcher_draw_hover_label(ctx, g_launcher_hover_index);
-    }
-
+static void sl_dock_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, void *userdata) {
+    sl_ctx_t *ctx = (sl_ctx_t *)userdata;
+    sl_clip_set(ctx, x, y, w, h);
+    sl_dock_draw(ctx);
     if (g_launcher_ctx_open && g_launcher_ctx_item_index < g_launcher_count &&
         g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u) {
         const sl_launcher_item_t *item = &g_launcher_items[g_launcher_ctx_item_index];
         uint32_t action_count = sl_launcher_context_action_count(item);
         if (action_count > 0u) {
-            sl_context_menu_draw(ctx,
-                                 g_launcher_ctx_x, g_launcher_ctx_y, g_launcher_ctx_w, g_launcher_ctx_h,
-                                 SL_LAUNCHER_CTX_ROW_H,
-                                 action_count,
-                                 0u,
-                                 action_count,
-                                 g_launcher_ctx_hover_row,
-                                 0u,
-                                 sl_launcher_context_label_cb,
-                                 (void *)item);
+            sl_context_menu_draw(ctx, g_launcher_ctx_x, g_launcher_ctx_y, g_launcher_ctx_w, g_launcher_ctx_h,
+                                 SL_LAUNCHER_CTX_ROW_H, action_count, 0u, action_count, g_launcher_ctx_hover_row,
+                                 0u, sl_launcher_context_label_cb, (void *)item);
         }
     }
+    sl_clip_clear(ctx);
+}
+
+void sl_launcher_render(sl_ctx_t *ctx) {
+    if (!ctx || !sl_dock_ready(ctx)) return;
+    // The dock blends over what is under it: drawn in each dirty rect once,
+    // never twice over the same pixels. Its whole reach: panel and shadow,
+    // fin, pill, context menu.
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    if (L.count == 0u) return;
+    uint32_t right = L.cx + L.cw + SL_FIN_W + 320u;
+    if (g_launcher_ctx_open && g_launcher_ctx_x + g_launcher_ctx_w + 4u > right) right = g_launcher_ctx_x + g_launcher_ctx_w + 4u;
+    if (right > ctx->fb.width) right = ctx->fb.width;
+    sl_dirty_for_each_intersection(0u, 0u, right, ctx->fb.height, sl_dock_draw_rect, ctx);
 }

@@ -934,7 +934,9 @@ int sl_handle_input(sl_ctx_t *ctx) {
     }
 
     uint32_t reserved_left = sl_launcher_reserved_left(ctx);
-    uint8_t mouse_on_launcher = (reserved_left > 0u && ctx->cursor_x < reserved_left) ? 1u : 0u;
+    uint8_t mouse_on_launcher = ((reserved_left > 0u && ctx->cursor_x < reserved_left) ||
+                                 sl_launcher_covers_point(ctx, ctx->cursor_x, ctx->cursor_y)) ? 1u : 0u;
+    if (input.mouse_left_released) sl_launcher_handle_release(ctx);
     uint8_t clipboard_cmds_pending = (input.clipboard_cmds != 0u) ? 1u : 0u;
 
     sl_window_t *focused = sl_window_get_focused();
