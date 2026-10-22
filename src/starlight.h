@@ -3,6 +3,7 @@
 #include "peos/peos.h"
 #include "resources.h"
 #include "render/image_decode.h"
+#include "render/skin.h"
 
 typedef struct {
     peos_fb_info_t fb;
@@ -51,6 +52,10 @@ typedef struct {
     // Background
     sl_image_t bg_image;
     uint8_t bg_loaded;
+
+    // Baked sprites and font atlases (tools/slskin), read in place.
+    sl_skin_t skin;
+    uint8_t skin_loaded;
 
     // FPS Counter
     uint64_t fps_last_ns;
