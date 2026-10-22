@@ -139,9 +139,7 @@ int main(int argc, char **argv) {
             if (app_prompt_blink_now != app_prompt_blink_prev) {
                 app_prompt_blink_prev = app_prompt_blink_now;
                 sl_window_t *focused = sl_window_get_focused();
-                if (focused) {
-                    sl_dirty_add(&ctx, focused->x, focused->y, focused->width, focused->height);
-                }
+                if (focused) sl_window_dirty_body(&ctx, focused);   // the prompt blinks in the body
             }
         }
 

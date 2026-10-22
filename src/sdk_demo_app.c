@@ -66,10 +66,7 @@ static void sdk_demo_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         if (frame->mouse_left_released) {
             uint32_t body_x = 0u;
             uint32_t body_y = 0u;
-            if (s->ui.win) {
-                body_x = s->ui.win->x + 2u;
-                body_y = s->ui.win->y + s->ui.win->top_bar_height + 1u;
-            }
+            if (s->ui.win) sl_window_body_rect(s->ui.win, &body_x, &body_y, NULL, NULL);
             uint32_t btn_x = body_x + SDK_DEMO_BTN_X;
             uint32_t btn_y = body_y + SDK_DEMO_BTN_Y;
             if (sdk_demo_point_in_rect(ctx->cursor_x, ctx->cursor_y,
@@ -109,14 +106,11 @@ static void sdk_demo_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *user
 
     sdk_demo_prepare_image(s);
 
-    uint32_t body_x = win->x + 2u;
-    uint32_t body_y = win->y + win->top_bar_height + 1u;
-    uint32_t body_w = (win->width > 4u) ? (win->width - 4u) : 0u;
-    uint32_t body_h = (win->height > (win->top_bar_height + 3u)) ? (win->height - win->top_bar_height - 3u) : 0u;
+    uint32_t body_x, body_y, body_w, body_h;
+    sl_window_body_rect(win, &body_x, &body_y, &body_w, &body_h);
     if (body_w == 0u || body_h == 0u) return;
 
     sl_fill_rect(ctx, body_x, body_y, body_w, body_h, 18u, 20u, 28u);
-    sl_draw_text(ctx, win->x + 6u, win->y + 6u, "SDK Demo", 20u, 20u, 20u);
 
     sl_ui_begin(&s->ui, ctx, win,
                 ctx->cursor_x, ctx->cursor_y,

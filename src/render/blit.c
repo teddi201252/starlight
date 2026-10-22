@@ -27,6 +27,10 @@ static void copy_row(uint8_t *dst, const uint8_t *src, uint32_t n, uint8_t bpp) 
 
 // Premultiplied source over the destination.
 static void blend_row(uint8_t *dst, const uint8_t *src, uint32_t n, uint8_t bpp) {
+    if (bpp == 4u) {
+        sl_render_blend_premul_bgra32((uint32_t *)(void *)dst, (const uint32_t *)(const void *)src, n);
+        return;
+    }
     for (uint32_t i = 0; i < n; i++, dst += bpp, src += 4) {
         uint32_t a = src[3];
         if (a == 0u) continue;
