@@ -51,6 +51,10 @@ int sl_launcher_handle_right_click(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_launcher_handle_context_hover(sl_ctx_t *ctx);
 void sl_launcher_handle_hover(sl_ctx_t *ctx);
 uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx);
+// The app manager, open or opening, covers this point (it takes the mouse).
+int sl_launcher_covers_point(const sl_ctx_t *ctx, uint32_t x, uint32_t y);
+// The left button came up: a pressed dock tile pops back.
+void sl_launcher_handle_release(sl_ctx_t *ctx);
 
 void sl_dirty_reset(void);
 void sl_dirty_mark_full(void);
