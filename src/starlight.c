@@ -1,6 +1,7 @@
 #include "starlight_internal.h"
 #include "perf_stats.h"
 #include "desktop.h"
+#include "notify.h"
 #include "render/pixels.h"
 
 #include <stdio.h>
@@ -92,6 +93,7 @@ int main(int argc, char **argv) {
     }
 
     sl_windows_create_default(&ctx);
+    sl_notify_init(&ctx);
     sl_tween_init();
 
     uint64_t next_frame_ns = 0;
@@ -145,6 +147,7 @@ int main(int argc, char **argv) {
         }
 
         sl_desk_tick(&ctx);
+        sl_notify_tick(&ctx);
 
         uint64_t composite_start_ns = peos_time_ns();
         sl_render_dirty_background(&ctx);
@@ -153,6 +156,7 @@ int main(int argc, char **argv) {
         uint64_t render_start_ns = peos_time_ns();
         sl_windows_render_all(&ctx);
         sl_launcher_render(&ctx);
+        sl_notify_render(&ctx);
         sl_clipboard_render_overlay(&ctx);
         sl_fps_tick(&ctx, &fps_value_prev);
 

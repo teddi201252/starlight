@@ -54,7 +54,8 @@ void sl_context_menu_draw(sl_ctx_t *ctx,
             uint32_t ty = iy + ((row_h > cell_h) ? ((row_h - cell_h) / 2u) : 0u);
             label[0] = '\0';
             label_fn(opt_idx, label, sizeof(label), label_userdata);
-            if (face) (void)sl_draw_text_face(ctx, face, (int32_t)(x + 12u), (int32_t)(ty + cell_h), label, 0x1A, 0x1D, 0x26);
+            const sl_ui_color_t *ink = sl_ui_runtime_color(SL_UI_COLOR_TEXT_PRIMARY);
+            if (face) (void)sl_draw_text_face(ctx, face, (int32_t)(x + 12u), (int32_t)(ty + cell_h), label, ink->r, ink->g, ink->b);
             else sl_draw_text(ctx, x + 8u, ty, label, 236u, 240u, 244u);
         }
     }

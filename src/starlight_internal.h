@@ -34,6 +34,8 @@ void sl_hw_cursor_sync_pos(sl_ctx_t *ctx);
 
 void sl_windows_create_test(sl_ctx_t *ctx, size_t count);
 void sl_windows_create_default(sl_ctx_t *ctx);
+// The theme was reloaded: every window draws its inside again.
+void sl_windows_theme_changed(sl_ctx_t *ctx);
 void sl_windows_render_all(sl_ctx_t *ctx);
 void sl_windows_focus_at_cursor(uint32_t x, uint32_t y);
 // The opaque inside of the top window on screen, which covers whatever is
@@ -55,6 +57,8 @@ uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx);
 int sl_launcher_covers_point(const sl_ctx_t *ctx, uint32_t x, uint32_t y);
 // The left button came up: a pressed dock tile pops back.
 void sl_launcher_handle_release(sl_ctx_t *ctx);
+// Redraw the dock (a badge changed).
+void sl_launcher_mark_dirty(sl_ctx_t *ctx);
 
 void sl_dirty_reset(void);
 void sl_dirty_mark_full(void);

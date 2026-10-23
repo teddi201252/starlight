@@ -3562,8 +3562,19 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     sl_window_body_rect(win, &body_x, &body_y, &body_w, &body_h);
     if (body_w == 0u || body_h == 0u) return;
 
-    // The title is the window frame's: the app draws its body only.
-    sl_fill_rect(ctx, body_x, body_y, body_w, body_h, 12u, 12u, 12u);
+    // The title is the window frame's: the app draws its body only. The
+    // terminal is always night (Soft UI plan, phase 7); SLUI apps paint
+    // their own canvas below.
+    {
+        uint32_t cw = 0u, ch = 0u;
+        if (sl_ui_ctx_mono_cell(ctx, &cw, &ch)) {
+            const sl_ui_color_t *ground = sl_ui_runtime_color(SL_UI_COLOR_BG_CANVAS);
+            sl_fill_rect(ctx, body_x, body_y, body_w, body_h, ground->r, ground->g, ground->b);
+            sl_ui_ctx_surface(ctx, SL_UI_SURF_NIGHT, body_x, body_y, body_w, body_h, 18u);
+        } else {
+            sl_fill_rect(ctx, body_x, body_y, body_w, body_h, 12u, 12u, 12u);
+        }
+    }
 
     if (shell->surface.active) {
         orbit_draw_surface(ctx, shell, body_x, body_y, body_w, body_h);
@@ -4060,12 +4071,14 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     shell->ui.clipboard_cmds = 0u;
     shell->ui.key_event_count = 0u;
 
-    uint32_t text_x = body_x + 4u;
-    uint32_t text_y = body_y + 4u;
-    uint32_t text_w = (body_w > 8u) ? (body_w - 8u) : 0u;
-    uint32_t text_h = (body_h > 8u) ? (body_h - 8u) : 0u;
     uint32_t cell_w = sl_text_cell_w();
     uint32_t cell_h = sl_text_cell_h();
+    uint8_t mono = (uint8_t)sl_ui_ctx_mono_cell(ctx, &cell_w, &cell_h);
+    uint32_t pad = mono ? 16u : 4u;   // inside the rounded night card
+    uint32_t text_x = body_x + pad;
+    uint32_t text_y = body_y + (mono ? 12u : 4u);
+    uint32_t text_w = (body_w > 2u * pad) ? (body_w - 2u * pad) : 0u;
+    uint32_t text_h = (body_h > 2u * pad) ? (body_h - 2u * pad) : 0u;
     if (cell_w == 0u) cell_w = 8u;
     if (cell_h == 0u) cell_h = 8u;
     if (text_w < cell_w || text_h < cell_h) return;
@@ -4109,8 +4122,22 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                                    win->focused && blink) ? 1u : 0u;
             (void)orbit_text_copy_row(line, line_len, cols, segment,
                                       show_cursor, row_buf, sizeof(row_buf));
-            sl_draw_text(ctx, text_x, text_y + (draw_row * cell_h),
-                         row_buf, 200u, 230u, 200u);
+            if (mono) {
+                // Night terminal: pale blue text, the prompt in the accent.
+                const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+                uint32_t ry = text_y + (draw_row * cell_h);
+                size_t plen = (segment == 0u && strncmp(row_buf, "orbit>", 6) == 0) ? 6u : 0u;
+                if (plen) {
+                    char head[8];
+                    memcpy(head, row_buf, plen);
+                    head[plen] = '\0';
+                    sl_ui_ctx_mono_text(ctx, text_x, ry, head, n->r, n->g, n->b);
+                }
+                sl_ui_ctx_mono_text(ctx, text_x + (uint32_t)plen * cell_w, ry, row_buf + plen, 0xC9u, 0xE8u, 0xFFu);
+            } else {
+                sl_draw_text(ctx, text_x, text_y + (draw_row * cell_h),
+                             row_buf, 200u, 230u, 200u);
+            }
             draw_row++;
             if (draw_row >= history_rows) break;
         }
@@ -4122,7 +4149,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         if (n > cols) {
             hint += (n - cols);
         }
-        sl_draw_text(ctx, text_x, text_y + ((history_rows - 1u) * cell_h), hint, 170u, 170u, 170u);
+        if (mono) sl_ui_ctx_mono_text(ctx, text_x, text_y + ((history_rows - 1u) * cell_h), hint, 0x9Fu, 0xB4u, 0xD8u);
+        else sl_draw_text(ctx, text_x, text_y + ((history_rows - 1u) * cell_h), hint, 170u, 170u, 170u);
     } else {
         size_t idx = shell->slot_index;
         if (idx < g_orbit_slot_count && g_orbit_app[idx]) {
