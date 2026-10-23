@@ -6,6 +6,7 @@
 #include "render/pixels.h"
 #include "perf_stats.h"
 #include "damage.h"
+#include "desktop.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -454,6 +455,7 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "clipboard_feedback_audio=1\n");
     (void)fprintf(f, "clipboard_feedback_visual=1\n");
     (void)fprintf(f, "graphics_perf=0\n");
+    (void)fprintf(f, "timezone=Europe/Rome\n");
     (void)fclose(f);
 }
 
@@ -566,6 +568,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->clipboard_feedback_audio_enabled = SL_CLIPBOARD_FEEDBACK_AUDIO_DEFAULT;
     ctx->clipboard_feedback_visual_enabled = SL_CLIPBOARD_FEEDBACK_VISUAL_DEFAULT;
     ctx->graphics_perf_enabled = 0u;
+    ctx->timezone_eu_central = 1u;
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
     if (!cfg) {
@@ -657,6 +660,8 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     if (sl_parse_u32(val, &n)) {
                         ctx->clipboard_feedback_visual_enabled = n ? 1u : 0u;
                     }
+                } else if (strcmp(key, "timezone") == 0) {
+                    ctx->timezone_eu_central = (strcmp(val, "UTC") != 0) ? 1u : 0u;
                 } else if (strcmp(key, "graphics_perf") == 0) {
                     uint32_t n = 0;
                     if (sl_parse_u32(val, &n)) ctx->graphics_perf_enabled = n ? 1u : 0u;
@@ -1080,6 +1085,7 @@ static int sl_bg_bake(sl_ctx_t *ctx) {
     ctx->clip_enabled = clip_enabled;
     ctx->bg_frame = buf;
     ctx->bg_frame_stride = stride;
+    sl_desk_build(ctx);
     // The source image is no longer needed: the baked copy replaces it.
     sl_image_free(&ctx->bg_image);
     return 1;
@@ -1087,6 +1093,7 @@ static int sl_bg_bake(sl_ctx_t *ctx) {
 
 static void sl_render_bg_rect(sl_ctx_t *ctx, const sl_rect_t *r) {
     if (!ctx || !r || !ctx->frame || !ctx->bg_frame) return;
+    const uint8_t *src = ctx->desk_frame ? ctx->desk_frame : ctx->bg_frame;
     uint32_t x0 = r->x, y0 = r->y;
     if (x0 >= ctx->fb.width || y0 >= ctx->fb.height || r->w == 0u || r->h == 0u) return;
     uint32_t w = r->w, h = r->h;
@@ -1094,7 +1101,7 @@ static void sl_render_bg_rect(sl_ctx_t *ctx, const sl_rect_t *r) {
     if (h > ctx->fb.height - y0) h = ctx->fb.height - y0;
     size_t off = (size_t)x0 * ctx->bytespp, bytes = (size_t)w * ctx->bytespp;
     for (uint32_t y = y0; y < y0 + h; y++) {
-        memcpy(ctx->frame + (size_t)y * ctx->row_stride + off, ctx->bg_frame + (size_t)y * ctx->bg_frame_stride + off, bytes);
+        memcpy(ctx->frame + (size_t)y * ctx->row_stride + off, src + (size_t)y * ctx->bg_frame_stride + off, bytes);
     }
 }
 
