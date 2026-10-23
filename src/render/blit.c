@@ -141,7 +141,7 @@ void sl_blit_sprite(const sl_target_t *t, const slsk_entry_t *e, const uint8_t *
             uint32_t hi = run_hi[k] < b ? run_hi[k] : b;
             if (hi <= lo) continue;
             uint8_t *d = drow + ((size_t)x + lo) * t->bpp;
-            if (k == 1) {
+            if (k == 1 && w != e->width) {
                 uint32_t mid = e->width - e->slice_l - e->slice_r;
                 if (mid <= 1u) {
                     fill_row(d, srow + (size_t)e->slice_l * 4u, hi - lo, t->bpp, premul);
