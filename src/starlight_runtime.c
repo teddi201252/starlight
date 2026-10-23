@@ -375,6 +375,9 @@ static int sl_theme_token_from_key(const char *key, sl_ui_color_token_t *out) {
     else if (strcmp(key, "danger") == 0) *out = SL_UI_COLOR_DANGER;
     else if (strcmp(key, "success") == 0) *out = SL_UI_COLOR_SUCCESS;
     else if (strcmp(key, "warning") == 0) *out = SL_UI_COLOR_WARNING;
+    else if (strcmp(key, "shadow_dark") == 0) *out = SL_UI_COLOR_SHADOW_DARK;
+    else if (strcmp(key, "shadow_light") == 0) *out = SL_UI_COLOR_SHADOW_LIGHT;
+    else if (strcmp(key, "neon") == 0) *out = SL_UI_COLOR_NEON;
     else return 0;
     return 1;
 }
@@ -481,24 +484,27 @@ static void sl_write_default_font_manifest(void) {
 static void sl_write_default_theme_config(void) {
     FILE *f = fopen(SL_RESOURCE_THEME_FILE, "w");
     if (!f) return;
-    (void)fprintf(f, "# Starlight UI theme\n");
+    (void)fprintf(f, "# Starlight UI theme: Soft UI, day (design/starlight-soft-ui).\n");
     (void)fprintf(f, "# Accepted value formats: #RRGGBB, RRGGBB, or R,G,B\n");
-    (void)fprintf(f, "bg_canvas=1A1A1A\n");
-    (void)fprintf(f, "bg_panel=262626\n");
-    (void)fprintf(f, "bg_control=646464\n");
-    (void)fprintf(f, "bg_control_hover=787878\n");
-    (void)fprintf(f, "bg_control_active=505050\n");
-    (void)fprintf(f, "border=828282\n");
-    (void)fprintf(f, "border_focus=78C8FF\n");
-    (void)fprintf(f, "text_primary=F0F0F0\n");
-    (void)fprintf(f, "text_secondary=B8B8B8\n");
-    (void)fprintf(f, "text_disabled=969696\n");
-    (void)fprintf(f, "accent=469650\n");
-    (void)fprintf(f, "accent_hover=5AAA64\n");
-    (void)fprintf(f, "accent_active=368440\n");
-    (void)fprintf(f, "danger=B43E3E\n");
-    (void)fprintf(f, "success=58A860\n");
-    (void)fprintf(f, "warning=BE9442\n");
+    (void)fprintf(f, "bg_canvas=E3E6EC\n");
+    (void)fprintf(f, "bg_panel=E3E6EC\n");
+    (void)fprintf(f, "bg_control=E3E6EC\n");
+    (void)fprintf(f, "bg_control_hover=EAEDF2\n");
+    (void)fprintf(f, "bg_control_active=DADEE5\n");
+    (void)fprintf(f, "border=C9CDD6\n");
+    (void)fprintf(f, "border_focus=59D0FF\n");
+    (void)fprintf(f, "text_primary=1A1D26\n");
+    (void)fprintf(f, "text_secondary=5A606E\n");
+    (void)fprintf(f, "text_disabled=9AA0AC\n");
+    (void)fprintf(f, "accent=111626\n");
+    (void)fprintf(f, "accent_hover=1C2440\n");
+    (void)fprintf(f, "accent_active=0A1126\n");
+    (void)fprintf(f, "danger=D04A55\n");
+    (void)fprintf(f, "success=2FA87A\n");
+    (void)fprintf(f, "warning=D99A2B\n");
+    (void)fprintf(f, "shadow_dark=BCC1CB\n");
+    (void)fprintf(f, "shadow_light=FFFFFF\n");
+    (void)fprintf(f, "neon=59D0FF\n");
     (void)fclose(f);
 }
 

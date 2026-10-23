@@ -262,16 +262,21 @@ static void sl_window_draw_inside(sl_window_t *win) {
         // Title centred on the bar, between the buttons and the dot.
         const slsk_font_t *f = win->focused ? g_frame.title_active : g_frame.title_inactive;
         uint32_t tw = sl_text_width(f, title);
-        uint32_t left = SL_WIN_PAD_X + 3u * SL_WIN_BTN + 2u * SL_WIN_BTN_GAP + 14u;
-        uint32_t room = win->width > 2u * left ? win->width - 2u * left : 0u;
-        if (tw <= room) {
-            int32_t tx = (int32_t)(win->x + (win->width - tw) / 2u);
+        // Centred on the window if it fits there, else centred between the
+        // buttons and the dot; cut if even that is too narrow.
+        uint32_t left = SL_WIN_PAD_X + 3u * SL_WIN_BTN + 2u * SL_WIN_BTN_GAP + 12u;
+        uint32_t right = SL_WIN_PAD_X + 10u + 12u;
+        if (win->width > left + right) {
+            uint32_t room = win->width - left - right;
+            uint32_t centred = (win->width > tw) ? (win->width - tw) / 2u : 0u;
+            uint32_t off = centred;
+            if (off < left || off + tw > win->width - right) off = left + (room > tw ? (room - tw) / 2u : 0u);
             int32_t base = (int32_t)(win->y + SL_WIN_PAD_TOP + SL_WIN_BAR_H / 2u) + (f->ascent - f->descent) / 2;
             sl_target_t tt = t;
             if ((int64_t)win->x + left > tt.clip_x0) tt.clip_x0 = (int32_t)(win->x + left);
-            if ((int64_t)win->x + win->width - left < tt.clip_x1) tt.clip_x1 = (int32_t)(win->x + win->width - left);
-            if (win->focused) sl_text_draw(&tt, f, tx, base, title, SL_WIN_INK);
-            else sl_text_draw(&tt, f, tx, base, title, SL_WIN_MUTED);
+            if ((int64_t)win->x + win->width - right < tt.clip_x1) tt.clip_x1 = (int32_t)(win->x + win->width - right);
+            if (win->focused) sl_text_draw(&tt, f, (int32_t)(win->x + off), base, title, SL_WIN_INK);
+            else sl_text_draw(&tt, f, (int32_t)(win->x + off), base, title, SL_WIN_MUTED);
         }
         if (win->focused) {
             const slsk_entry_t *d = g_frame.dot_neon;
