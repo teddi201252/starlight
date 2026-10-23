@@ -1,5 +1,6 @@
 #include "starlight_internal.h"
 #include "perf_stats.h"
+#include "desktop.h"
 #include "render/pixels.h"
 
 #include <stdio.h>
@@ -143,6 +144,8 @@ int main(int argc, char **argv) {
             }
         }
 
+        sl_desk_tick(&ctx);
+
         uint64_t composite_start_ns = peos_time_ns();
         sl_render_dirty_background(&ctx);
         sl_perf_add_composite(peos_time_ns() - composite_start_ns);
@@ -172,6 +175,7 @@ int main(int argc, char **argv) {
     sl_tween_reset();
     sl_clipboard_shutdown();
     if (ctx.skin_loaded) sl_skin_free(&ctx.skin);
+    sl_desk_free(&ctx);
     free(ctx.bg_frame);
     if (ctx.bg_loaded) {
         sl_image_free(&ctx.bg_image);

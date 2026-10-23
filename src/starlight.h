@@ -48,6 +48,7 @@ typedef struct {
     uint8_t clipboard_feedback_audio_enabled;
     uint8_t clipboard_feedback_visual_enabled;
     uint8_t graphics_perf_enabled;
+    uint8_t timezone_eu_central;   // timezone=Europe/Rome (CET/CEST), else UTC
 
     // Background
     sl_image_t bg_image;
@@ -56,6 +57,9 @@ typedef struct {
     // restoring it under a dirty rect is a row copy.
     uint8_t *bg_frame;
     size_t bg_frame_stride;
+    // The desktop layer (desktop.c): bg_frame with the bar and the widgets,
+    // same stride. The background is restored from it when it exists.
+    uint8_t *desk_frame;
 
     // Baked sprites and font atlases (tools/slskin), read in place.
     sl_skin_t skin;
