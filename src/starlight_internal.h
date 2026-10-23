@@ -42,6 +42,8 @@ void sl_windows_focus_at_cursor(uint32_t x, uint32_t y);
 // under it this frame (none while it fades or if every window is minimized).
 int sl_windows_top_opaque_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+int sl_windows_title_button_held(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+int sl_windows_title_button_release(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_windows_destroy_all(void);
 void sl_windows_mark_focused_activity(void);
 int sl_windows_open_app_bundle_path(sl_ctx_t *ctx, const char *bundle_path);
@@ -49,6 +51,9 @@ void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y);
 sl_window_t* sl_window_get_focused(void);
 void sl_launcher_render(sl_ctx_t *ctx);
 int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+// The app manager is open: keys type in its search field.
+uint8_t sl_launcher_manager_open(void);
+void sl_launcher_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev, uint8_t caps_lock_on);
 int sl_launcher_handle_right_click(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_launcher_handle_context_hover(sl_ctx_t *ctx);
 void sl_launcher_handle_hover(sl_ctx_t *ctx);

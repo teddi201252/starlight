@@ -14,3 +14,8 @@ void sl_desk_build(sl_ctx_t *ctx);
 // Once a frame: redraws the regions whose data changed and marks them dirty.
 void sl_desk_tick(sl_ctx_t *ctx);
 void sl_desk_free(sl_ctx_t *ctx);
+// The local time as "hh:mm" (the timezone of settings.cfg).
+void sl_desk_local_hhmm(const sl_ctx_t *ctx, char *out, size_t cap);
+
+// The top bar's height: the time at its right opens the notification centre.
+#define SL_DESK_BAR_HEIGHT 44u

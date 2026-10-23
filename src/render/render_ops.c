@@ -16,6 +16,14 @@ void sl_render_fill_bgra32(uint32_t *dst, size_t pixel_count, uint32_t packed_bg
     if (!dst) return;
 #if SL_RENDER_HAS_SSE2
     __m128i value = _mm_set1_epi32((int)packed_bgra);
+    while (pixel_count >= 16u) {   // four stores a turn: fewer turns under emulation too
+        _mm_storeu_si128((__m128i *)(void *)dst, value);
+        _mm_storeu_si128((__m128i *)(void *)(dst + 4), value);
+        _mm_storeu_si128((__m128i *)(void *)(dst + 8), value);
+        _mm_storeu_si128((__m128i *)(void *)(dst + 12), value);
+        dst += 16;
+        pixel_count -= 16u;
+    }
     while (pixel_count >= 4u) {
         _mm_storeu_si128((__m128i *)(void *)dst, value);
         dst += 4;
@@ -161,6 +169,38 @@ void sl_render_blend_premul_bgra32(uint32_t *dst, const uint32_t *src, size_t pi
 #endif
     while (pixel_count-- > 0u) {
         *dst = sl_render_premul_px(*src++, *dst);
+        dst++;
+    }
+}
+
+void sl_render_blend_premul_const_bgra32(uint32_t *dst, uint32_t premul_px, size_t pixel_count) {
+    if (!dst) return;
+    uint32_t a = premul_px >> 24;
+    if (a == 0u) return;
+    if (a == 255u) {
+        sl_render_fill_bgra32(dst, pixel_count, premul_px);
+        return;
+    }
+#if SL_RENDER_HAS_SSE2
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i rounding = _mm_set1_epi16(128);
+    const __m128i inv = _mm_set1_epi16((short)(255u - a));
+    const __m128i s = _mm_set1_epi32((int)premul_px);
+    const __m128i alpha_out = _mm_set1_epi32((int)0xFF000000u);
+    while (pixel_count >= 4u) {
+        __m128i d = _mm_loadu_si128((const __m128i *)(const void *)dst);
+        __m128i t_lo = _mm_add_epi16(_mm_mullo_epi16(_mm_unpacklo_epi8(d, zero), inv), rounding);
+        __m128i t_hi = _mm_add_epi16(_mm_mullo_epi16(_mm_unpackhi_epi8(d, zero), inv), rounding);
+        t_lo = _mm_srli_epi16(_mm_add_epi16(t_lo, _mm_srli_epi16(t_lo, 8)), 8);
+        t_hi = _mm_srli_epi16(_mm_add_epi16(t_hi, _mm_srli_epi16(t_hi, 8)), 8);
+        __m128i out = _mm_or_si128(_mm_add_epi8(s, _mm_packus_epi16(t_lo, t_hi)), alpha_out);
+        _mm_storeu_si128((__m128i *)(void *)dst, out);
+        dst += 4;
+        pixel_count -= 4u;
+    }
+#endif
+    while (pixel_count-- > 0u) {
+        *dst = sl_render_premul_px(premul_px, *dst);
         dst++;
     }
 }

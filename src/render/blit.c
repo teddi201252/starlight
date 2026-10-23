@@ -52,6 +52,12 @@ static void blend_row(uint8_t *dst, const uint8_t *src, uint32_t n, uint8_t bpp)
 static void fill_row(uint8_t *dst, const uint8_t *px, uint32_t n, uint8_t bpp, int premul) {
     if (premul && px[3] != 255u) {
         if (px[3] == 0u) return;
+        if (bpp == 4u) {   // the shadow above and below a window: one colour across
+            uint32_t v;
+            memcpy(&v, px, 4);
+            sl_render_blend_premul_const_bgra32((uint32_t *)(void *)dst, v, n);
+            return;
+        }
         for (uint32_t i = 0; i < n; i++, dst += bpp) blend_row(dst, px, 1u, bpp);
         return;
     }

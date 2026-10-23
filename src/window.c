@@ -3,6 +3,7 @@
 #include "starlight_internal.h"
 #include "app_host.h"
 #include "ui_sdk.h"
+#include "perf_stats.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -290,7 +291,9 @@ static void sl_window_draw_inside(sl_window_t *win) {
     }
 
     if (win->task && win->task->on_render) {
+        uint64_t t0 = peos_time_ns();
         win->task->on_render(ctx, win, win->task->userdata);
+        sl_perf_add_app(peos_time_ns() - t0);
     }
 }
 
@@ -444,6 +447,7 @@ int sl_window_render(sl_window_t *win) {
     } else {
         uint8_t cache_was_valid = win->cache_valid;
         sl_window_draw_inside(win);
+        uint64_t c0 = peos_time_ns();
         sl_win_rect_t in = sl_window_inner_rect(win);
         uint32_t rx = 0u, ry = 0u, rw = 0u, rh = 0u;
         if (cache_was_valid && !win->force_redraw && !fading && win->task && win->task->userdata &&
@@ -452,6 +456,7 @@ int sl_window_render(sl_window_t *win) {
         } else {
             win->cache_valid = (uint8_t)sl_window_cache_copy(win, in.x, in.y, in.w, in.h, 1);
         }
+        sl_perf_add_cache(peos_time_ns() - c0);
         win->force_redraw = 0u;
         uint64_t interval = target_fps > 0u ? 1000000000ull / (uint64_t)target_fps : 0ull;
         win->next_render_ns = now + (interval ? interval : 1ull);

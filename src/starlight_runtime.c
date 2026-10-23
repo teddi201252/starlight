@@ -7,6 +7,7 @@
 #include "perf_stats.h"
 #include "damage.h"
 #include "desktop.h"
+#include "notify.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -958,6 +959,10 @@ int sl_handle_input(sl_ctx_t *ctx) {
     uint8_t mouse_on_launcher = ((reserved_left > 0u && ctx->cursor_x < reserved_left) ||
                                  sl_launcher_covers_point(ctx, ctx->cursor_x, ctx->cursor_y)) ? 1u : 0u;
     if (input.mouse_left_released) sl_launcher_handle_release(ctx);
+    // A title bar button held down owns the mouse until it is let go.
+    if (input.mouse_left_released && sl_windows_title_button_release(ctx, ctx->cursor_x, ctx->cursor_y)) return 0;
+    if (input.mouse_moved && (input.mouse_buttons & 0x01u) &&
+        sl_windows_title_button_held(ctx, ctx->cursor_x, ctx->cursor_y)) return 0;
     uint8_t clipboard_cmds_pending = (input.clipboard_cmds != 0u) ? 1u : 0u;
 
     sl_window_t *focused = sl_window_get_focused();
@@ -986,6 +991,18 @@ int sl_handle_input(sl_ctx_t *ctx) {
         }
     }
 
+    for (uint8_t i = 0u; i < input.key_event_count; i++) {   // Esc closes the notification centre
+        if (sl_notify_handle_key(ctx, &input.key_events[i])) {
+            input.key_events[i] = input.key_events[--input.key_event_count];
+            i--;
+        }
+    }
+
+    if (input.key_event_count && sl_launcher_manager_open()) {   // the app manager's search takes the keys
+        for (uint8_t i = 0u; i < input.key_event_count; i++) sl_launcher_handle_key(ctx, &input.key_events[i], input.caps_lock_on);
+        input.key_event_count = 0u;
+    }
+
     if (focused && focused->task && focused->task->on_input && input.key_event_count) {
         for (uint8_t i = 0u; i < input.key_event_count; i++) {
             focused->task->on_input(ctx, &input, &input.key_events[i], focused->task->userdata);
@@ -1008,6 +1025,11 @@ int sl_handle_input(sl_ctx_t *ctx) {
         // flat). Windows are reordered on focus, so remember the task.
         const app_instance_t *prev_task = focused ? focused->task : NULL;
         sl_win_rect_t prev_outer = focused ? sl_window_outer_rect(focused) : (sl_win_rect_t){ 0, 0, 0u, 0u };
+
+        if (sl_notify_handle_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
+            sl_drag_stop();
+            return 0;
+        }
 
         if (sl_launcher_handle_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
             sl_drag_stop();
