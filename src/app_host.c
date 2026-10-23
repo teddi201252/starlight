@@ -73,6 +73,7 @@ static size_t g_orbit_xmap_cap = 0u;
 #define ORBIT_SLUI_CAP_CONTEXT_MENU       (1u << 28)
 #define ORBIT_SLUI_CAP_EVENT_CONTEXT_MENU (1u << 29)
 #define ORBIT_SLUI_CAP_FOCUS              (1u << 30)
+#define ORBIT_SLUI_CAP_SOFT_CONTROLS      (1u << 31)
 
 #define ORBIT_UI_DOUBLE_CLICK_MS_DEFAULT 300u
 #define ORBIT_UI_DOUBLE_CLICK_MS_MIN      80u
@@ -125,6 +126,8 @@ typedef enum {
     ORBIT_UI_CMD_PANEL = 20,
     ORBIT_UI_CMD_FONT_SIZE = 21,
     ORBIT_UI_CMD_CONTEXT_MENU = 22,
+    ORBIT_UI_CMD_SEGMENT = 23,
+    ORBIT_UI_CMD_SWATCH = 24,
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -148,6 +151,7 @@ typedef struct {
     uint8_t image_loaded;
     uint8_t image_failed;
     uint8_t enabled;
+    uint8_t primary;            // BUTTONP: the night button of its group
 } orbit_ui_cmd_t;
 
 typedef struct {
@@ -179,6 +183,7 @@ typedef struct {
     uint8_t cmd_limit_reached;
     uint8_t hello_seen;
     uint8_t host_hello_sent;
+    uint32_t sent_body_w, sent_body_h;   // the body size the app was last told (RESIZE)
     uint8_t client_proto_ver;
     uint32_t client_caps_mask;
     uint8_t key_down[256];
@@ -575,6 +580,7 @@ static uint32_t orbit_parse_cap_token(const char *tok, size_t tok_len) {
     if (orbit_token_is(tok, tok_len, "CONTEXT_MENU")) return ORBIT_SLUI_CAP_CONTEXT_MENU;
     if (orbit_token_is(tok, tok_len, "EVENT_CONTEXT_MENU")) return ORBIT_SLUI_CAP_EVENT_CONTEXT_MENU;
     if (orbit_token_is(tok, tok_len, "FOCUS")) return ORBIT_SLUI_CAP_FOCUS;
+    if (orbit_token_is(tok, tok_len, "SOFT_CONTROLS")) return ORBIT_SLUI_CAP_SOFT_CONTROLS;
     return 0u;
 }
 
@@ -616,7 +622,7 @@ static void orbit_send_ui_error(orbit_shell_t *shell, uint32_t code, const char 
 static void orbit_send_host_hello(orbit_shell_t *shell) {
     if (!shell || shell->child_stdin_fd < 0) return;
     const char *msg =
-        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT FONT_SIZE EVENT_DOUBLE_CLICK CONTEXT_MENU EVENT_CONTEXT_MENU FOCUS\n";
+        "@SLUI HOST HELLO 1 CAPS LABEL BUTTON SLIDER IMAGE_FILE TOGGLE SELECT TEXT_INPUT TEXT_AREA SCROLL_V CLIP SEPARATOR LIST_ITEM DISABLED_STATE RECT RECT_ALPHA EVENT_BUTTON EVENT_SLIDER EVENT_TOGGLE EVENT_SELECT EVENT_TEXT_INPUT EVENT_TEXT_AREA EVENT_SCROLL_V EVENT_KEYBOARD THEME_TOKENS GRADIENT_2D PANEL_INPUT FONT_SIZE EVENT_DOUBLE_CLICK CONTEXT_MENU EVENT_CONTEXT_MENU FOCUS SOFT_CONTROLS\n";
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, peos_strlen(msg));
     shell->ui.host_hello_sent = 1u;
 }
@@ -1130,6 +1136,25 @@ static void orbit_send_ui_event_select(orbit_shell_t *shell, uint32_t id, uint32
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
 }
 
+// RESIZE w h: the app's body is this big now; it lays itself out again.
+static void orbit_send_ui_event_resize(orbit_shell_t *shell, uint32_t w, uint32_t h) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[64];
+    size_t n = 0u;
+    const char *prefix = "@SLUI EVENT RESIZE ";
+    while (prefix[n] && n + 1u < sizeof(msg)) msg[n] = prefix[n], n++;
+    uint32_t v[2] = { w, h };
+    for (int k = 0; k < 2; k++) {
+        char rev[16];
+        size_t r = 0u;
+        uint32_t x = v[k];
+        do { rev[r++] = (char)('0' + (x % 10u)); x /= 10u; } while (x > 0u && r < sizeof(rev));
+        while (r > 0u && n + 1u < sizeof(msg)) msg[n++] = rev[--r];
+        if (n + 1u < sizeof(msg)) msg[n++] = k == 0 ? ' ' : '\n';
+    }
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
+}
+
 static void orbit_send_ui_event_context_menu(orbit_shell_t *shell, uint32_t id, uint32_t value) {
     if (!shell || shell->child_stdin_fd < 0) return;
     char msg[64];
@@ -1593,10 +1618,12 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         return 1;
     }
 
-    if (orbit_token_is(cmd_tok, cmd_len, "BUTTON") || orbit_token_is(cmd_tok, cmd_len, "BUTTONX")) {
+    if (orbit_token_is(cmd_tok, cmd_len, "BUTTON") || orbit_token_is(cmd_tok, cmd_len, "BUTTONX") ||
+        orbit_token_is(cmd_tok, cmd_len, "BUTTONP")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_BUTTON);
         if (!cmd) return 1;
-        uint8_t with_state = orbit_token_is(cmd_tok, cmd_len, "BUTTONX") ? 1u : 0u;
+        cmd->primary = orbit_token_is(cmd_tok, cmd_len, "BUTTONP") ? 1u : 0u;
+        uint8_t with_state = (orbit_token_is(cmd_tok, cmd_len, "BUTTONX") || cmd->primary) ? 1u : 0u;
         if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
             !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
             !orbit_parse_u32(&p, &cmd->h)) {
@@ -1699,6 +1726,50 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         }
         if (!cmd->text || cmd->text[0] == '\0') {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_SELECT, "select_missing_options");
+        }
+        return 1;
+    }
+
+    // SWATCH id x y size r g b chosen enabled: answered with BUTTON events.
+    if (orbit_token_is(cmd_tok, cmd_len, "SWATCH")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_SWATCH);
+        if (!cmd) return 1;
+        uint32_t r = 0u, g = 0u, b = 0u, enabled = 1u;
+        if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
+            !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
+            !orbit_parse_u32(&p, &r) || !orbit_parse_u32(&p, &g) || !orbit_parse_u32(&p, &b) ||
+            !orbit_parse_u32(&p, &cmd->value) || !orbit_parse_u32(&p, &enabled)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_BUTTON, "swatch_invalid_args");
+            cmd->type = ORBIT_UI_CMD_NONE;
+            return 1;
+        }
+        cmd->h = cmd->w;
+        cmd->r = (uint8_t)r;
+        cmd->g = (uint8_t)g;
+        cmd->b = (uint8_t)b;
+        cmd->enabled = enabled ? 1u : 0u;
+        return 1;
+    }
+
+    // SEGMENT id x y w h count selected enabled A|B|C: answered with SELECT events.
+    if (orbit_token_is(cmd_tok, cmd_len, "SEGMENT")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_SEGMENT);
+        if (!cmd) return 1;
+        uint32_t enabled = 1u;
+        if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->x) ||
+            !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
+            !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->min_v) ||
+            !orbit_parse_u32(&p, &cmd->value) || !orbit_parse_u32(&p, &enabled) || cmd->min_v == 0u) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_SELECT, "segment_invalid_args");
+            cmd->type = ORBIT_UI_CMD_NONE;
+            return 1;
+        }
+        if (cmd->value >= cmd->min_v) cmd->value = 0u;
+        cmd->enabled = enabled ? 1u : 0u;
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "segment_text_alloc_failed");
+            return 1;
         }
         return 1;
     }
@@ -2688,6 +2759,8 @@ static int orbit_ui_cmd_is_interactive(const orbit_ui_cmd_t *cmd) {
         case ORBIT_UI_CMD_SLIDER:
         case ORBIT_UI_CMD_TOGGLE:
         case ORBIT_UI_CMD_SELECT:
+        case ORBIT_UI_CMD_SEGMENT:
+        case ORBIT_UI_CMD_SWATCH:
         case ORBIT_UI_CMD_TEXT_INPUT:
         case ORBIT_UI_CMD_TEXT_AREA:
         case ORBIT_UI_CMD_SCROLL_V:
@@ -2706,6 +2779,8 @@ static int orbit_ui_cmd_is_focusable(const orbit_ui_cmd_t *cmd) {
         case ORBIT_UI_CMD_SLIDER:
         case ORBIT_UI_CMD_TOGGLE:
         case ORBIT_UI_CMD_SELECT:
+        case ORBIT_UI_CMD_SEGMENT:
+        case ORBIT_UI_CMD_SWATCH:
         case ORBIT_UI_CMD_TEXT_INPUT:
         case ORBIT_UI_CMD_TEXT_AREA:
         case ORBIT_UI_CMD_SCROLL_V:
@@ -2959,6 +3034,7 @@ static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
             if (cmd->type != ORBIT_UI_CMD_SLIDER &&
                 cmd->type != ORBIT_UI_CMD_SCROLL_V &&
                 cmd->type != ORBIT_UI_CMD_SELECT &&
+                cmd->type != ORBIT_UI_CMD_SEGMENT &&
                 cmd->type != ORBIT_UI_CMD_TEXT_INPUT &&
                 cmd->type != ORBIT_UI_CMD_TEXT_AREA) {
                 uint32_t next_id = 0u;
@@ -3014,7 +3090,8 @@ static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
 
         if (code == PEOS_KEY_ENTER || code == PEOS_KEY_SPACE) {
             shell->ui.keyboard_nav_active = 1u;
-            if (cmd->type == ORBIT_UI_CMD_BUTTON || cmd->type == ORBIT_UI_CMD_LIST_ITEM) {
+            if (cmd->type == ORBIT_UI_CMD_BUTTON || cmd->type == ORBIT_UI_CMD_LIST_ITEM ||
+                cmd->type == ORBIT_UI_CMD_SWATCH) {
                 orbit_send_ui_event_button(shell, cmd->id);
             } else if (cmd->type == ORBIT_UI_CMD_TOGGLE) {
                 cmd->value = cmd->value ? 0u : 1u;
@@ -3070,6 +3147,15 @@ static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
             } else if (code == PEOS_KEY_DOWN_NORM || code == PEOS_KEY_RIGHT_NORM) {
                 if (cmd->value + 1u < cmd->min_v) cmd->value++;
             }
+            if (cmd->value != prev) orbit_send_ui_event_select(shell, cmd->id, cmd->value);
+            continue;
+        }
+
+        if (cmd->type == ORBIT_UI_CMD_SEGMENT) {   // left and right move the choice
+            shell->ui.keyboard_nav_active = 1u;
+            uint32_t prev = cmd->value;
+            if (code == PEOS_KEY_LEFT_NORM && cmd->value > 0u) cmd->value--;
+            else if (code == PEOS_KEY_RIGHT_NORM && cmd->value + 1u < cmd->min_v) cmd->value++;
             if (cmd->value != prev) orbit_send_ui_event_select(shell, cmd->id, cmd->value);
             continue;
         }
@@ -3564,8 +3650,10 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
     // The title is the window frame's: the app draws its body only. The
     // terminal is always night (Soft UI plan, phase 7); SLUI apps paint
-    // their own canvas below.
-    {
+    // all of their body themselves, so nothing is drawn under them (it was
+    // a whole night surface blended at every redraw).
+    uint8_t own_body = (!shell->surface.active && shell->ui.enabled && shell->ui.committed) ? 1u : 0u;
+    if (!own_body) {
         uint32_t cw = 0u, ch = 0u;
         if (sl_ui_ctx_mono_cell(ctx, &cw, &ch)) {
             const sl_ui_color_t *ground = sl_ui_runtime_color(SL_UI_COLOR_BG_CANVAS);
@@ -3579,6 +3667,14 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     if (shell->surface.active) {
         orbit_draw_surface(ctx, shell, body_x, body_y, body_w, body_h);
         return;
+    }
+
+    // A SLUI app learns its body's size, and again whenever it changes
+    // (maximized, restored): it lays its controls out for it.
+    if (shell->ui.enabled && (shell->ui.sent_body_w != body_w || shell->ui.sent_body_h != body_h)) {
+        shell->ui.sent_body_w = body_w;
+        shell->ui.sent_body_h = body_h;
+        orbit_send_ui_event_resize(shell, body_w, body_h);
     }
 
     if (shell->ui.enabled && shell->ui.committed) {
@@ -3791,8 +3887,19 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 sl_ui_label(&shell->ui.ui, x, y, cmd->text, (sl_ui_color_token_t)cmd->value);
             } else if (cmd->type == ORBIT_UI_CMD_BUTTON) {
                 uint8_t en = cmd_enabled;
-                if (sl_ui_button_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, en)) {
+                uint8_t clicked = cmd->primary
+                    ? sl_ui_button_primary_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, en)
+                    : sl_ui_button_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, en);
+                if (clicked) orbit_emit_click_events(shell, cmd->id, 1u);
+            } else if (cmd->type == ORBIT_UI_CMD_SWATCH) {
+                if (sl_ui_swatch_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->r, cmd->g, cmd->b,
+                                       cmd->value ? 1u : 0u, cmd_enabled)) {
                     orbit_emit_click_events(shell, cmd->id, 1u);
+                }
+            } else if (cmd->type == ORBIT_UI_CMD_SEGMENT) {
+                if (sl_ui_segment_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->min_v, &cmd->value,
+                                        cmd->text ? cmd->text : "", cmd_enabled)) {
+                    orbit_send_ui_event_select(shell, cmd->id, cmd->value);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_SLIDER) {
                 uint32_t prev = cmd->value;

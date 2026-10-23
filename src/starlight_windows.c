@@ -8,6 +8,7 @@
 #include "window.h"
 #include "peos/capability_parse.h"
 #include "peos/path_scope_parse.h"
+#include "keyboard_layout.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -59,7 +60,12 @@ typedef struct {
     uint64_t caps_mask;
     peos_path_grant_t paths[PEOS_PATH_MAX_GRANTS];
     uint32_t path_count;
+    uint8_t category;               // SL_CAT_*: app.ini category=sistema|strumenti|svago
 } sl_app_bundle_t;
+
+// The app manager's filters (tavola App manager aperto): every app, or one
+// category.
+enum { SL_CAT_ALL = 0, SL_CAT_SYSTEM = 1, SL_CAT_TOOLS = 2, SL_CAT_FUN = 3, SL_CAT_COUNT = 4 };
 
 typedef struct {
     sl_app_bundle_t app;
@@ -77,14 +83,16 @@ typedef struct {
     uint8_t icon_failed;
     uint32_t width;
     uint32_t height;
+    uint8_t category;               // SL_CAT_*
     uint64_t signature;
     app_instance_t *instance;
     // Dock and app manager tiles (render/slsk.h), resolved on first draw.
 #define SL_DOCK_TILE_SETS 5
     uint8_t tiles_ready;
     uint32_t tiles_version;         // theme version the tiles were resolved for
-    uint8_t tile_custom;            // a baked tile of its own, not the blank one
+    uint8_t tile_custom;            // a baked icon of its own (tiles are all blank)
     const slsk_entry_t *tiles[SL_DOCK_TILE_SETS];
+    const slsk_entry_t *icons[SL_DOCK_TILE_SETS];   // its baked icon at each set's size
     uint8_t *own_icon[2];           // its own icon scaled to 44 and 66 px, or NULL
     char initial[8];                // else its initial, on the blank tile
 } sl_launcher_item_t;
@@ -110,6 +118,9 @@ typedef struct {
 static sl_window_t *g_windows = NULL;
 static size_t g_window_count = 0;
 static size_t g_focused_window = (size_t)-1;
+// A title bar button held down: which one (the action comes on the release).
+static uint8_t g_title_press_active;
+static int g_title_press_btn = SL_WIN_BTN_NONE;
 
 static sl_launcher_item_t *g_launcher_items = NULL;
 static size_t g_launcher_count = 0u;
@@ -491,6 +502,10 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
                 return 0;
             }
             out->path_count = (uint32_t)n;
+        } else if (strcmp(key, "category") == 0) {
+            out->category = strcmp(val, "sistema") == 0 ? SL_CAT_SYSTEM
+                            : strcmp(val, "strumenti") == 0 ? SL_CAT_TOOLS
+                            : strcmp(val, "svago") == 0 ? SL_CAT_FUN : SL_CAT_ALL;
         } else if (strcmp(key, "width") == 0) {
             (void)sl_parse_u32(val, &out->width);
         } else if (strcmp(key, "height") == 0) {
@@ -559,6 +574,7 @@ static uint64_t sl_catalog_signature(const sl_scanned_app_t *entry) {
     hash = sl_catalog_hash_text(hash, entry->app.args);
     hash = sl_catalog_hash_text(hash, entry->app.icon);
     hash = sl_catalog_hash_bytes(hash, &entry->app.width, sizeof(entry->app.width));
+    hash = sl_catalog_hash_bytes(hash, &entry->app.category, sizeof(entry->app.category));
     return sl_catalog_hash_bytes(hash, &entry->app.height, sizeof(entry->app.height));
 }
 
@@ -724,6 +740,7 @@ static int sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app,
     item->slot = slot;
     item->width = app->width;
     item->height = app->height;
+    item->category = app->category;
     item->instance = NULL;
     item->icon_loaded = 0u;
     item->icon_failed = 0u;
@@ -773,6 +790,9 @@ static void sl_launcher_invalidate_overlay(sl_ctx_t *ctx, uint32_t x, uint32_t y
 #define SL_DOCK_TILE 60u
 #define SL_DOCK_HI 66u
 #define SL_DOCK_GAP 18u
+// On a short screen the dock packs its tiles closer before it leaves any out.
+#define SL_DOCK_PAD_TIGHT 14u
+#define SL_DOCK_GAP_TIGHT 8u
 #define SL_DOCK_SEP_W 44u
 #define SL_DOCK_MARGIN 28u          // from the screen edges, top and bottom
 #define SL_DOCK_MAX 32u
@@ -789,6 +809,14 @@ static void sl_launcher_invalidate_overlay(sl_ctx_t *ctx, uint32_t x, uint32_t y
 #define SL_MGR_CELL_MIN 150u
 #define SL_MGR_COLS_MAX 8u
 #define SL_MGR_ROW_H (SL_MGR_TILE + 12u + 20u + 34u)
+#define SL_MGR_ITEMS_MAX 128u
+// The header row: the category pill and the search field (tavola App
+// manager aperto: 50 px high, the field 340 px wide).
+#define SL_MGR_HDR_H 50u
+#define SL_MGR_SEG_PAD 6u
+#define SL_MGR_SEG_CELL_PAD 20u
+#define SL_MGR_SEARCH_W 340u
+#define SL_MGR_SEARCH_MIN_W 200u
 #define SL_DOCK_ANIM_FULL 1000u     // g_launcher_extra_width: 0 = dock, 1000 = app manager
 
 static struct {
@@ -796,7 +824,9 @@ static struct {
     uint32_t theme_version;          // the sprites below are this theme's
     const slsk_entry_t *panel, *pill, *fin, *chev_open, *chev_close;
     const slsk_entry_t *hi_pad_ref;   // a dock-hi tile, for its shadow margins
-    const slsk_font_t *label, *initial, *initial_big, *title;
+    const slsk_entry_t *ring, *ring_big;   // the accent ring of dock-hi, manager-hi
+    const slsk_entry_t *search_icon;       // the app manager's magnifier
+    const slsk_font_t *label, *initial, *initial_big, *title, *search;
 } g_dock;
 
 static uint8_t g_dock_hot = 0u;            // the mouse is on the dock: the fin shows
@@ -821,7 +851,12 @@ static int sl_dock_ready(const sl_ctx_t *ctx) {
     g_dock.chev_open = sl_skin_find(s, "chev-right");
     g_dock.chev_close = sl_skin_find(s, "chev-left");
     g_dock.hi_pad_ref = sl_skin_find(s, "dock-hi-blank");
-    if (!f1 || !f2 || !f3 || !f4 || !g_dock.panel || !g_dock.pill ||
+    g_dock.ring = sl_skin_find(s, "ring-66");
+    g_dock.ring_big = sl_skin_find(s, "ring-104");
+    g_dock.search_icon = sl_skin_find(s, "search-18");
+    const slsk_entry_t *f5 = sl_skin_find(s, "ui-16");
+    if (!f1 || !f2 || !f3 || !f4 || !f5 || !g_dock.panel || !g_dock.pill || !g_dock.ring || !g_dock.ring_big ||
+        !g_dock.search_icon ||
         !g_dock.fin || !g_dock.chev_open || !g_dock.chev_close || !g_dock.hi_pad_ref) {
         peos_puts("starlight: skin lacks the dock\n");
         return 0;
@@ -830,6 +865,7 @@ static int sl_dock_ready(const sl_ctx_t *ctx) {
     g_dock.initial = sl_skin_font(s, f2);
     g_dock.title = sl_skin_font(s, f3);
     g_dock.initial_big = sl_skin_font(s, f4);
+    g_dock.search = sl_skin_font(s, f5);
     g_dock.ready = 1u;
     return 1;
 }
@@ -897,21 +933,20 @@ static void sl_dock_resolve(const sl_ctx_t *ctx, sl_launcher_item_t *item) {
     item->tiles_version = sl_ui_runtime_version();
     static const char *day[SL_DOCK_TILE_SETS] = { "dock", "dock-hi", "dock-down", "manager", "manager-hi" };
     static const char *night[SL_DOCK_TILE_SETS] = { "dock-n", "dock-hi-n", "dock-down", "manager-n", "manager-hi-n" };
+    static const char *icon_set[SL_DOCK_TILE_SETS] = { "icon44", "icon48", "icon41", "icon66", "icon72" };
     const char *const *sets = sl_ui_runtime_night() ? night : day;
     const char *key = sl_dock_skin_key(item->title);
+    item->tile_custom = 0u;
     for (int k = 0; k < SL_DOCK_TILE_SETS; k++) {
         char name[SLSK_NAME_MAX];
-        const slsk_entry_t *e = NULL;
+        snprintf(name, sizeof(name), "%s-blank", sets[k]);
+        item->tiles[k] = sl_skin_find(&ctx->skin, name);
+        item->icons[k] = NULL;
         if (key) {
-            snprintf(name, sizeof(name), "%s-%s", sets[k], key);
-            e = sl_skin_find(&ctx->skin, name);
+            snprintf(name, sizeof(name), "%s-%s", icon_set[k], key);
+            item->icons[k] = sl_skin_find(&ctx->skin, name);
         }
-        if (k == 0) item->tile_custom = (uint8_t)(e != NULL);
-        if (!e) {
-            snprintf(name, sizeof(name), "%s-blank", sets[k]);
-            e = sl_skin_find(&ctx->skin, name);
-        }
-        item->tiles[k] = e;
+        if (k == 0) item->tile_custom = (uint8_t)(item->icons[k] != NULL);
     }
     if (item->tile_custom) return;
     // No baked tile: its own icon if it has one, else its initial.
@@ -983,12 +1018,12 @@ static size_t sl_dock_pin_find(const char *bundle_path) {
 }
 
 // How many tiles fit in the dock, Impostazioni excluded.
-static size_t sl_dock_capacity(const sl_ctx_t *ctx, size_t settings) {
+static size_t sl_dock_capacity(const sl_ctx_t *ctx, size_t settings, uint32_t pad, uint32_t gap) {
     uint32_t fh = ctx->fb.height;
-    uint32_t room = fh > 2u * (SL_DOCK_MARGIN + SL_DOCK_PAD) + SL_DOCK_GAP + 2u
-                        ? fh - 2u * (SL_DOCK_MARGIN + SL_DOCK_PAD) - SL_DOCK_GAP - 2u
+    uint32_t room = fh > 2u * (SL_DOCK_MARGIN + pad) + gap + 2u
+                        ? fh - 2u * (SL_DOCK_MARGIN + pad) - gap - 2u
                         : 0u;
-    size_t cap = (room + SL_DOCK_GAP) / (SL_DOCK_TILE + SL_DOCK_GAP);
+    size_t cap = (room + gap) / (SL_DOCK_TILE + gap);
     if (cap < 1u) cap = 1u;
     if (cap > SL_DOCK_MAX) cap = SL_DOCK_MAX;
     return settings != (size_t)-1 ? cap - 1u : cap;
@@ -1004,7 +1039,42 @@ typedef struct {
     uint32_t ex, ey, ew, eh;        // the app manager
     uint32_t cx, cy, cw, ch;        // now (while it widens or narrows)
     uint32_t gx, gy, gw, cols, cell_w, grid_top;
+    size_t mgr_count;               // the app manager's tiles: the apps that pass the filters
+    size_t mgr_item[SL_MGR_ITEMS_MAX];
 } sl_dock_layout_t;
+
+// The app manager's filters: the search text (typed while it is open) and
+// the category.
+static char g_mgr_query[40];
+static uint8_t g_mgr_cat = SL_CAT_ALL;
+static uint8_t g_mgr_shift = 0u, g_mgr_altgr = 0u;
+static const char *const g_mgr_cat_labels[SL_CAT_COUNT] = { "Tutte", "Sistema", "Strumenti", "Svago" };
+
+// ASCII case-insensitive "needle in hay" (accented letters must match).
+static int sl_mgr_matches(const char *hay, const char *needle) {
+    if (!needle[0]) return 1;
+    for (size_t i = 0u; hay[i]; i++) {
+        size_t k = 0u;
+        for (; needle[k] && hay[i + k]; k++) {
+            char a = hay[i + k], b = needle[k];
+            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            if (a != b) break;
+        }
+        if (!needle[k]) return 1;
+    }
+    return 0;
+}
+
+static void sl_mgr_filter(sl_dock_layout_t *L) {
+    L->mgr_count = 0u;
+    for (size_t i = 0u; i < g_launcher_count && L->mgr_count < SL_MGR_ITEMS_MAX; i++) {
+        const sl_launcher_item_t *item = &g_launcher_items[i];
+        if (g_mgr_cat != SL_CAT_ALL && item->category != g_mgr_cat) continue;
+        if (!sl_mgr_matches(item->title, g_mgr_query)) continue;
+        L->mgr_item[L->mgr_count++] = i;
+    }
+}
 
 static uint32_t sl_lerp_u32(uint32_t a, uint32_t b, uint32_t t) {
     int64_t v = (int64_t)a + ((int64_t)b - (int64_t)a) * (int64_t)t / (int64_t)SL_DOCK_ANIM_FULL;
@@ -1019,7 +1089,8 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
     // The pinned apps (else the first ones) as far as they fit; Impostazioni
     // always last, after a separator.
     size_t settings = sl_dock_settings_item();
-    size_t take = sl_dock_capacity(ctx, settings);
+    // As many as fit packed tight; the design's spacing if they fit with it.
+    size_t take = sl_dock_capacity(ctx, settings, SL_DOCK_PAD_TIGHT, SL_DOCK_GAP_TIGHT);
     if (g_dock_pins_set) {
         for (size_t p = 0u; p < g_dock_pin_count && L->count < take; p++) {
             size_t i = sl_launcher_find_bundle(g_dock_pins[p]);
@@ -1032,24 +1103,26 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
             if (i != settings) L->item[L->count++] = i;
         }
     }
+    uint8_t tight = L->count > sl_dock_capacity(ctx, settings, SL_DOCK_PAD, SL_DOCK_GAP);
+    uint32_t pad = tight ? SL_DOCK_PAD_TIGHT : SL_DOCK_PAD, gap = tight ? SL_DOCK_GAP_TIGHT : SL_DOCK_GAP;
     L->has_sep = (settings != (size_t)-1 && L->count > 0u) ? 1u : 0u;
     if (settings != (size_t)-1) L->item[L->count++] = settings;
     if (L->count == 0u) return;
 
-    uint32_t h = 2u * SL_DOCK_PAD + (uint32_t)L->count * SL_DOCK_TILE + (uint32_t)(L->count - 1u) * SL_DOCK_GAP;
-    if (L->has_sep) h += 2u + SL_DOCK_GAP;
+    uint32_t h = 2u * pad + (uint32_t)L->count * SL_DOCK_TILE + (uint32_t)(L->count - 1u) * gap;
+    if (L->has_sep) h += 2u + gap;
     L->px = SL_DOCK_X;
     L->pw = SL_DOCK_W;
     L->ph = h;
     L->py = fh > h ? (fh - h) / 2u : 0u;
-    uint32_t y = L->py + SL_DOCK_PAD;
+    uint32_t y = L->py + pad;
     for (size_t k = 0u; k < L->count; k++) {
         if (L->has_sep && k == L->count - 1u) {
             L->sep_y = y;
-            y += 2u + SL_DOCK_GAP;
+            y += 2u + gap;
         }
         L->tile_y[k] = y;
-        y += SL_DOCK_TILE + SL_DOCK_GAP;
+        y += SL_DOCK_TILE + gap;
     }
 
     L->ex = SL_DOCK_X;
@@ -1070,6 +1143,45 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
     if (L->cols < 1u) L->cols = 1u;
     L->cell_w = L->gw / L->cols;
     L->grid_top = L->gy + 34u + 40u;
+    sl_mgr_filter(L);
+}
+
+// Where the header's pieces go: the search field at the right edge of the
+// grid, the category pill left of it, the title and count at the left.
+typedef struct {
+    uint32_t y;                     // top of the row
+    uint32_t seg_x, seg_w;
+    uint32_t cell_x[SL_CAT_COUNT], cell_w[SL_CAT_COUNT];
+    uint32_t search_x, search_w;
+    uint8_t show_count;             // room for "N nella cartella"
+} sl_mgr_header_t;
+
+static void sl_mgr_header(const sl_dock_layout_t *L, sl_mgr_header_t *H) {
+    peos_memset(H, 0, sizeof(*H));
+    H->y = L->gy > 8u ? L->gy - 8u : 0u;
+    uint32_t seg_w = 2u * SL_MGR_SEG_PAD;
+    for (int c = 0; c < SL_CAT_COUNT; c++) {
+        H->cell_w[c] = sl_text_width(g_dock.label, g_mgr_cat_labels[c]) + 2u * SL_MGR_SEG_CELL_PAD;
+        seg_w += H->cell_w[c];
+    }
+    uint32_t right = L->gx + L->gw;
+    uint32_t title_w = sl_text_width(g_dock.title, "App");
+    uint32_t count_w = 14u + sl_text_width(g_dock.label, "000 nella cartella");
+    uint32_t left = L->gx + title_w + 22u;
+    uint32_t room = right > left ? right - left : 0u;
+    H->search_w = SL_MGR_SEARCH_W;
+    if (room < seg_w + 22u + H->search_w) {
+        H->search_w = room > seg_w + 22u + SL_MGR_SEARCH_MIN_W ? room - seg_w - 22u : SL_MGR_SEARCH_MIN_W;
+    }
+    H->show_count = room >= count_w + seg_w + 44u + H->search_w;
+    H->search_x = right - H->search_w;
+    H->seg_w = seg_w;
+    H->seg_x = H->search_x > seg_w + 22u ? H->search_x - 22u - seg_w : 0u;
+    uint32_t x = H->seg_x + SL_MGR_SEG_PAD;
+    for (int c = 0; c < SL_CAT_COUNT; c++) {
+        H->cell_x[c] = x;
+        x += H->cell_w[c];
+    }
 }
 
 static void sl_dock_tile_rect(const sl_dock_layout_t *L, size_t k, uint32_t *x, uint32_t *y) {
@@ -1077,6 +1189,7 @@ static void sl_dock_tile_rect(const sl_dock_layout_t *L, size_t k, uint32_t *x, 
     *y = L->tile_y[k];
 }
 
+// The tile at position i of the filtered grid.
 static void sl_mgr_tile_rect(const sl_dock_layout_t *L, size_t i, uint32_t *x, uint32_t *y) {
     uint32_t col = (uint32_t)(i % L->cols), row = (uint32_t)(i / L->cols);
     *x = L->gx + col * L->cell_w + (L->cell_w > SL_MGR_TILE ? (L->cell_w - SL_MGR_TILE) / 2u : 0u);
@@ -1107,12 +1220,12 @@ static int sl_dock_hit_tile(const sl_dock_layout_t *L, uint32_t x, uint32_t y, s
 
 static int sl_mgr_hit_tile(const sl_dock_layout_t *L, uint32_t x, uint32_t y, size_t *out) {
     if (!sl_dock_expanded_fully()) return 0;
-    for (size_t i = 0u; i < g_launcher_count; i++) {
+    for (size_t i = 0u; i < L->mgr_count; i++) {
         uint32_t tx, ty;
         sl_mgr_tile_rect(L, i, &tx, &ty);
         if (ty + SL_MGR_TILE > L->ey + L->eh) break;
         if (sl_point_in_rect(x, y, tx, ty, SL_MGR_TILE, SL_MGR_TILE + 32u)) {
-            *out = i;
+            *out = L->mgr_item[i];
             return 1;
         }
     }
@@ -1181,9 +1294,12 @@ static void sl_dock_dirty_item(const sl_ctx_t *ctx, size_t item) {
         if (sl_dock_pill_rect(&L, item, &px, &py, &pw)) sl_dirty_sprite(ctx, g_dock.pill, px, py, pw, SL_PILL_H);
     }
     if (sl_dock_expanded_fully()) {
-        uint32_t tx, ty;
-        sl_mgr_tile_rect(&L, item, &tx, &ty);
-        sl_dirty_add_i64(ctx, (int64_t)tx - 40, (int64_t)ty - 40, SL_MGR_HI + 80, SL_MGR_HI + 80);
+        for (size_t i = 0u; i < L.mgr_count; i++) {
+            if (L.mgr_item[i] != item) continue;
+            uint32_t tx, ty;
+            sl_mgr_tile_rect(&L, i, &tx, &ty);
+            sl_dirty_add_i64(ctx, (int64_t)tx - 40, (int64_t)ty - 40, SL_MGR_HI + 80, SL_MGR_HI + 80);
+        }
     }
 }
 
@@ -1213,6 +1329,7 @@ static void sl_launcher_toggle(sl_ctx_t *ctx) {
     if (!ctx) return;
     sl_dock_set_hover(ctx, (size_t)-1);
     g_launcher_expanded = g_launcher_expanded ? 0u : 1u;
+    if (!g_launcher_expanded) g_mgr_query[0] = '\0';   // opened again, it shows every app
     uint32_t target = g_launcher_expanded ? SL_DOCK_ANIM_FULL : 0u;
     if (!sl_tween_to_u32(SL_LAUNCHER_TWEEN_ID, &g_launcher_extra_width, target,
                          SL_LAUNCHER_ANIM_MS, SL_TWEEN_EASE_IN_OUT_CUBIC, NULL, NULL)) {
@@ -1325,7 +1442,7 @@ static uint32_t sl_launcher_context_build(const sl_ctx_t *ctx, size_t item_index
         if (sl_dock_is_pinned(&L, item_index)) {
             // Without Impostazioni the last tile stays: the dock never empties.
             if (settings != (size_t)-1 || shown > 1u) out[n++] = SL_CTX_UNPIN;
-        } else if (shown < sl_dock_capacity(ctx, settings)) {
+        } else if (shown < sl_dock_capacity(ctx, settings, SL_DOCK_PAD_TIGHT, SL_DOCK_GAP_TIGHT)) {
             out[n++] = SL_CTX_PIN;
         }
     }
@@ -1881,6 +1998,7 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
         item->slot = slot;
         item->width = entry->app.width;
         item->height = entry->app.height;
+        item->category = entry->app.category;
         item->signature = entry->signature;
         item->instance = sl_app_host_instance_peek_at(slot);
         sl_copy_str(item->title, sizeof(item->title), entry->app.title);
@@ -1963,14 +2081,59 @@ void sl_windows_focus_at_cursor(uint32_t x, uint32_t y) {
     }
 }
 
-// Title bar buttons of the focused window: close, minimize, maximize.
+// The button sinks (or comes back up): the inside is redrawn once.
+static void sl_window_set_pressed(sl_ctx_t *ctx, sl_window_t *win, int b) {
+    if (win->pressed_btn == b) return;
+    int shown = (b != SL_WIN_BTN_NONE) ? b : win->pressed_btn;
+    win->pressed_btn = (int8_t)b;
+    win->force_redraw = 1u;
+    win->next_render_ns = 0ull;
+    uint32_t bx, by;
+    sl_window_button_rect(win, shown, &bx, &by);
+    sl_dirty_add(ctx, bx, by, SL_WIN_BTN, SL_WIN_BTN);
+}
+
+// Title bar buttons of the focused window: close, minimize, maximize. The
+// press sinks the button; the action comes on the release over it.
 int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx || !g_windows || g_focused_window >= g_window_count) return 0;
-    size_t idx = g_focused_window;
-    sl_window_t *win = &g_windows[idx];
+    sl_window_t *win = &g_windows[g_focused_window];
     if (sl_window_is_closing(win)) return 0;
     int b = sl_window_button_at(win, x, y);
     if (b == SL_WIN_BTN_NONE) return 0;
+    sl_window_set_pressed(ctx, win, b);
+    g_title_press_active = 1u;
+    g_title_press_btn = b;
+    return 1;
+}
+
+// While the button is held: it shows sunk only with the pointer over it.
+int sl_windows_title_button_held(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || !g_windows || g_focused_window >= g_window_count) return 0;
+    sl_window_t *win = &g_windows[g_focused_window];
+    if (!g_title_press_active) return 0;
+    int over = sl_window_button_at(win, x, y);
+    sl_window_set_pressed(ctx, win, over == g_title_press_btn ? over : SL_WIN_BTN_NONE);
+    return 1;
+}
+
+static int sl_windows_title_button_act(sl_ctx_t *ctx, size_t idx, int b);
+
+int sl_windows_title_button_release(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || !g_title_press_active) return 0;
+    int pressed = g_title_press_btn;
+    g_title_press_active = 0u;
+    g_title_press_btn = SL_WIN_BTN_NONE;
+    if (!g_windows || g_focused_window >= g_window_count) return 1;
+    sl_window_t *win = &g_windows[g_focused_window];
+    sl_window_set_pressed(ctx, win, SL_WIN_BTN_NONE);
+    if (sl_window_is_closing(win) || sl_window_button_at(win, x, y) != pressed) return 1;
+    (void)sl_windows_title_button_act(ctx, g_focused_window, pressed);
+    return 1;
+}
+
+static int sl_windows_title_button_act(sl_ctx_t *ctx, size_t idx, int b) {
+    sl_window_t *win = &g_windows[idx];
     sl_window_rect_snapshot_t before = sl_window_snapshot_index(idx);
     sl_windows_mark_focused_activity();
     if (b == SL_WIN_BTN_CLOSE) {
@@ -2302,6 +2465,17 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
                 (void)sl_windows_open_launcher_item(ctx, index);
                 return 1;
             }
+            sl_mgr_header_t H;
+            sl_mgr_header(&L, &H);
+            for (int c = 0; c < SL_CAT_COUNT; c++) {   // a category
+                if (!sl_point_in_rect(x, y, H.cell_x[c], H.y + SL_MGR_SEG_PAD, H.cell_w[c], SL_MGR_HDR_H - 2u * SL_MGR_SEG_PAD)) continue;
+                if (g_mgr_cat != (uint8_t)c) {
+                    g_mgr_cat = (uint8_t)c;
+                    sl_dock_set_hover_at(ctx, (size_t)-1, 0u);
+                    sl_dock_dirty_panel(ctx, &L);
+                }
+                return 1;
+            }
             if (!sl_point_in_rect(x, y, L.cx, L.cy, L.cw, L.ch)) sl_launcher_toggle(ctx);   // outside: close
         }
         return 1;
@@ -2318,6 +2492,62 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
         return 1;
     }
     return sl_point_in_rect(x, y, L.px, L.py, L.pw, L.ph) ? 1 : 0;
+}
+
+uint8_t sl_launcher_manager_open(void) {
+    return g_launcher_expanded;
+}
+
+// Keys while the app manager is open: they type in its search field.
+// Esc clears it (or closes the manager), Enter opens the first app shown.
+void sl_launcher_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev, uint8_t caps_lock_on) {
+    if (!ctx || !ev || !g_launcher_expanded) return;
+    uint16_t code = ev->code;
+    if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) {
+        g_mgr_shift = ev->pressed ? 1u : 0u;
+        return;
+    }
+    if (sl_keyboard_event_is_altgr(ev)) {
+        g_mgr_altgr = ev->pressed ? 1u : 0u;
+        return;
+    }
+    if (!ev->pressed) return;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    size_t len = strlen(g_mgr_query);
+    uint8_t changed = 0u;
+    if (code == PEOS_KEY_ESC) {
+        if (len == 0u) {
+            sl_launcher_toggle(ctx);
+            return;
+        }
+        g_mgr_query[0] = '\0';
+        changed = 1u;
+    } else if (code == PEOS_KEY_ENTER) {
+        if (L.mgr_count > 0u) {
+            size_t first = L.mgr_item[0];
+            sl_launcher_toggle(ctx);
+            (void)sl_windows_open_launcher_item(ctx, first);
+        }
+        return;
+    } else if (code == PEOS_KEY_BACKSPACE) {
+        while (len > 0u && ((unsigned char)g_mgr_query[len - 1u] & 0xC0u) == 0x80u) len--;   // a whole UTF-8 character
+        if (len > 0u) len--;
+        g_mgr_query[len] = '\0';
+        changed = 1u;
+    } else {
+        char in[8];
+        size_t n = sl_keyboard_translate_event(ev, g_mgr_shift, caps_lock_on, g_mgr_altgr, in, sizeof(in));
+        if (n > 0u && (unsigned char)in[0] >= 0x20u && len + n < sizeof(g_mgr_query)) {
+            memcpy(g_mgr_query + len, in, n);
+            g_mgr_query[len + n] = '\0';
+            changed = 1u;
+        }
+    }
+    if (changed) {
+        sl_dock_set_hover_at(ctx, (size_t)-1, 0u);
+        sl_dock_dirty_panel(ctx, &L);
+    }
 }
 
 void sl_launcher_handle_release(sl_ctx_t *ctx) {
@@ -2366,14 +2596,26 @@ void sl_launcher_handle_hover(sl_ctx_t *ctx) {
     if (g_dock_pressed != (size_t)-1 && next != g_dock_pressed) sl_launcher_handle_release(ctx);
 }
 
-// Draw one tile: its state's sprite, then its own icon or initial if it has
-// no baked one. set: 0 dock, 1 dock-hi, 2 dock-down, 3 manager, 4 manager-hi.
+// Draw one tile: its state's empty tile, the accent ring under the mouse,
+// then the baked icon, or its own icon or initial if it has none.
+// set: 0 dock, 1 dock-hi, 2 dock-down, 3 manager, 4 manager-hi.
 static void sl_dock_draw_tile(sl_ctx_t *ctx, const sl_target_t *t, sl_launcher_item_t *item, int set,
                               int32_t x, int32_t y, uint32_t size) {
     sl_dock_resolve(ctx, item);
     const slsk_entry_t *e = item->tiles[set];
     if (e) sl_draw_skin(ctx, e, x, y, size, size);
-    if (item->tile_custom) return;
+    const slsk_entry_t *ring = set == 1 ? g_dock.ring : set == 4 ? g_dock.ring_big : NULL;
+    if (ring && ring->width == size) {
+        const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+        sl_blit_mask(t, sl_skin_data(&ctx->skin, ring), ring->width, ring->height, ring->width, x, y,
+                     n->r, n->g, n->b, 89u);   // 35%, as the boards' inset ring
+    }
+    if (item->tile_custom) {
+        const slsk_entry_t *ic = item->icons[set];
+        if (ic) sl_draw_skin(ctx, ic, x + ((int32_t)size - ic->width) / 2, y + ((int32_t)size - ic->height) / 2,
+                             ic->width, ic->height);
+        return;
+    }
     int big = set >= 3;
     if (item->own_icon[big]) {
         uint32_t is = big ? 66u : 44u;
@@ -2496,16 +2738,61 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
     const slsk_font_t *title = g_dock.title;
     int32_t base = (int32_t)L.gy + title->ascent;
     int32_t end = sl_text_draw(&in, title, (int32_t)L.gx, base, "App", SL_DOCK_INK);
-    char count[40];
-    snprintf(count, sizeof(count), "%u nella cartella", (unsigned)g_launcher_count);
-    sl_text_draw(&in, g_dock.label, end + 14, base, count, SL_DOCK_MUTED);
+    sl_mgr_header_t H;
+    sl_mgr_header(&L, &H);
+    if (H.show_count) {
+        char count[40];
+        if (L.mgr_count == g_launcher_count) snprintf(count, sizeof(count), "%u nella cartella", (unsigned)g_launcher_count);
+        else snprintf(count, sizeof(count), "%u di %u", (unsigned)L.mgr_count, (unsigned)g_launcher_count);
+        sl_text_draw(&in, g_dock.label, end + 14, base, count, SL_DOCK_MUTED);
+    }
 
-    for (size_t i = 0u; i < g_launcher_count; i++) {
+    // The categories: a raised pill, the chosen one night with neon text.
+    const sl_ui_color_t *neon = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+    const slsk_font_t *lf = g_dock.label;
+    uint32_t cell_h = SL_MGR_HDR_H - 2u * SL_MGR_SEG_PAD;
+    sl_ui_ctx_surface(ctx, SL_UI_SURF_RAISED, H.seg_x, H.y, H.seg_w, SL_MGR_HDR_H, SL_MGR_HDR_H / 2u);
+    for (int c = 0; c < SL_CAT_COUNT; c++) {
+        uint32_t lw = sl_text_width(lf, g_mgr_cat_labels[c]);
+        int32_t lx = (int32_t)(H.cell_x[c] + (H.cell_w[c] - lw) / 2u);
+        int32_t lb = (int32_t)(H.y + SL_MGR_HDR_H / 2u) + (lf->ascent - lf->descent) / 2;
+        if ((uint8_t)c == g_mgr_cat) {
+            sl_ui_ctx_surface(ctx, SL_UI_SURF_NIGHT_FLAT, H.cell_x[c], H.y + SL_MGR_SEG_PAD, H.cell_w[c], cell_h, cell_h / 2u);
+            sl_text_draw(&in, lf, lx, lb, g_mgr_cat_labels[c], neon->r, neon->g, neon->b);
+        } else {
+            sl_text_draw(&in, lf, lx, lb, g_mgr_cat_labels[c], SL_DOCK_MUTED);
+        }
+    }
+
+    // The search field: inset, a magnifier, the text typed (or the hint)
+    // and the caret, since keys go here while the manager is open.
+    sl_ui_ctx_surface(ctx, SL_UI_SURF_INSET, H.search_x, H.y, H.search_w, SL_MGR_HDR_H, SL_MGR_HDR_H / 2u);
+    const slsk_entry_t *glass = g_dock.search_icon;
+    sl_blit_mask(&in, sl_skin_data(&ctx->skin, glass), glass->width, glass->height, glass->width,
+                 (int32_t)(H.search_x + 20u), (int32_t)(H.y + (SL_MGR_HDR_H - glass->height) / 2u), SL_DOCK_MUTED, 255u);
+    {
+        const slsk_font_t *sf = g_dock.search;
+        int32_t tx = (int32_t)(H.search_x + 20u + glass->width + 12u);
+        int32_t tb = (int32_t)(H.y + SL_MGR_HDR_H / 2u) + (sf->ascent - sf->descent) / 2;
+        sl_target_t ft = in;
+        int32_t fx1 = (int32_t)(H.search_x + H.search_w - 20u);
+        if (fx1 < ft.clip_x1) ft.clip_x1 = fx1;
+        int32_t caret = tx - 4;   // before the hint
+        if (g_mgr_query[0]) caret = sl_text_draw(&ft, sf, tx, tb, g_mgr_query, SL_DOCK_INK);
+        else sl_text_draw(&ft, sf, tx, tb, "Cerca un'app", SL_DOCK_MUTED);
+        if (sl_dock_expanded_fully() && caret < fx1) {
+            sl_fill_rect(ctx, (uint32_t)caret + 1u, (uint32_t)(tb - sf->ascent), 2u, (uint32_t)(sf->ascent + sf->descent),
+                         neon->r, neon->g, neon->b);
+        }
+    }
+
+    for (size_t i = 0u; i < L.mgr_count; i++) {
         uint32_t tx, ty;
         sl_mgr_tile_rect(&L, i, &tx, &ty);
         if (ty + SL_MGR_TILE > L.ey + L.eh) break;
-        sl_launcher_item_t *item = &g_launcher_items[i];
-        if (i == g_launcher_hover_index && g_dock_hover_in_mgr && sl_dock_expanded_fully()) {
+        size_t idx = L.mgr_item[i];
+        sl_launcher_item_t *item = &g_launcher_items[idx];
+        if (idx == g_launcher_hover_index && g_dock_hover_in_mgr && sl_dock_expanded_fully()) {
             sl_dock_draw_tile(ctx, &in, item, 4, (int32_t)tx - 4, (int32_t)ty - 4, SL_MGR_HI);
         } else {
             sl_dock_draw_tile(ctx, &in, item, 3, (int32_t)tx, (int32_t)ty, SL_MGR_TILE);
@@ -2515,6 +2802,10 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
         uint32_t lw = sl_text_width(g_dock.label, label);
         sl_text_draw(&in, g_dock.label, (int32_t)(tx + SL_MGR_TILE / 2u) - (int32_t)lw / 2,
                      (int32_t)(ty + SL_MGR_TILE + 12u) + g_dock.label->ascent, label, SL_DOCK_INK);
+    }
+    if (L.mgr_count == 0u) {
+        sl_text_draw(&in, g_dock.search, (int32_t)L.gx, (int32_t)L.grid_top + g_dock.search->ascent,
+                     g_mgr_query[0] ? "Nessuna app con questo nome" : "Nessuna app in questa categoria", SL_DOCK_MUTED);
     }
     if (saved) sl_clip_set(ctx, scx, scy, scw, sch);
     else sl_clip_clear(ctx);
