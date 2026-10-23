@@ -11,3 +11,6 @@ void sl_render_copy_opaque_rgba_to_bgra32(uint32_t *dst, const uint32_t *src,
 // Premultiplied BGRA32 source over a BGRA32 destination:
 // dst = src + dst * (255 - src.a) / 255, rounded; alpha out is 255.
 void sl_render_blend_premul_bgra32(uint32_t *dst, const uint32_t *src, size_t pixel_count);
+// One premultiplied pixel over pixel_count destination pixels (the stretched
+// middle of a nine-slice sprite).
+void sl_render_blend_premul_const_bgra32(uint32_t *dst, uint32_t premul_px, size_t pixel_count);

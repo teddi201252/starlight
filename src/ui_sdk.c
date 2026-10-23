@@ -327,6 +327,8 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
         st.shadow_count = 1;
         st.shadows[0] = sl_ui_shadow(ui, 0, 8, 0, SL_UI_COLOR_NEON, 200u);
         break;
+    case SL_UI_SURF_NIGHT_FLAT:
+        break;
     }
     const sl_surf_t *s = sl_surf_get(&st, w, h, r);
     if (!s) {
@@ -339,7 +341,40 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
     e.width = (uint16_t)s->w;
     e.height = (uint16_t)s->h;
     sl_target_t t = sl_target_from_ctx(ui->ctx);
-    sl_blit_sprite(&t, &e, s->px, (int32_t)x - (int32_t)s->pad_l, (int32_t)y - (int32_t)s->pad_t, s->w, s->h);
+    int32_t sx = (int32_t)x - (int32_t)s->pad_l, sy = (int32_t)y - (int32_t)s->pad_t;
+
+    // Away from its edges a surface is its fill: past the corners and the
+    // reach of its inner shadows. A big one (a text area) fills that inside
+    // and blends only the ring around it.
+    uint32_t m = r;
+    for (uint8_t i = 0; i < st.shadow_count; i++) {
+        if (!st.shadows[i].inset) continue;
+        int32_t d = st.shadows[i].dx < 0 ? -st.shadows[i].dx : st.shadows[i].dx;
+        int32_t dy = st.shadows[i].dy < 0 ? -st.shadows[i].dy : st.shadows[i].dy;
+        if (dy > d) d = dy;
+        uint32_t reach = (uint32_t)d + (3u * st.shadows[i].blur + 1u) / 2u;
+        if (reach > m) m = reach;
+    }
+    m += 2u;
+    if (w < 2u * m + 64u || h < 2u * m + 32u) {
+        sl_blit_sprite(&t, &e, s->px, sx, sy, s->w, s->h);
+        return;
+    }
+    sl_fill_rect(ui->ctx, x + m, y + m, w - 2u * m, h - 2u * m, st.fill_r, st.fill_g, st.fill_b);
+    int32_t ix0 = (int32_t)(x + m), iy0 = (int32_t)(y + m), ix1 = (int32_t)(x + w - m), iy1 = (int32_t)(y + h - m);
+    int32_t ex = sx + (int32_t)s->w, ey = sy + (int32_t)s->h;
+    const int32_t strips[4][4] = {
+        { sx, sy, ex, iy0 }, { sx, iy1, ex, ey }, { sx, iy0, ix0, iy1 }, { ix1, iy0, ex, iy1 },
+    };
+    for (int k = 0; k < 4; k++) {
+        sl_target_t tt = t;
+        if (strips[k][0] > tt.clip_x0) tt.clip_x0 = strips[k][0];
+        if (strips[k][1] > tt.clip_y0) tt.clip_y0 = strips[k][1];
+        if (strips[k][2] < tt.clip_x1) tt.clip_x1 = strips[k][2];
+        if (strips[k][3] < tt.clip_y1) tt.clip_y1 = strips[k][3];
+        if (tt.clip_x1 <= tt.clip_x0 || tt.clip_y1 <= tt.clip_y0) continue;
+        sl_blit_sprite(&tt, &e, s->px, sx, sy, s->w, s->h);
+    }
 }
 
 // For Starlight's own popups (menus, cards): the runtime theme, no app.
@@ -621,6 +656,144 @@ uint8_t sl_ui_button_state(sl_ui_ctx_t *ui, uint32_t id,
         return hovered ? 1u : 0u;
     }
 
+    return 0u;
+}
+
+uint8_t sl_ui_button_primary_state(sl_ui_ctx_t *ui, uint32_t id,
+                                   uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                   const char *text, uint8_t enabled) {
+    if (!ui || !ui->ctx || !text || w < 8u || h < 8u) return 0u;
+
+    int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
+    if (enabled && hovered && ui->mouse_pressed) ui->active_id = id;
+    int active = (ui->active_id == id);
+    int pressed = enabled && active && ui->mouse_down;
+
+    // Night at rest, lit under the mouse, without its shadow while pressed;
+    // flat and grey if disabled.
+    sl_ui_surf_kind_t kind = !enabled ? SL_UI_SURF_FLAT
+                             : pressed ? SL_UI_SURF_NIGHT_FLAT
+                             : hovered ? SL_UI_SURF_NIGHT_GLOW : SL_UI_SURF_NIGHT;
+    sl_ui_surface(ui, kind, x, y, w, h, sl_ui_pill_r(h, 24u));
+    {
+        uint32_t tw = sl_ui_text_width(ui, text);
+        uint32_t tx = (tw + 12u < w) ? x + (w - tw) / 2u : x + 6u;
+        sl_ui_text_tok(ui, tx, sl_ui_text_center_y(ui, y, h), text,
+                       enabled ? SL_UI_COLOR_NEON : SL_UI_COLOR_TEXT_DISABLED);
+    }
+    if (!enabled && active) ui->active_id = 0u;
+    if (enabled && ui->mouse_released && active) {
+        ui->active_id = 0u;
+        return hovered ? 1u : 0u;
+    }
+    return 0u;
+}
+
+uint8_t sl_ui_swatch_state(sl_ui_ctx_t *ui, uint32_t id, uint32_t x, uint32_t y, uint32_t size,
+                           uint8_t r, uint8_t g, uint8_t b, uint8_t chosen, uint8_t enabled) {
+    if (!ui || !ui->ctx || size < 12u) return 0u;
+    int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, size, size);
+    if (enabled && hovered && ui->mouse_pressed) ui->active_id = id;
+    int active = (ui->active_id == id);
+    sl_ui_surf_kind_t kind = !enabled ? SL_UI_SURF_FLAT
+                             : (active && ui->mouse_down) ? SL_UI_SURF_INSET
+                             : hovered ? SL_UI_SURF_RAISED_HI : SL_UI_SURF_RAISED;
+    sl_ui_surface(ui, kind, x, y, size, size, size / 2u);
+    // The dot (tavola Finestre: 22 on 44, chosen 26 with a glow of its colour).
+    uint32_t d = chosen ? (size * 13u) / 22u : size / 2u;
+    if (ui->ctx->skin_loaded) {
+        sl_surf_style_t st;
+        memset(&st, 0, sizeof(st));
+        st.fill_r = r;
+        st.fill_g = g;
+        st.fill_b = b;
+        if (chosen) {
+            st.shadow_count = 1;
+            st.shadows[0] = (sl_surf_shadow_t){ 0, 0, 10, 0, r, g, b, 255u };
+        }
+        const sl_surf_t *sf = sl_surf_get(&st, d, d, d / 2u);
+        if (sf) {
+            slsk_entry_t e;
+            memset(&e, 0, sizeof(e));
+            e.kind = SLSK_KIND_PREMUL;
+            e.width = (uint16_t)sf->w;
+            e.height = (uint16_t)sf->h;
+            sl_target_t t = sl_target_from_ctx(ui->ctx);
+            int32_t dx = (int32_t)(x + (size - d) / 2u), dy = (int32_t)(y + (size - d) / 2u);
+            sl_blit_sprite(&t, &e, sf->px, dx - (int32_t)sf->pad_l, dy - (int32_t)sf->pad_t, sf->w, sf->h);
+        }
+    } else {
+        sl_fill_rect(ui->ctx, x + (size - d) / 2u, y + (size - d) / 2u, d, d, r, g, b);
+    }
+    if (!enabled && active) ui->active_id = 0u;
+    if (enabled && ui->mouse_released && active) {
+        ui->active_id = 0u;
+        return hovered ? 1u : 0u;
+    }
+    return 0u;
+}
+
+// Option i of "A|B|C" into out.
+static void sl_ui_pipe_option(const char *pipe, uint32_t index, char *out, size_t cap) {
+    size_t n = 0u;
+    uint32_t at = 0u;
+    if (cap == 0u) return;
+    for (const char *p = pipe ? pipe : ""; *p; p++) {
+        if (*p == '|') {
+            if (at++ == index) break;
+            continue;
+        }
+        if (at == index && n + 1u < cap) out[n++] = *p;
+    }
+    out[n] = '\0';
+}
+
+uint8_t sl_ui_segment_state(sl_ui_ctx_t *ui, uint32_t id,
+                            uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                            uint32_t option_count, uint32_t *selected,
+                            const char *options_pipe, uint8_t enabled) {
+    if (!ui || !ui->ctx || !selected || option_count == 0u || w < option_count * 16u || h < 16u) return 0u;
+    if (*selected >= option_count) *selected = 0u;
+
+    // The pill (tavola Componenti: padding 6, radius 26 on 52) and the cells.
+    uint32_t pad = h >= 40u ? 6u : 3u;
+    uint32_t cell_w = (w - 2u * pad) / option_count;
+    uint32_t cell_h = h - 2u * pad;
+    int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
+    uint32_t over = (uint32_t)-1;
+    if (hovered && ui->cursor_x >= x + pad && cell_w > 0u) {
+        over = (ui->cursor_x - x - pad) / cell_w;
+        if (over >= option_count) over = option_count - 1u;
+    }
+    if (enabled && hovered && ui->mouse_pressed) ui->active_id = id;
+    int active = (ui->active_id == id);
+
+    sl_ui_surface(ui, enabled ? SL_UI_SURF_RAISED : SL_UI_SURF_FLAT, x, y, w, h, sl_ui_pill_r(h, 26u));
+    for (uint32_t i = 0u; i < option_count; i++) {
+        uint32_t cx = x + pad + i * cell_w;
+        char label[64];
+        sl_ui_pipe_option(options_pipe, i, label, sizeof(label));
+        sl_ui_color_token_t tok = SL_UI_COLOR_TEXT_SECONDARY;
+        if (!enabled) {
+            tok = SL_UI_COLOR_TEXT_DISABLED;
+        } else if (i == *selected) {
+            sl_ui_surface(ui, SL_UI_SURF_NIGHT_FLAT, cx, y + pad, cell_w, cell_h, sl_ui_pill_r(cell_h, 20u));
+            tok = SL_UI_COLOR_NEON;
+        } else if (i == over) {
+            tok = SL_UI_COLOR_TEXT_PRIMARY;
+        }
+        uint32_t tw = sl_ui_text_width(ui, label);
+        uint32_t tx = (tw + 8u < cell_w) ? cx + (cell_w - tw) / 2u : cx + 4u;
+        sl_ui_text_tok(ui, tx, sl_ui_text_center_y(ui, y + pad, cell_h), label, tok);
+    }
+    if (!enabled && active) ui->active_id = 0u;
+    if (enabled && ui->mouse_released && active) {
+        ui->active_id = 0u;
+        if (over < option_count && over != *selected) {
+            *selected = over;
+            return 1u;
+        }
+    }
     return 0u;
 }
 

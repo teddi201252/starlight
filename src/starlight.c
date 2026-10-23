@@ -146,7 +146,11 @@ int main(int argc, char **argv) {
             }
         }
 
-        sl_desk_tick(&ctx);
+        {
+            uint64_t d0 = peos_time_ns();
+            sl_desk_tick(&ctx);
+            sl_perf_add_desk(peos_time_ns() - d0);
+        }
         sl_notify_tick(&ctx);
 
         uint64_t composite_start_ns = peos_time_ns();
@@ -154,8 +158,14 @@ int main(int argc, char **argv) {
         sl_perf_add_composite(peos_time_ns() - composite_start_ns);
 
         uint64_t render_start_ns = peos_time_ns();
-        sl_windows_render_all(&ctx);
-        sl_launcher_render(&ctx);
+        {
+            uint64_t w0 = peos_time_ns();
+            sl_windows_render_all(&ctx);
+            uint64_t w1 = peos_time_ns();
+            sl_launcher_render(&ctx);
+            sl_perf_add_windows(w1 - w0);
+            sl_perf_add_dock(peos_time_ns() - w1);
+        }
         sl_notify_render(&ctx);
         sl_clipboard_render_overlay(&ctx);
         sl_fps_tick(&ctx, &fps_value_prev);

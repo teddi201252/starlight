@@ -129,6 +129,7 @@ typedef enum {
     SL_UI_SURF_NIGHT,       // the accent: on, filled, primary
     SL_UI_SURF_NIGHT_GLOW,  // the accent lit: a knob that is on
     SL_UI_SURF_NEON_DOT,    // a lit dot or bar in the neon accent (window dot, dock marks)
+    SL_UI_SURF_NIGHT_FLAT,  // the accent with no shadow: the chosen segment
 } sl_ui_surf_kind_t;
 
 // Soft UI surface (rendered once per size, then cached) and the label face,
@@ -174,6 +175,21 @@ uint8_t sl_ui_button(sl_ui_ctx_t *ui, uint32_t id,
 uint8_t sl_ui_button_state(sl_ui_ctx_t *ui, uint32_t id,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                            const char *text, uint8_t enabled);
+
+// The primary button of a group: night, its label in the neon accent.
+uint8_t sl_ui_button_primary_state(sl_ui_ctx_t *ui, uint32_t id,
+                                   uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                   const char *text, uint8_t enabled);
+// A colour to choose (the accents): a round raised button with a dot of
+// r,g,b in it, larger and glowing when chosen. 1 on a click.
+uint8_t sl_ui_swatch_state(sl_ui_ctx_t *ui, uint32_t id, uint32_t x, uint32_t y, uint32_t size,
+                           uint8_t r, uint8_t g, uint8_t b, uint8_t chosen, uint8_t enabled);
+// A segmented control: options_pipe "A|B|C" side by side on a raised pill,
+// the chosen one night. 1 when a click chose another one.
+uint8_t sl_ui_segment_state(sl_ui_ctx_t *ui, uint32_t id,
+                            uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                            uint32_t option_count, uint32_t *selected,
+                            const char *options_pipe, uint8_t enabled);
 
 uint8_t sl_ui_slider_u32(sl_ui_ctx_t *ui, uint32_t id,
                          uint32_t x, uint32_t y, uint32_t w,

@@ -11,14 +11,24 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
-#define SL_DESK_BAR_H 44u
+#define SL_DESK_BAR_H SL_DESK_BAR_HEIGHT
 #define SL_DESK_LEFT 172u            // widgets start right of the dock and its fin
 #define SL_DESK_CLOCK_W 300u
 #define SL_DESK_CLOCK_TOP 72u
 #define SL_DESK_CAL_W 330u
 #define SL_DESK_CAL_GAP 48u
 #define SL_DESK_POLL_MS 2000u
+// The widgets (tavola Desktop): the volume capsule and the CPU ring in a
+// column right of the clock, the network card near the calendar.
+#define SL_DESK_VOL_W 112u
+#define SL_DESK_VOL_H 270u
+#define SL_DESK_CPU_S 112u
+#define SL_DESK_NET_W 340u
+#define SL_DESK_NET_H 170u
+#define SL_DESK_SHADOW 30               // what a widget's shadow reaches past it
+#define SL_DESK_NET_BARS 7u
 
 typedef struct { int32_t x, y; uint32_t w, h; } sl_desk_rect_t;
 
@@ -26,8 +36,12 @@ typedef struct { int32_t x, y; uint32_t w, h; } sl_desk_rect_t;
 static struct {
     uint8_t ready;
     const slsk_font_t *bar, *bar_bold, *digits, *day, *date, *cal_title, *cal, *cal_bold;
-    const slsk_entry_t *star, *wifi, *volume;
+    const slsk_entry_t *star, *wifi, *volume, *globe;
+    const slsk_font_t *w_label, *w_value, *w_small, *mono, *mono_small;
     sl_desk_rect_t bar_r, clock_r, cal_r;
+    sl_desk_rect_t vol_r, cpu_r, net_r;   // the widgets themselves (0 wide: no room)
+    int32_t shown_volume, shown_cpu;      // last drawn
+    uint32_t shown_net;                   // feed version of the network card
     uint8_t dark_bar, dark_clock;    // the wallpaper under them is dark: light text
     int64_t minute, day_no;          // last drawn
     const void *focus_task;
@@ -42,6 +56,10 @@ static struct {
     uint8_t ip[4];
     uint8_t has_ip;
     int32_t volume;                  // -1 unknown
+    int32_t cpu;                     // load 0..100 over the last poll, -1 unknown
+    uint64_t rx_rate, tx_rate;       // bytes a second over the last poll
+    uint64_t hist[SL_DESK_NET_BARS]; // rx + tx a second, oldest first
+    uint32_t net_version;            // bumped when the rates move
 } g_feed;
 static uint8_t g_poller_stack[16384] __attribute__((aligned(16)));
 static uint8_t g_poller_started;
@@ -53,21 +71,11 @@ static const char *const k_week[7] = { "Lu", "Ma", "Me", "Gi", "Ve", "Sa", "Do" 
 
 // ------------------------------------------------------------------ poller
 
-static int32_t sl_desk_read_volume(void) {
-    static const char path[] = "/system/config/audio.cfg";
-    uint64_t fd = peos_fopen(path, sizeof(path) - 1u, 0);
-    if ((int64_t)fd < 0) return -1;
-    char buf[256];
-    uint64_t n = peos_fread(fd, buf, sizeof(buf) - 1u);
-    (void)peos_fclose(fd);
-    if ((int64_t)n <= 0) return -1;
-    buf[n] = '\0';
-    const char *p = strstr(buf, "volume=");
-    if (!p) return -1;
-    int32_t v = 0;
-    for (p += 7; *p >= '0' && *p <= '9'; p++) v = v * 10 + (*p - '0');
-    return v > 100 ? 100 : v;
-}
+// The poller's view of the last sample, to turn counters into rates.
+static struct {
+    uint8_t have;
+    uint64_t busy, idle, rx, tx, ns;
+} g_prev;
 
 static void sl_desk_poller(void *arg) {
     (void)arg;
@@ -75,12 +83,54 @@ static void sl_desk_poller(void *arg) {
         peos_netcfg_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         uint8_t has_ip = (net_config_get(&cfg) == NET_OK && (cfg.ip[0] | cfg.ip[1] | cfg.ip[2] | cfg.ip[3])) ? 1u : 0u;
-        int32_t vol = sl_desk_read_volume();
-        if (has_ip != g_feed.has_ip || vol != g_feed.volume || memcmp(cfg.ip, g_feed.ip, 4) != 0) {
+        // The kernel's volume and CPU time (no capability needed), netd's bytes.
+        peos_sysinfo_t si;
+        memset(&si, 0, sizeof(si));
+        uint8_t have_si = peos_sysinfo(&si) >= 0;
+        net_stats_t ns;
+        memset(&ns, 0, sizeof(ns));
+        uint8_t have_ns = net_stats(&ns) == NET_OK;
+        uint64_t now = peos_time_ns();
+
+        int32_t vol = have_si ? (int32_t)si.volume : -1;
+        int32_t cpu = g_feed.cpu;
+        uint64_t rx_rate = g_feed.rx_rate, tx_rate = g_feed.tx_rate;
+        uint8_t net_moved = 0u;
+        if (g_prev.have && have_si) {
+            uint64_t db = si.cpu_busy_cycles - g_prev.busy, di = si.cpu_idle_cycles - g_prev.idle;
+            cpu = (db + di) ? (int32_t)((db * 100u + (db + di) / 2u) / (db + di)) : 0;
+        }
+        if (g_prev.have && have_ns && now > g_prev.ns) {
+            uint64_t dt = now - g_prev.ns;
+            rx_rate = (ns.bytes_rx - g_prev.rx) * 1000000000ull / dt;
+            tx_rate = (ns.bytes_tx - g_prev.tx) * 1000000000ull / dt;
+            net_moved = 1u;
+        }
+        if (have_si) {
+            g_prev.busy = si.cpu_busy_cycles;
+            g_prev.idle = si.cpu_idle_cycles;
+        }
+        if (have_ns) {
+            g_prev.rx = ns.bytes_rx;
+            g_prev.tx = ns.bytes_tx;
+            g_prev.ns = now;
+        }
+        g_prev.have = have_si || have_ns;
+
+        if (has_ip != g_feed.has_ip || vol != g_feed.volume || memcmp(cfg.ip, g_feed.ip, 4) != 0 ||
+            cpu != g_feed.cpu || net_moved) {
             __atomic_add_fetch(&g_feed.version, 1u, __ATOMIC_RELEASE);
             memcpy(g_feed.ip, cfg.ip, 4);
             g_feed.has_ip = has_ip;
             g_feed.volume = vol;
+            g_feed.cpu = cpu;
+            if (net_moved) {
+                g_feed.rx_rate = rx_rate;
+                g_feed.tx_rate = tx_rate;
+                memmove(g_feed.hist, g_feed.hist + 1, sizeof(g_feed.hist) - sizeof(g_feed.hist[0]));
+                g_feed.hist[SL_DESK_NET_BARS - 1u] = rx_rate + tx_rate;
+                g_feed.net_version++;
+            }
             __atomic_add_fetch(&g_feed.version, 1u, __ATOMIC_RELEASE);
         }
         peos_sleep(SL_DESK_POLL_MS);
@@ -97,6 +147,28 @@ static int sl_desk_feed(uint8_t ip[4], uint8_t *has_ip, int32_t *volume, uint32_
     if (__atomic_load_n(&g_feed.version, __ATOMIC_ACQUIRE) != v0) return 0;
     *version = v0;
     return 1;
+}
+
+// The widgets' share of the feed, consistent like the above.
+typedef struct {
+    int32_t volume, cpu;
+    uint64_t rx_rate, tx_rate, hist[SL_DESK_NET_BARS];
+    uint32_t net_version;
+    uint8_t ip[4], has_ip;
+} sl_desk_widgets_feed_t;
+
+static int sl_desk_widgets_feed(sl_desk_widgets_feed_t *out) {
+    uint32_t v0 = __atomic_load_n(&g_feed.version, __ATOMIC_ACQUIRE);
+    if (v0 & 1u) return 0;
+    out->volume = g_feed.volume;
+    out->cpu = g_feed.cpu;
+    out->rx_rate = g_feed.rx_rate;
+    out->tx_rate = g_feed.tx_rate;
+    memcpy(out->hist, g_feed.hist, sizeof(out->hist));
+    out->net_version = g_feed.net_version;
+    memcpy(out->ip, g_feed.ip, 4);
+    out->has_ip = g_feed.has_ip;
+    return __atomic_load_n(&g_feed.version, __ATOMIC_ACQUIRE) == v0;
 }
 
 // ------------------------------------------------------------------ setup
@@ -121,12 +193,20 @@ static int sl_desk_ready(sl_ctx_t *ctx) {
     g_desk.star = sl_skin_find(&ctx->skin, "bar-star");
     g_desk.wifi = sl_skin_find(&ctx->skin, "bar-wifi");
     g_desk.volume = sl_skin_find(&ctx->skin, "bar-volume");
+    g_desk.globe = sl_skin_find(&ctx->skin, "globe-40");
+    g_desk.w_label = sl_desk_font(ctx, "ui-15");
+    g_desk.w_value = sl_desk_font(ctx, "ui-22-mid");
+    g_desk.w_small = sl_desk_font(ctx, "ui-14");
+    g_desk.mono = sl_desk_font(ctx, "mono-16");
+    g_desk.mono_small = sl_desk_font(ctx, "mono-13");
     if (!g_desk.bar || !g_desk.bar_bold || !g_desk.digits || !g_desk.day || !g_desk.date || !g_desk.cal_title ||
-        !g_desk.cal || !g_desk.cal_bold || !g_desk.star || !g_desk.wifi || !g_desk.volume) {
+        !g_desk.cal || !g_desk.cal_bold || !g_desk.star || !g_desk.wifi || !g_desk.volume || !g_desk.globe ||
+        !g_desk.w_label || !g_desk.w_value || !g_desk.w_small || !g_desk.mono || !g_desk.mono_small) {
         peos_puts("starlight: skin lacks the desktop widgets\n");
         return 0;
     }
     g_feed.volume = -1;
+    g_feed.cpu = -1;
     g_desk.ready = 1u;
     return 1;
 }
@@ -185,6 +265,24 @@ static void sl_desk_layout(sl_ctx_t *ctx) {
     else g_desk.cal_r = (sl_desk_rect_t){ (int32_t)(SL_DESK_LEFT + SL_DESK_CLOCK_W + SL_DESK_CAL_GAP) - 20, 52,
                                           SL_DESK_CAL_W + 40u, cal_h };
     if (W < (uint32_t)g_desk.cal_r.x + g_desk.cal_r.w) g_desk.cal_r.w = 0u;   // no room: no calendar
+    // The widgets as in the design (a column 60 px right of the clock, the
+    // network card right of the calendar), or, with the calendar beside the
+    // clock, the column right of the calendar and the card under it.
+    uint8_t tall = H >= 484u + cal_h;
+    int32_t col = tall ? (int32_t)(SL_DESK_LEFT + SL_DESK_CLOCK_W + 60u)
+                       : g_desk.cal_r.x + (int32_t)g_desk.cal_r.w + 10;
+    g_desk.vol_r = (sl_desk_rect_t){ col, 84, SL_DESK_VOL_W, SL_DESK_VOL_H };
+    g_desk.cpu_r = (sl_desk_rect_t){ col, 394, SL_DESK_CPU_S, SL_DESK_CPU_S };
+    g_desk.net_r = tall ? (sl_desk_rect_t){ (int32_t)(SL_DESK_LEFT + SL_DESK_CAL_W + 198u), 600, SL_DESK_NET_W, SL_DESK_NET_H }
+                        : (sl_desk_rect_t){ g_desk.cal_r.x + 20, 430, SL_DESK_NET_W, SL_DESK_NET_H };
+    sl_desk_rect_t *wr[3] = { &g_desk.vol_r, &g_desk.cpu_r, &g_desk.net_r };
+    for (int i = 0; i < 3; i++) {   // a widget that does not fit (with its shadow) is left out
+        if ((uint32_t)(wr[i]->x + (int32_t)wr[i]->w + SL_DESK_SHADOW) > W ||
+            (uint32_t)(wr[i]->y + (int32_t)wr[i]->h + SL_DESK_SHADOW) > H) wr[i]->w = 0u;
+    }
+    if (!tall && g_desk.cal_r.w == 0u) g_desk.net_r.w = 0u;
+    g_desk.shown_volume = g_desk.shown_cpu = -2;
+    g_desk.shown_net = 0xFFFFFFFFu;
     g_desk.dark_bar = sl_desk_luma(ctx, &g_desk.bar_r) < 128u;
     g_desk.dark_clock = sl_desk_luma(ctx, &g_desk.clock_r) < 128u;
 }
@@ -289,10 +387,9 @@ static int sl_desk_days_in(int month, int year) {
 }
 
 // The month on a night card, weeks from Monday, today in neon.
-static void sl_desk_draw_calendar(sl_ctx_t *ctx, const struct tm *now) {
+static void sl_desk_draw_calendar(sl_ctx_t *ctx, const struct tm *now, const sl_desk_rect_t *clip) {
     if (g_desk.cal_r.w == 0u) return;
-    sl_desk_clear(ctx, &g_desk.cal_r);
-    sl_target_t t = sl_desk_target(ctx, &g_desk.cal_r);
+    sl_target_t t = sl_desk_target(ctx, clip);
     int year = now->tm_year + 1900, month = now->tm_mon;
     int first_wday = (now->tm_wday - (now->tm_mday - 1) % 7 + 7) % 7;   // weekday of the 1st, 0 = Sunday
     int lead = (first_wday + 6) % 7;                                       // blanks before it, weeks from Monday
@@ -332,6 +429,336 @@ static void sl_desk_draw_calendar(sl_ctx_t *ctx, const struct tm *now) {
             sl_text_draw(&t, g_desk.cal, cx - tw / 2, b, num, text[0], text[1], text[2]);
         }
     }
+}
+
+// ------------------------------------------------------------------ widgets
+
+// A widget's area with its shadow: what is cleared and redrawn.
+static sl_desk_rect_t sl_desk_widget_area(const sl_desk_rect_t *r) {
+    return (sl_desk_rect_t){ r->x - SL_DESK_SHADOW, r->y - SL_DESK_SHADOW, r->w + 2u * SL_DESK_SHADOW,
+                             r->h + 2u * SL_DESK_SHADOW };
+}
+
+// The theme's raised (day pearl, night navy) or night surface.
+static sl_surf_style_t sl_desk_raised_style(void) {
+    const sl_ui_color_t *bg = sl_ui_runtime_color(SL_UI_COLOR_BG_CANVAS);
+    const sl_ui_color_t *dk = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_DARK);
+    const sl_ui_color_t *lt = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_LIGHT);
+    sl_surf_style_t st = { bg->r, bg->g, bg->b, 2,
+                           { { 9, 9, 20, 0, dk->r, dk->g, dk->b, 255 }, { -9, -9, 20, 0, lt->r, lt->g, lt->b, 255 } } };
+    return st;
+}
+
+static sl_surf_style_t sl_desk_night_style(void) {
+    const sl_ui_color_t *dk = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_DARK);
+    const sl_ui_color_t *lt = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_LIGHT);
+    sl_surf_style_t st = { 0x11, 0x16, 0x26, 2,
+                           { { 9, 9, 20, 0, dk->r, dk->g, dk->b, 255 }, { -6, -6, 16, 0, lt->r, lt->g, lt->b, 255 } } };
+    return st;
+}
+
+// What the widgets need of libm, which Starlight does not have: precise to
+// far less than a pixel at their sizes.
+static inline float sl_desk_sqrtf(float v) {
+    float r;
+    __asm__("sqrtss %1, %0" : "=x"(r) : "x"(v));
+    return r;
+}
+
+static float sl_desk_sinf(float x) {
+    const float PI = 3.14159265f;
+    while (x > PI) x -= 2.0f * PI;
+    while (x < -PI) x += 2.0f * PI;
+    if (x > PI / 2.0f) x = PI - x;           // sin(x) = sin(pi - x)
+    else if (x < -PI / 2.0f) x = -PI - x;
+    float x2 = x * x;
+    return x * (1.0f - x2 / 6.0f * (1.0f - x2 / 20.0f * (1.0f - x2 / 42.0f)));
+}
+
+static float sl_desk_atan2f(float y, float x) {
+    const float PI = 3.14159265f;
+    float ax = fabsf(x), ay = fabsf(y);
+    if (ax == 0.0f && ay == 0.0f) return 0.0f;
+    float z = ax > ay ? ay / ax : ax / ay;
+    float a = z * (PI / 4.0f) + 0.273f * z * (1.0f - z);   // atan(z) on [0, 1]
+    if (ay > ax) a = PI / 2.0f - a;
+    if (x < 0.0f) a = PI - a;
+    return y < 0.0f ? -a : a;
+}
+
+static inline float sl_desk_clampf(float v) {
+    return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
+// The region being repainted: the widgets' own pixels stay inside it.
+static sl_desk_rect_t g_desk_clip;
+
+// Blend colour c with coverage a (0..1) over the desk layer at x,y.
+static inline void sl_desk_put(sl_ctx_t *ctx, int32_t x, int32_t y, const uint8_t c[3], float a) {
+    if (a <= 0.0f || x < 0 || y < 0 || (uint32_t)x >= ctx->fb.width || (uint32_t)y >= ctx->fb.height) return;
+    if (x < g_desk_clip.x || y < g_desk_clip.y || x >= g_desk_clip.x + (int32_t)g_desk_clip.w ||
+        y >= g_desk_clip.y + (int32_t)g_desk_clip.h) return;
+    uint8_t *p = ctx->desk_frame + (size_t)y * ctx->bg_frame_stride + (size_t)x * ctx->bytespp;
+    uint32_t k = (uint32_t)(a * 256.0f + 0.5f);
+    if (k > 256u) k = 256u;
+    p[0] = (uint8_t)((p[0] * (256u - k) + c[2] * k) >> 8);
+    p[1] = (uint8_t)((p[1] * (256u - k) + c[1] * k) >> 8);
+    p[2] = (uint8_t)((p[2] * (256u - k) + c[0] * k) >> 8);
+}
+
+static void sl_desk_text_centered(sl_target_t *t, const slsk_font_t *f, int32_t cx, int32_t base, const char *s,
+                                  const uint8_t c[3]) {
+    sl_text_draw(t, f, cx - (int32_t)sl_text_width(f, s) / 2, base, s, c[0], c[1], c[2]);
+}
+
+// Blend colour c with 8-bit coverage k over the desk layer at x,y.
+static inline void sl_desk_put8(sl_ctx_t *ctx, int32_t x, int32_t y, const uint8_t c[3], uint32_t k) {
+    if (k == 0u) return;
+    if (x < g_desk_clip.x || y < g_desk_clip.y || x >= g_desk_clip.x + (int32_t)g_desk_clip.w ||
+        y >= g_desk_clip.y + (int32_t)g_desk_clip.h) return;
+    if (x < 0 || y < 0 || (uint32_t)x >= ctx->fb.width || (uint32_t)y >= ctx->fb.height) return;
+    uint8_t *p = ctx->desk_frame + (size_t)y * ctx->bg_frame_stride + (size_t)x * ctx->bytespp;
+    k += k >> 7;   // 0..256
+    p[0] = (uint8_t)((p[0] * (256u - k) + c[2] * k) >> 8);
+    p[1] = (uint8_t)((p[1] * (256u - k) + c[1] * k) >> 8);
+    p[2] = (uint8_t)((p[2] * (256u - k) + c[0] * k) >> 8);
+}
+
+// The widgets' shapes, worked out once: the inner capsule's coverage, and
+// the CPU ring's coverage and the angle of each of its pixels.
+#define SL_DESK_CAP_W 84
+#define SL_DESK_CAP_H 240
+#define SL_DESK_RING 88
+static uint8_t g_cap_mask[SL_DESK_CAP_H][SL_DESK_CAP_W];
+static uint8_t g_ring_mask[SL_DESK_RING][SL_DESK_RING];
+static uint16_t g_ring_angle[SL_DESK_RING][SL_DESK_RING];   // 0..65535 for 0..2pi, clockwise from the top
+static uint8_t g_shapes_ready;
+
+static void sl_desk_shapes(void) {
+    if (g_shapes_ready) return;
+    g_shapes_ready = 1u;
+    const float R = (float)SL_DESK_CAP_W / 2.0f;
+    for (int32_t y = 0; y < SL_DESK_CAP_H; y++) {
+        for (int32_t x = 0; x < SL_DESK_CAP_W; x++) {
+            float px = (float)x + 0.5f, py = (float)y + 0.5f;
+            float sy = py < R ? R : (py > (float)SL_DESK_CAP_H - R ? (float)SL_DESK_CAP_H - R : py);
+            float d = sl_desk_sqrtf((px - R) * (px - R) + (py - sy) * (py - sy)) - R;
+            g_cap_mask[y][x] = (uint8_t)(sl_desk_clampf(0.5f - d) * 255.0f + 0.5f);
+        }
+    }
+    const float C = (float)SL_DESK_RING / 2.0f, RR = 36.0f, half = 3.5f, PI2 = 6.2831853f;
+    for (int32_t y = 0; y < SL_DESK_RING; y++) {
+        for (int32_t x = 0; x < SL_DESK_RING; x++) {
+            float dx = (float)x + 0.5f - C, dy = (float)y + 0.5f - C;
+            float dist = sl_desk_sqrtf(dx * dx + dy * dy);
+            g_ring_mask[y][x] = (uint8_t)(sl_desk_clampf(half - fabsf(dist - RR) + 0.5f) * 255.0f + 0.5f);
+            float ang = sl_desk_atan2f(dx, -dy);
+            if (ang < 0.0f) ang += PI2;
+            g_ring_angle[y][x] = (uint16_t)(ang / PI2 * 65535.0f);
+        }
+    }
+}
+
+// The volume: a raised capsule holding a night one, filled from the bottom
+// by a wave up to the level, the value in neon (tavola Desktop).
+static void sl_desk_draw_volume(sl_ctx_t *ctx, int32_t volume, const sl_desk_rect_t *clip) {
+    const sl_desk_rect_t *r = &g_desk.vol_r;
+    if (r->w == 0u) return;
+    sl_desk_shapes();
+    sl_target_t t = sl_desk_target(ctx, clip);
+    sl_surf_style_t raised = sl_desk_raised_style();
+    sl_desk_surface(ctx, &t, &raised, r->x, r->y, r->w, r->h, r->w / 2u);
+
+    // The night capsule, then the wave over it below its edge (smooth on
+    // the edge row), both through the capsule's coverage.
+    const int32_t ix = r->x + 14, iy = r->y + 15;
+    static const uint8_t night[3] = { 0x11, 0x16, 0x26 }, wave[3] = { 0x1C, 0x24, 0x40 };
+    float level = volume < 0 ? 0.0f : (float)volume / 100.0f;
+    // The wave's mean height: from just under the bottom to past the top, so
+    // that a full volume fills the capsule, crests included.
+    float top = (float)SL_DESK_CAP_H - 8.0f - level * (float)(SL_DESK_CAP_H + 8);
+    for (int32_t x = 0; x < SL_DESK_CAP_W; x++) {
+        float wy = top + 8.0f * sl_desk_sinf(((float)x + 0.5f) / (float)SL_DESK_CAP_W * 6.2831853f * 1.1f + 0.6f);
+        int32_t edge = volume > 0 ? (int32_t)wy : SL_DESK_CAP_H;
+        uint32_t frac = (uint32_t)((wy - (float)(int32_t)wy) * 255.0f);   // the edge row's share of night
+        for (int32_t y = 0; y < SL_DESK_CAP_H; y++) {
+            uint32_t k = g_cap_mask[y][x];
+            if (!k) continue;
+            sl_desk_put8(ctx, ix + x, iy + y, night, k);
+            if (y > edge) sl_desk_put8(ctx, ix + x, iy + y, wave, k);
+            else if (y == edge) sl_desk_put8(ctx, ix + x, iy + y, wave, k * (255u - frac) / 255u);
+        }
+    }
+    const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+    uint8_t neon[3] = { n->r, n->g, n->b };
+    char val[8];
+    if (volume >= 0) snprintf(val, sizeof(val), "%d%%", (int)volume);
+    else snprintf(val, sizeof(val), "--");
+    int32_t cx = r->x + (int32_t)r->w / 2, base = iy + SL_DESK_CAP_H - 36;
+    sl_desk_text_centered(&t, g_desk.w_value, cx, base, val, neon);
+    sl_desk_text_centered(&t, g_desk.w_label, cx, base - 28, "Volume", neon);
+}
+
+// A round end of the arc: an anti-aliased disc of radius 3.5 at cx,cy.
+static void sl_desk_cap(sl_ctx_t *ctx, int32_t ox, int32_t oy, float cx, float cy, const uint8_t c[3]) {
+    for (int32_t y = (int32_t)(cy - 5.0f); y <= (int32_t)(cy + 5.0f); y++) {
+        for (int32_t x = (int32_t)(cx - 5.0f); x <= (int32_t)(cx + 5.0f); x++) {
+            float dx = (float)x + 0.5f - cx, dy = (float)y + 0.5f - cy;
+            float cov = sl_desk_clampf(3.5f - sl_desk_sqrtf(dx * dx + dy * dy) + 0.5f);
+            if (cov > 0.0f) sl_desk_put(ctx, ox + x, oy + y, c, cov);
+        }
+    }
+}
+
+// The CPU: a ring on a raised square, the load as a neon arc from the top.
+static void sl_desk_draw_cpu(sl_ctx_t *ctx, int32_t cpu, const sl_desk_rect_t *clip) {
+    const sl_desk_rect_t *r = &g_desk.cpu_r;
+    if (r->w == 0u) return;
+    sl_desk_shapes();
+    sl_target_t t = sl_desk_target(ctx, clip);
+    sl_surf_style_t raised = sl_desk_raised_style();
+    sl_desk_surface(ctx, &t, &raised, r->x, r->y, r->w, r->h, 30u);
+
+    const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+    const sl_ui_color_t *lt = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_LIGHT);
+    uint8_t neon[3] = { n->r, n->g, n->b };
+    uint8_t track[3] = { (uint8_t)((lt->r * 3u + 0xE3u) / 4u), (uint8_t)((lt->g * 3u + 0xE6u) / 4u),
+                         (uint8_t)((lt->b * 3u + 0xECu) / 4u) };   // #F4F5F8 by day
+    uint32_t end = cpu <= 0 ? 0u : (uint32_t)cpu * 65535u / 100u;
+    int32_t ox = r->x + 12, oy = r->y + 12;
+    for (int32_t y = 0; y < SL_DESK_RING; y++) {
+        for (int32_t x = 0; x < SL_DESK_RING; x++) {
+            uint32_t k = g_ring_mask[y][x];
+            if (!k) continue;
+            sl_desk_put8(ctx, ox + x, oy + y, track, k);
+            if (g_ring_angle[y][x] < end) sl_desk_put8(ctx, ox + x, oy + y, neon, k);
+        }
+    }
+    if (end) {   // round ends, as stroke-linecap round
+        const float C = (float)SL_DESK_RING / 2.0f, a = (float)end / 65535.0f * 6.2831853f;
+        sl_desk_cap(ctx, ox, oy, C, C - 36.0f, neon);
+        sl_desk_cap(ctx, ox, oy, C + 36.0f * sl_desk_sinf(a), C - 36.0f * sl_desk_sinf(a + 1.5707963f), neon);
+    }
+    const sl_ui_color_t *ink = sl_ui_runtime_color(SL_UI_COLOR_TEXT_PRIMARY);
+    const sl_ui_color_t *mu = sl_ui_runtime_color(SL_UI_COLOR_TEXT_SECONDARY);
+    uint8_t ic[3] = { ink->r, ink->g, ink->b }, mc[3] = { mu->r, mu->g, mu->b };
+    char val[8];
+    if (cpu >= 0) snprintf(val, sizeof(val), "%d%%", (int)cpu);
+    else snprintf(val, sizeof(val), "--");
+    sl_desk_text_centered(&t, g_desk.mono, ox + 44, oy + 47, val, ic);
+    sl_desk_text_centered(&t, g_desk.mono_small, ox + 44, oy + 62, "CPU", mc);
+}
+
+// "6,9 MB/s": one decimal under ten, comma as the decimal point.
+static void sl_desk_rate(char *out, size_t cap, const char *arrow, uint64_t bps) {
+    static const char *const unit[] = { "B/s", "KB/s", "MB/s", "GB/s" };
+    uint64_t v10 = bps * 10u;
+    int u = 0;
+    while (v10 >= 10240u && u < 3) {
+        v10 /= 1024u;
+        u++;
+    }
+    if (v10 < 100u && u > 0) snprintf(out, cap, "%s %u,%u %s", arrow, (unsigned)(v10 / 10u), (unsigned)(v10 % 10u), unit[u]);
+    else snprintf(out, cap, "%s %u %s", arrow, (unsigned)(v10 / 10u), unit[u]);
+}
+
+// The network: a night card with netd's address, the traffic of the last
+// polls as bars, and the rates now.
+static void sl_desk_draw_net(sl_ctx_t *ctx, const sl_desk_widgets_feed_t *f, const sl_desk_rect_t *clip) {
+    const sl_desk_rect_t *r = &g_desk.net_r;
+    if (r->w == 0u) return;
+    sl_target_t t = sl_desk_target(ctx, clip);
+    sl_surf_style_t night = sl_desk_night_style();
+    sl_desk_surface(ctx, &t, &night, r->x, r->y, r->w, r->h, 40u);
+
+    const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+    static const uint8_t head[3] = { 0x9F, 0xB4, 0xD8 }, text[3] = { 0xE8, 0xF4, 0xFF };
+    int32_t x0 = r->x + 30, y0 = r->y + 24;
+    const slsk_entry_t *g = g_desk.globe;
+    sl_blit_mask(&t, sl_skin_data(&ctx->skin, g), g->width, g->height, g->width, x0, y0, n->r, n->g, n->b, 255u);
+    char ip[20];
+    if (f->has_ip) snprintf(ip, sizeof(ip), "%u.%u.%u.%u", f->ip[0], f->ip[1], f->ip[2], f->ip[3]);
+    else snprintf(ip, sizeof(ip), "offline");
+    sl_text_draw(&t, g_desk.w_small, x0 + 56, y0 + 15, "Rete \xC2\xB7 netd", head[0], head[1], head[2]);
+    sl_text_draw(&t, g_desk.w_value, x0 + 56, y0 + 40, ip, text[0], text[1], text[2]);
+
+    // Bars: the busiest poll is full height; older ones dimmer.
+    uint64_t peak = 1u;
+    for (uint32_t i = 0; i < SL_DESK_NET_BARS; i++) if (f->hist[i] > peak) peak = f->hist[i];
+    int32_t bottom = r->y + (int32_t)r->h - 24;
+    for (uint32_t i = 0; i < SL_DESK_NET_BARS; i++) {
+        uint32_t h = 6u + (uint32_t)((f->hist[i] * 34u) / peak);
+        uint32_t k = i < 3u ? 110u + i * 40u : 255u;   // dimmer to the left
+        sl_surf_style_t bar = { (uint8_t)((n->r * k + 0x11u * (255u - k)) / 255u),
+                                (uint8_t)((n->g * k + 0x16u * (255u - k)) / 255u),
+                                (uint8_t)((n->b * k + 0x26u * (255u - k)) / 255u), 0, { { 0 } } };
+        sl_desk_surface(ctx, &t, &bar, x0 + (int32_t)(i * 11u), bottom - (int32_t)h, 6u, h, 3u);
+    }
+    char down[32], up[32];
+    sl_desk_rate(down, sizeof(down), "\xE2\x86\x93", f->rx_rate);
+    sl_desk_rate(up, sizeof(up), "\xE2\x86\x91", f->tx_rate);
+    int32_t right = r->x + (int32_t)r->w - 30;
+    sl_text_draw(&t, g_desk.w_label, right - (int32_t)sl_text_width(g_desk.w_label, down), bottom - 22, down,
+                 text[0], text[1], text[2]);
+    sl_text_draw(&t, g_desk.w_label, right - (int32_t)sl_text_width(g_desk.w_label, up), bottom, up,
+                 text[0], text[1], text[2]);
+}
+
+static int sl_desk_overlap(const sl_desk_rect_t *a, const sl_desk_rect_t *b) {
+    return a->w && b->w && a->x < b->x + (int32_t)b->w && b->x < a->x + (int32_t)a->w &&
+           a->y < b->y + (int32_t)b->h && b->y < a->y + (int32_t)a->h;
+}
+
+// Repaint a region of the layer: back to the wallpaper, then every card
+// that reaches into it, bottom to top, clipped to it. Cards' shadows overlap
+// (the design puts them 30-40 px apart): repainting one must not cut the
+// shadow of its neighbour.
+static void sl_desk_paint(sl_ctx_t *ctx, const sl_desk_rect_t *area, const struct tm *now,
+                          const sl_desk_widgets_feed_t *f) {
+    if (area->w == 0u) return;
+    sl_desk_clear(ctx, area);
+    g_desk_clip = *area;
+    sl_desk_rect_t cal = g_desk.cal_r, vol = sl_desk_widget_area(&g_desk.vol_r);
+    sl_desk_rect_t cpu = sl_desk_widget_area(&g_desk.cpu_r), net = sl_desk_widget_area(&g_desk.net_r);
+    if (g_desk.vol_r.w == 0u) vol.w = 0u;
+    if (g_desk.cpu_r.w == 0u) cpu.w = 0u;
+    if (g_desk.net_r.w == 0u) net.w = 0u;
+    if (sl_desk_overlap(area, &cal)) sl_desk_draw_calendar(ctx, now, area);
+    if (sl_desk_overlap(area, &vol)) sl_desk_draw_volume(ctx, f->volume, area);
+    if (sl_desk_overlap(area, &cpu)) sl_desk_draw_cpu(ctx, f->cpu, area);
+    if (sl_desk_overlap(area, &net)) sl_desk_draw_net(ctx, f, area);
+}
+
+// Repaint the widgets whose value moved since they were drawn (force: all).
+static void sl_desk_draw_widgets(sl_ctx_t *ctx, const struct tm *now, uint8_t force) {
+    sl_desk_widgets_feed_t f;
+    if (!sl_desk_widgets_feed(&f)) {
+        if (!force) return;
+        memset(&f, 0, sizeof(f));
+        f.volume = g_feed.volume;
+        f.cpu = g_feed.cpu;
+    }
+    uint8_t vol = force || f.volume != g_desk.shown_volume;
+    uint8_t cpu = force || f.cpu != g_desk.shown_cpu;
+    uint8_t net = force || f.net_version != g_desk.shown_net;
+    g_desk.shown_volume = f.volume;
+    g_desk.shown_cpu = f.cpu;
+    g_desk.shown_net = f.net_version;
+    sl_desk_rect_t a;
+    if (vol && g_desk.vol_r.w) { a = sl_desk_widget_area(&g_desk.vol_r); sl_desk_paint(ctx, &a, now, &f); }
+    if (cpu && g_desk.cpu_r.w) { a = sl_desk_widget_area(&g_desk.cpu_r); sl_desk_paint(ctx, &a, now, &f); }
+    if (net && g_desk.net_r.w) { a = sl_desk_widget_area(&g_desk.net_r); sl_desk_paint(ctx, &a, now, &f); }
+}
+
+// The calendar's region, with whatever widgets reach into it.
+static void sl_desk_draw_calendar_region(sl_ctx_t *ctx, const struct tm *now) {
+    sl_desk_widgets_feed_t f;
+    if (!sl_desk_widgets_feed(&f)) {
+        memset(&f, 0, sizeof(f));
+        f.volume = g_desk.shown_volume;
+        f.cpu = g_desk.shown_cpu;
+    }
+    sl_desk_paint(ctx, &g_desk.cal_r, now, &f);
 }
 
 // ------------------------------------------------------------------ public
@@ -374,6 +801,12 @@ static void sl_desk_now(const sl_ctx_t *ctx, struct tm *out) {
     *out = *localtime(&local);
 }
 
+void sl_desk_local_hhmm(const sl_ctx_t *ctx, char *out, size_t cap) {
+    struct tm now;
+    sl_desk_now(ctx, &now);
+    snprintf(out, cap, "%02d:%02d", now.tm_hour, now.tm_min);
+}
+
 void sl_desk_build(sl_ctx_t *ctx) {
     if (!ctx || !ctx->bg_frame || !sl_desk_ready(ctx)) return;
     size_t bytes = ctx->bg_frame_stride * ctx->fb.height;
@@ -393,7 +826,8 @@ void sl_desk_build(sl_ctx_t *ctx) {
     g_desk.day_no = g_desk.minute / 1440;
     sl_desk_draw_bar(ctx, &now);
     sl_desk_draw_clock(ctx, &now);
-    sl_desk_draw_calendar(ctx, &now);
+    sl_desk_draw_calendar_region(ctx, &now);
+    sl_desk_draw_widgets(ctx, &now, 1u);
 }
 
 void sl_desk_tick(sl_ctx_t *ctx) {
@@ -412,21 +846,24 @@ void sl_desk_tick(sl_ctx_t *ctx) {
         snprintf(g_desk.focus_title, sizeof(g_desk.focus_title), "%s", task ? focused->title : "");
         bar = 1u;
     }
+    uint8_t widgets = 0u;
     if (version != g_desk.data_version) {
         g_desk.data_version = version;
         bar = 1u;
+        widgets = 1u;
     }
     if (minute == g_desk.minute && !bar) return;   // nothing changed: no work
 
     struct tm now;
     sl_desk_now(ctx, &now);
+    if (widgets) sl_desk_draw_widgets(ctx, &now, 0u);
     sl_desk_draw_bar(ctx, &now);
     if (minute != g_desk.minute) {
         g_desk.minute = minute;
         sl_desk_draw_clock(ctx, &now);
         if (minute / 1440 != g_desk.day_no) {
             g_desk.day_no = minute / 1440;
-            sl_desk_draw_calendar(ctx, &now);
+            sl_desk_draw_calendar_region(ctx, &now);
         }
     }
 }
