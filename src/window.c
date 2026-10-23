@@ -2,6 +2,7 @@
 
 #include "starlight_internal.h"
 #include "app_host.h"
+#include "ui_sdk.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -11,41 +12,41 @@
 #define SL_ACTIVITY_BOOST_NS 300000000ull
 #define SL_ACTIVITY_IDLE_NS 2500000000ull
 
-// Colours of the frame (theme tokens of the soft UI boards).
-#define SL_WIN_PEARL_R 0xE3u
-#define SL_WIN_PEARL_G 0xE6u
-#define SL_WIN_PEARL_B 0xECu
-#define SL_WIN_INK 0x1Au, 0x1Du, 0x26u
-#define SL_WIN_MUTED 0x5Au, 0x60u, 0x6Eu
-#define SL_WIN_DOT_OFF 0xCDu, 0xD1u, 0xD9u
+// Colours of the frame: the runtime theme (day or night).
+#define SL_WIN_RGB(tok) sl_ui_runtime_color(tok)->r, sl_ui_runtime_color(tok)->g, sl_ui_runtime_color(tok)->b
+#define SL_WIN_INK SL_WIN_RGB(SL_UI_COLOR_TEXT_PRIMARY)
+#define SL_WIN_MUTED SL_WIN_RGB(SL_UI_COLOR_TEXT_SECONDARY)
+#define SL_WIN_DOT_OFF SL_WIN_RGB(SL_UI_COLOR_BORDER)
 
 // Skin entries the frame uses, looked up once.
 static struct {
     uint8_t ready;
     const slsk_entry_t *body_active, *body_inactive;
-    const slsk_entry_t *btn, *btn_down, *dot_neon;
+    const slsk_entry_t *btn, *btn_down;
+    uint32_t theme_version;          // the sprites below are this theme's
     const slsk_entry_t *glyph[3], *dot;
     const slsk_font_t *title_active, *title_inactive;
 } g_frame;
 
 static int sl_window_frame_ready(sl_ctx_t *ctx) {
-    if (g_frame.ready) return g_frame.ready == 1u;
+    if (g_frame.ready && g_frame.theme_version == sl_ui_runtime_version()) return g_frame.ready == 1u;
     g_frame.ready = 2u;
+    g_frame.theme_version = sl_ui_runtime_version();
     if (!ctx->skin_loaded) return 0;
     const sl_skin_t *s = &ctx->skin;
+    uint8_t night = sl_ui_runtime_night();
     const slsk_entry_t *ta = sl_skin_find(s, "ui-16-mid");
     const slsk_entry_t *ti = sl_skin_find(s, "ui-16");
-    g_frame.body_active = sl_skin_find(s, "window-a");
-    g_frame.body_inactive = sl_skin_find(s, "window-flat-a");
-    g_frame.btn = sl_skin_find(s, "win-btn-a");
-    g_frame.btn_down = sl_skin_find(s, "win-btn-down-a");
-    g_frame.dot_neon = sl_skin_find(s, "dot-neon");
+    g_frame.body_active = sl_skin_find(s, night ? "window-n-a" : "window-a");
+    g_frame.body_inactive = sl_skin_find(s, night ? "window-flat-n-a" : "window-flat-a");
+    g_frame.btn = sl_skin_find(s, night ? "win-btn-n-a" : "win-btn-a");
+    g_frame.btn_down = sl_skin_find(s, night ? "win-btn-down-n-a" : "win-btn-down-a");
     g_frame.glyph[SL_WIN_BTN_CLOSE] = sl_skin_find(s, "win-close");
     g_frame.glyph[SL_WIN_BTN_MIN] = sl_skin_find(s, "win-min");
     g_frame.glyph[SL_WIN_BTN_MAX] = sl_skin_find(s, "win-max");
     g_frame.dot = sl_skin_find(s, "dot-12");
     if (!ta || !ti || !g_frame.body_active || !g_frame.body_inactive || !g_frame.btn || !g_frame.btn_down ||
-        !g_frame.dot_neon || !g_frame.glyph[0] || !g_frame.glyph[1] || !g_frame.glyph[2] || !g_frame.dot) {
+        !g_frame.glyph[0] || !g_frame.glyph[1] || !g_frame.glyph[2] || !g_frame.dot) {
         peos_puts("starlight: skin lacks the window frame, plain frames\n");
         return 0;
     }
@@ -234,7 +235,7 @@ static void sl_window_ring_rect(uint32_t dx, uint32_t dy, uint32_t dw, uint32_t 
 static void sl_window_draw_inside(sl_window_t *win) {
     sl_ctx_t *ctx = win->ctx;
     sl_win_rect_t in = sl_window_inner_rect(win);
-    sl_fill_rect(ctx, (uint32_t)in.x, (uint32_t)in.y, in.w, in.h, SL_WIN_PEARL_R, SL_WIN_PEARL_G, SL_WIN_PEARL_B);
+    sl_fill_rect(ctx, (uint32_t)in.x, (uint32_t)in.y, in.w, in.h, SL_WIN_RGB(SL_UI_COLOR_BG_CANVAS));
     const char *title = win->title[0] ? win->title : "App";
 
     if (g_frame.ready == 1u) {
@@ -278,10 +279,9 @@ static void sl_window_draw_inside(sl_window_t *win) {
             if (win->focused) sl_text_draw(&tt, f, (int32_t)(win->x + off), base, title, SL_WIN_INK);
             else sl_text_draw(&tt, f, (int32_t)(win->x + off), base, title, SL_WIN_MUTED);
         }
-        if (win->focused) {
-            const slsk_entry_t *d = g_frame.dot_neon;
-            sl_draw_skin(ctx, d, (int32_t)(win->x + win->width - SL_WIN_PAD_X - 10u),
-                         (int32_t)(win->y + SL_WIN_PAD_TOP + (SL_WIN_BAR_H - 10u) / 2u), 10u, 10u);
+        if (win->focused) {   // the accent dot, from the theme
+            sl_ui_ctx_surface(ctx, SL_UI_SURF_NEON_DOT, win->x + win->width - SL_WIN_PAD_X - 10u,
+                              win->y + SL_WIN_PAD_TOP + (SL_WIN_BAR_H - 10u) / 2u, 10u, 10u, 5u);
         }
         if (saved_clip) sl_clip_set(ctx, scx, scy, scw, sch);
         else sl_clip_clear(ctx);

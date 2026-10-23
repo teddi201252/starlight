@@ -20,6 +20,7 @@ static sl_ui_color_t sl_ui_rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
 
 void sl_ui_theme_set_default(sl_ui_theme_t *theme) {
     if (!theme) return;
+    theme->night = 0u;
     // Soft UI, day (design/starlight-soft-ui, tavola Componenti e colori):
     // pearl ground, ink text, night accent, neon focus.
     theme->colors[SL_UI_COLOR_BG_CANVAS] = sl_ui_rgba(0xE3u, 0xE6u, 0xECu, 255u);
@@ -41,6 +42,47 @@ void sl_ui_theme_set_default(sl_ui_theme_t *theme) {
     theme->colors[SL_UI_COLOR_SHADOW_DARK] = sl_ui_rgba(0xBCu, 0xC1u, 0xCBu, 255u);
     theme->colors[SL_UI_COLOR_SHADOW_LIGHT] = sl_ui_rgba(0xFFu, 0xFFu, 0xFFu, 255u);
     theme->colors[SL_UI_COLOR_NEON] = sl_ui_rgba(0x59u, 0xD0u, 0xFFu, 255u);
+}
+
+// Soft UI, night: the same surfaces on a deep navy ground.
+void sl_ui_theme_set_night(sl_ui_theme_t *theme) {
+    if (!theme) return;
+    sl_ui_theme_set_default(theme);
+    theme->night = 1u;
+    theme->colors[SL_UI_COLOR_BG_CANVAS] = sl_ui_rgba(0x1Au, 0x21u, 0x36u, 255u);
+    theme->colors[SL_UI_COLOR_BG_PANEL] = sl_ui_rgba(0x1Au, 0x21u, 0x36u, 255u);
+    theme->colors[SL_UI_COLOR_BG_CONTROL] = sl_ui_rgba(0x1Au, 0x21u, 0x36u, 255u);
+    theme->colors[SL_UI_COLOR_BG_CONTROL_HOVER] = sl_ui_rgba(0x22u, 0x2Au, 0x42u, 255u);
+    theme->colors[SL_UI_COLOR_BG_CONTROL_ACTIVE] = sl_ui_rgba(0x14u, 0x1Au, 0x2Cu, 255u);
+    theme->colors[SL_UI_COLOR_BORDER] = sl_ui_rgba(0x2Bu, 0x33u, 0x52u, 255u);
+    theme->colors[SL_UI_COLOR_TEXT_PRIMARY] = sl_ui_rgba(0xEAu, 0xF4u, 0xFFu, 255u);
+    theme->colors[SL_UI_COLOR_TEXT_SECONDARY] = sl_ui_rgba(0x9Fu, 0xB4u, 0xD8u, 255u);
+    theme->colors[SL_UI_COLOR_TEXT_DISABLED] = sl_ui_rgba(0x5Au, 0x65u, 0x84u, 255u);
+    theme->colors[SL_UI_COLOR_ACCENT] = sl_ui_rgba(0x0Bu, 0x10u, 0x20u, 255u);
+    theme->colors[SL_UI_COLOR_ACCENT_HOVER] = sl_ui_rgba(0x14u, 0x1Bu, 0x30u, 255u);
+    theme->colors[SL_UI_COLOR_ACCENT_ACTIVE] = sl_ui_rgba(0x07u, 0x0Au, 0x16u, 255u);
+    theme->colors[SL_UI_COLOR_DANGER] = sl_ui_rgba(0xE0u, 0x60u, 0x6Au, 255u);
+    theme->colors[SL_UI_COLOR_SUCCESS] = sl_ui_rgba(0x4Fu, 0xE3u, 0xB0u, 255u);
+    theme->colors[SL_UI_COLOR_WARNING] = sl_ui_rgba(0xFFu, 0xB5u, 0x47u, 255u);
+    theme->colors[SL_UI_COLOR_SHADOW_DARK] = sl_ui_rgba(0x0Cu, 0x10u, 0x20u, 255u);
+    theme->colors[SL_UI_COLOR_SHADOW_LIGHT] = sl_ui_rgba(0x2Au, 0x33u, 0x54u, 255u);
+}
+
+const sl_ui_color_t *sl_ui_runtime_color(sl_ui_color_token_t token) {
+    static const sl_ui_color_t fallback = {255u, 0u, 255u, 255u};
+    if (!g_runtime_theme_initialized) {
+        sl_ui_theme_set_default(&g_runtime_theme);
+        g_runtime_theme_initialized = 1u;
+    }
+    return token < SL_UI_COLOR_COUNT ? &g_runtime_theme.colors[token] : &fallback;
+}
+
+uint8_t sl_ui_runtime_night(void) {
+    return g_runtime_theme_initialized ? g_runtime_theme.night : 0u;
+}
+
+uint32_t sl_ui_runtime_version(void) {
+    return g_runtime_theme_version;
 }
 
 void sl_ui_theme_apply(sl_ui_ctx_t *ui, const sl_ui_theme_t *theme) {
@@ -245,7 +287,8 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
     }
     sl_surf_style_t st;
     memset(&st, 0, sizeof(st));
-    const sl_ui_color_t *fill = sl_ui_theme_color(ui, kind >= SL_UI_SURF_NIGHT ? SL_UI_COLOR_ACCENT
+    const sl_ui_color_t *fill = sl_ui_theme_color(ui, kind == SL_UI_SURF_NEON_DOT ? SL_UI_COLOR_NEON
+                                                    : kind >= SL_UI_SURF_NIGHT ? SL_UI_COLOR_ACCENT
                                                     : (kind == SL_UI_SURF_INSET ? SL_UI_COLOR_BG_CANVAS
                                                                                 : SL_UI_COLOR_BG_CONTROL));
     st.fill_r = fill->r;
@@ -279,6 +322,10 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
     case SL_UI_SURF_NIGHT_GLOW:
         st.shadow_count = 1;
         st.shadows[0] = sl_ui_shadow(ui, 0, 7, 0, SL_UI_COLOR_NEON, 255u);
+        break;
+    case SL_UI_SURF_NEON_DOT:
+        st.shadow_count = 1;
+        st.shadows[0] = sl_ui_shadow(ui, 0, 8, 0, SL_UI_COLOR_NEON, 200u);
         break;
     }
     const sl_surf_t *s = sl_surf_get(&st, w, h, r);
@@ -315,6 +362,23 @@ const slsk_font_t *sl_ui_ctx_face(sl_ctx_t *ctx) {
 uint32_t sl_ui_ctx_text_width(sl_ctx_t *ctx, const char *text) {
     const slsk_font_t *f = sl_ui_ctx_face(ctx);
     return f ? sl_text_width(f, text) : sl_text_measure_width(text);
+}
+
+int sl_ui_ctx_mono_cell(sl_ctx_t *ctx, uint32_t *cell_w, uint32_t *cell_h) {
+    static sl_ui_ctx_t tmp;
+    tmp.ctx = ctx;
+    if (!sl_ui_mono(&tmp)) return 0;
+    *cell_w = sl_ui_font_w(&tmp);
+    *cell_h = sl_ui_font_h(&tmp);
+    return 1;
+}
+
+void sl_ui_ctx_mono_text(sl_ctx_t *ctx, uint32_t x, uint32_t y, const char *text, uint8_t r, uint8_t g, uint8_t b) {
+    static sl_ui_ctx_t tmp;
+    tmp.ctx = ctx;
+    tmp.theme_initialized = 1u;
+    tmp.theme.colors[SL_UI_COLOR_TEXT_PRIMARY] = sl_ui_rgba(r, g, b, 255u);
+    sl_ui_text_cells(&tmp, x, y, text, SL_UI_COLOR_TEXT_PRIMARY);
 }
 
 static uint32_t sl_ui_pill_r(uint32_t h, uint32_t max_r) {

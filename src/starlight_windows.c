@@ -1,4 +1,5 @@
 #include "ui_sdk.h"
+#include "notify.h"
 #include "starlight_internal.h"
 #include "app_host.h"
 #include "context_menu_renderer.h"
@@ -81,6 +82,7 @@ typedef struct {
     // Dock and app manager tiles (render/slsk.h), resolved on first draw.
 #define SL_DOCK_TILE_SETS 5
     uint8_t tiles_ready;
+    uint32_t tiles_version;         // theme version the tiles were resolved for
     uint8_t tile_custom;            // a baked tile of its own, not the blank one
     const slsk_entry_t *tiles[SL_DOCK_TILE_SETS];
     uint8_t *own_icon[2];           // its own icon scaled to 44 and 66 px, or NULL
@@ -791,7 +793,8 @@ static void sl_launcher_invalidate_overlay(sl_ctx_t *ctx, uint32_t x, uint32_t y
 
 static struct {
     uint8_t ready;
-    const slsk_entry_t *panel, *pill, *dot, *bar, *fin, *fin_close;
+    uint32_t theme_version;          // the sprites below are this theme's
+    const slsk_entry_t *panel, *pill, *fin, *chev_open, *chev_close;
     const slsk_entry_t *hi_pad_ref;   // a dock-hi tile, for its shadow margins
     const slsk_font_t *label, *initial, *initial_big, *title;
 } g_dock;
@@ -802,23 +805,24 @@ static uint64_t g_dock_indicators = 0u;    // running/focused bits last drawn
 static uint8_t g_dock_hover_in_mgr = 0u;   // the hovered item is a manager tile, not a dock one
 
 static int sl_dock_ready(const sl_ctx_t *ctx) {
-    if (g_dock.ready) return g_dock.ready == 1u;
+    if (g_dock.ready && g_dock.theme_version == sl_ui_runtime_version()) return g_dock.ready == 1u;
     g_dock.ready = 2u;
+    g_dock.theme_version = sl_ui_runtime_version();
+    uint8_t night = sl_ui_runtime_night();
     if (!ctx || !ctx->skin_loaded) return 0;
     const sl_skin_t *s = &ctx->skin;
     const slsk_entry_t *f1 = sl_skin_find(s, "ui-15");
     const slsk_entry_t *f2 = sl_skin_find(s, "ui-22-mid");
     const slsk_entry_t *f3 = sl_skin_find(s, "ui-34-light");
     const slsk_entry_t *f4 = sl_skin_find(s, "ui-30-light");
-    g_dock.panel = sl_skin_find(s, "dock-a");
-    g_dock.pill = sl_skin_find(s, "pill-a");
-    g_dock.dot = sl_skin_find(s, "ind-dot-a");
-    g_dock.bar = sl_skin_find(s, "ind-bar-a");
-    g_dock.fin = sl_skin_find(s, "fin");
-    g_dock.fin_close = sl_skin_find(s, "fin-close");
+    g_dock.panel = sl_skin_find(s, night ? "dock-n-a" : "dock-a");
+    g_dock.pill = sl_skin_find(s, night ? "pill-n-a" : "pill-a");
+    g_dock.fin = sl_skin_find(s, night ? "fin-n" : "fin");
+    g_dock.chev_open = sl_skin_find(s, "chev-right");
+    g_dock.chev_close = sl_skin_find(s, "chev-left");
     g_dock.hi_pad_ref = sl_skin_find(s, "dock-hi-blank");
-    if (!f1 || !f2 || !f3 || !f4 || !g_dock.panel || !g_dock.pill || !g_dock.dot || !g_dock.bar ||
-        !g_dock.fin || !g_dock.fin_close || !g_dock.hi_pad_ref) {
+    if (!f1 || !f2 || !f3 || !f4 || !g_dock.panel || !g_dock.pill ||
+        !g_dock.fin || !g_dock.chev_open || !g_dock.chev_close || !g_dock.hi_pad_ref) {
         peos_puts("starlight: skin lacks the dock\n");
         return 0;
     }
@@ -887,9 +891,13 @@ static uint8_t *sl_dock_scale_icon(const sl_image_t *img, uint32_t size) {
 
 // Resolve once: the item's tiles, or a blank tile with its icon or initial.
 static void sl_dock_resolve(const sl_ctx_t *ctx, sl_launcher_item_t *item) {
-    if (item->tiles_ready || !ctx->skin_loaded) return;
+    // Resolved again when the theme changes: night has its own tiles.
+    if ((item->tiles_ready && item->tiles_version == sl_ui_runtime_version()) || !ctx->skin_loaded) return;
     item->tiles_ready = 1u;
-    static const char *sets[SL_DOCK_TILE_SETS] = { "dock", "dock-hi", "dock-down", "manager", "manager-hi" };
+    item->tiles_version = sl_ui_runtime_version();
+    static const char *day[SL_DOCK_TILE_SETS] = { "dock", "dock-hi", "dock-down", "manager", "manager-hi" };
+    static const char *night[SL_DOCK_TILE_SETS] = { "dock-n", "dock-hi-n", "dock-down", "manager-n", "manager-hi-n" };
+    const char *const *sets = sl_ui_runtime_night() ? night : day;
     const char *key = sl_dock_skin_key(item->title);
     for (int k = 0; k < SL_DOCK_TILE_SETS; k++) {
         char name[SLSK_NAME_MAX];
@@ -2146,6 +2154,15 @@ void sl_windows_tick_animations(sl_ctx_t *ctx) {
     (void)any_active;
 }
 
+void sl_windows_theme_changed(sl_ctx_t *ctx) {
+    (void)ctx;
+    for (size_t i = 0u; g_windows && i < g_window_count; i++) {
+        g_windows[i].force_redraw = 1u;
+        g_windows[i].cache_valid = 0u;
+        g_windows[i].next_render_ns = 0ull;
+    }
+}
+
 int sl_windows_top_opaque_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
     if (!ctx || !g_windows) return 0;
     for (size_t i = g_window_count; i > 0u; i--) {
@@ -2228,6 +2245,13 @@ uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx) {
     if (g_launcher_count == 0u) return 0u;
     // The dock and its fin; the app manager covers windows, it does not push them.
     return SL_DOCK_X + SL_DOCK_W + SL_FIN_W + SL_LAUNCHER_RESERVED_GAP;
+}
+
+void sl_launcher_mark_dirty(sl_ctx_t *ctx) {
+    if (!ctx || !sl_dock_ready(ctx)) return;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    sl_dock_dirty_panel(ctx, &L);
 }
 
 int sl_launcher_covers_point(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
@@ -2369,6 +2393,20 @@ static void sl_dock_draw_tile(sl_ctx_t *ctx, const sl_target_t *t, sl_launcher_i
 
 static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_target_t *inp);
 
+// Text and lines from the runtime theme (day or night).
+#define SL_DOCK_RGB(tok) sl_ui_runtime_color(tok)->r, sl_ui_runtime_color(tok)->g, sl_ui_runtime_color(tok)->b
+#define SL_DOCK_INK SL_DOCK_RGB(SL_UI_COLOR_TEXT_PRIMARY)
+#define SL_DOCK_MUTED SL_DOCK_RGB(SL_UI_COLOR_TEXT_SECONDARY)
+#define SL_DOCK_LINE SL_DOCK_RGB(SL_UI_COLOR_BORDER)
+
+// The fin and its chevron, the chevron in the accent colour.
+static void sl_dock_draw_fin(sl_ctx_t *ctx, const sl_target_t *t, uint32_t fx, uint32_t fy, const slsk_entry_t *chev) {
+    sl_draw_skin(ctx, g_dock.fin, (int32_t)fx, (int32_t)fy, SL_FIN_W, SL_FIN_H);
+    const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+    sl_blit_mask(t, sl_skin_data(&ctx->skin, chev), chev->width, chev->height, chev->width,
+                 (int32_t)fx + 6, (int32_t)fy + 65, n->r, n->g, n->b, 255u);
+}
+
 static void sl_dock_draw(sl_ctx_t *ctx) {
     sl_dock_layout_t L;
     sl_dock_layout(ctx, &L);
@@ -2378,7 +2416,7 @@ static void sl_dock_draw(sl_ctx_t *ctx) {
 
     sl_draw_skin(ctx, g_dock.panel, (int32_t)L.cx, (int32_t)L.cy, L.cw, L.ch);
     if (L.has_sep) {
-        sl_fill_rect(ctx, L.px + (SL_DOCK_W - SL_DOCK_SEP_W) / 2u, L.sep_y, SL_DOCK_SEP_W, 2u, 0xC9, 0xCD, 0xD6);
+        sl_fill_rect(ctx, L.px + (SL_DOCK_W - SL_DOCK_SEP_W) / 2u, L.sep_y, SL_DOCK_SEP_W, 2u, SL_DOCK_LINE);
     }
 
     for (size_t k = 0u; k < L.count; k++) {
@@ -2393,12 +2431,21 @@ static void sl_dock_draw(sl_ctx_t *ctx) {
         } else {
             sl_dock_draw_tile(ctx, &t, item, 0, (int32_t)tx, (int32_t)ty, SL_DOCK_TILE);
         }
+        // Top right of the tile: the notifications not yet seen.
+        uint32_t unseen = sl_notify_badge(item->title);
+        if (unseen) {
+            char num[4];
+            snprintf(num, sizeof(num), "%u", (unsigned)(unseen > 9u ? 9u : unseen));
+            sl_ui_ctx_surface(ctx, SL_UI_SURF_NEON_DOT, tx + SL_DOCK_TILE - 14u, ty - 6u, 20u, 20u, 10u);
+            const slsk_font_t *f = g_dock.label;
+            uint32_t nw = sl_text_width(f, num);
+            sl_text_draw(&t, f, (int32_t)(tx + SL_DOCK_TILE - 4u) - (int32_t)nw / 2, (int32_t)ty + 9, num, 0x11, 0x16, 0x26);
+        }
         // Left of the tile: a dot if the app is open, a bar if it is focused.
         uint64_t bits = g_dock_indicators >> (2u * k);
         if (k < 32u && (bits & 1u)) {
             uint32_t ih = (bits & 2u) ? 24u : 6u;
-            sl_draw_skin(ctx, (bits & 2u) ? g_dock.bar : g_dock.dot, (int32_t)tx - 14, (int32_t)(ty + (SL_DOCK_TILE - ih) / 2u),
-                         6u, ih);
+            sl_ui_ctx_surface(ctx, SL_UI_SURF_NEON_DOT, tx - 14u, ty + (SL_DOCK_TILE - ih) / 2u, 6u, ih, 3u);
         }
     }
 
@@ -2406,7 +2453,7 @@ static void sl_dock_draw(sl_ctx_t *ctx) {
         if (g_dock_hot) {
             uint32_t fx, fy;
             sl_fin_rect(&L, &fx, &fy);
-            sl_draw_skin(ctx, g_dock.fin, (int32_t)fx, (int32_t)fy, SL_FIN_W, SL_FIN_H);
+            sl_dock_draw_fin(ctx, &t, fx, fy, g_dock.chev_open);
         }
         uint32_t px, py, pw;
         if (g_launcher_hover_index != (size_t)-1 && sl_dock_pill_rect(&L, g_launcher_hover_index, &px, &py, &pw)) {
@@ -2415,7 +2462,7 @@ static void sl_dock_draw(sl_ctx_t *ctx) {
             sl_draw_skin(ctx, g_dock.pill, (int32_t)px, (int32_t)py, pw, SL_PILL_H);
             const slsk_font_t *f = g_dock.label;
             sl_text_draw(&t, f, (int32_t)(px + SL_PILL_PAD), (int32_t)(py + SL_PILL_H / 2u) + (f->ascent - f->descent) / 2,
-                         label, 0x1A, 0x1D, 0x26);
+                         label, SL_DOCK_INK);
         }
         return;
     }
@@ -2432,7 +2479,7 @@ static void sl_dock_draw(sl_ctx_t *ctx) {
     if (sl_dock_expanded_fully()) {
         uint32_t fx, fy;
         sl_fin_rect(&L, &fx, &fy);
-        sl_draw_skin(ctx, g_dock.fin_close, (int32_t)fx, (int32_t)fy, SL_FIN_W, SL_FIN_H);
+        sl_dock_draw_fin(ctx, &t, fx, fy, g_dock.chev_close);
     }
 }
 
@@ -2444,14 +2491,14 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
     uint32_t scx = ctx->clip_x, scy = ctx->clip_y, scw = ctx->clip_w, sch = ctx->clip_h;
     sl_clip_set(ctx, (uint32_t)in.clip_x0, (uint32_t)in.clip_y0, (uint32_t)(in.clip_x1 - in.clip_x0),
                 (uint32_t)(in.clip_y1 - in.clip_y0));
-    if (L.ch > 76u) sl_fill_rect(ctx, L.px + SL_MGR_LINE_X, L.cy + 38u, 2u, L.ch - 76u, 0xCD, 0xD1, 0xD9);
+    if (L.ch > 76u) sl_fill_rect(ctx, L.px + SL_MGR_LINE_X, L.cy + 38u, 2u, L.ch - 76u, SL_DOCK_LINE);
 
     const slsk_font_t *title = g_dock.title;
     int32_t base = (int32_t)L.gy + title->ascent;
-    int32_t end = sl_text_draw(&in, title, (int32_t)L.gx, base, "App", 0x1A, 0x1D, 0x26);
+    int32_t end = sl_text_draw(&in, title, (int32_t)L.gx, base, "App", SL_DOCK_INK);
     char count[40];
     snprintf(count, sizeof(count), "%u nella cartella", (unsigned)g_launcher_count);
-    sl_text_draw(&in, g_dock.label, end + 14, base, count, 0x5A, 0x60, 0x6E);
+    sl_text_draw(&in, g_dock.label, end + 14, base, count, SL_DOCK_MUTED);
 
     for (size_t i = 0u; i < g_launcher_count; i++) {
         uint32_t tx, ty;
@@ -2467,7 +2514,7 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
         sl_launcher_compact_label(item->title, label, sizeof(label));
         uint32_t lw = sl_text_width(g_dock.label, label);
         sl_text_draw(&in, g_dock.label, (int32_t)(tx + SL_MGR_TILE / 2u) - (int32_t)lw / 2,
-                     (int32_t)(ty + SL_MGR_TILE + 12u) + g_dock.label->ascent, label, 0x1A, 0x1D, 0x26);
+                     (int32_t)(ty + SL_MGR_TILE + 12u) + g_dock.label->ascent, label, SL_DOCK_INK);
     }
     if (saved) sl_clip_set(ctx, scx, scy, scw, sch);
     else sl_clip_clear(ctx);
