@@ -27,6 +27,10 @@ typedef enum {
     SL_UI_COLOR_DANGER,
     SL_UI_COLOR_SUCCESS,
     SL_UI_COLOR_WARNING,
+    // Soft UI (theme.cfg: shadow_dark, shadow_light, neon).
+    SL_UI_COLOR_SHADOW_DARK,
+    SL_UI_COLOR_SHADOW_LIGHT,
+    SL_UI_COLOR_NEON,
     SL_UI_COLOR_COUNT
 } sl_ui_color_token_t;
 
@@ -115,6 +119,22 @@ typedef enum {
     SL_UI_STATE_DISABLED,
     SL_UI_STATE_FOCUSED,
 } sl_ui_control_state_t;
+
+typedef enum {
+    SL_UI_SURF_RAISED,      // controls at rest
+    SL_UI_SURF_RAISED_HI,   // under the mouse
+    SL_UI_SURF_INSET,       // pressed, fields, tracks
+    SL_UI_SURF_FLAT,        // disabled
+    SL_UI_SURF_NIGHT,       // the accent: on, filled, primary
+    SL_UI_SURF_NIGHT_GLOW,  // the accent lit: a knob that is on
+} sl_ui_surf_kind_t;
+
+// Soft UI surface (rendered once per size, then cached) and the label face,
+// for Starlight's own popups, with the runtime theme.
+void sl_ui_ctx_surface(sl_ctx_t *ctx, sl_ui_surf_kind_t kind, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                       uint32_t r);
+const slsk_font_t *sl_ui_ctx_face(sl_ctx_t *ctx);   // NULL without the skin
+uint32_t sl_ui_ctx_text_width(sl_ctx_t *ctx, const char *text);
 
 void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
                  uint32_t cursor_x, uint32_t cursor_y,

@@ -1,3 +1,4 @@
+#include "ui_sdk.h"
 #include "starlight_internal.h"
 #include "app_host.h"
 #include "context_menu_renderer.h"
@@ -172,9 +173,9 @@ static void sl_dirty_add_snapshot(const sl_ctx_t *ctx, const sl_window_rect_snap
     sl_dirty_add(ctx, snap->x, snap->y, snap->w, snap->h);
 }
 
-#define SL_LAUNCHER_CTX_ROW_H 20u
+#define SL_LAUNCHER_CTX_ROW_H 30u
 #define SL_LAUNCHER_CTX_MIN_W 108u
-#define SL_LAUNCHER_CTX_PAD_X 8u
+#define SL_LAUNCHER_CTX_PAD_X 14u
 
 static uint32_t sl_anim_tween_id(size_t slot, uint32_t channel) {
     return (uint32_t)(0xA1100000u + ((uint32_t)slot * 8u) + channel);
@@ -1426,7 +1427,7 @@ static void sl_launcher_popup_open(sl_ctx_t *ctx, size_t item_index, uint32_t an
     for (uint32_t r = 0u; r < action_count; r++) {
         char label[128];
         sl_launcher_context_label_cb(r, label, sizeof(label), NULL);
-        uint32_t w = sl_font_measure_text(label) + 2u * SL_LAUNCHER_CTX_PAD_X;
+        uint32_t w = sl_ui_ctx_text_width(ctx, label) + 2u * SL_LAUNCHER_CTX_PAD_X;
         if (w > menu_w) menu_w = w;
     }
     uint32_t menu_h = action_count * SL_LAUNCHER_CTX_ROW_H + 2u;
