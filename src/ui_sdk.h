@@ -36,6 +36,7 @@ typedef enum {
 
 typedef struct {
     sl_ui_color_t colors[SL_UI_COLOR_COUNT];
+    uint8_t night;            // theme.cfg mode=night: night sprites and palette
 } sl_ui_theme_t;
 
 typedef struct {
@@ -127,6 +128,7 @@ typedef enum {
     SL_UI_SURF_FLAT,        // disabled
     SL_UI_SURF_NIGHT,       // the accent: on, filled, primary
     SL_UI_SURF_NIGHT_GLOW,  // the accent lit: a knob that is on
+    SL_UI_SURF_NEON_DOT,    // a lit dot or bar in the neon accent (window dot, dock marks)
 } sl_ui_surf_kind_t;
 
 // Soft UI surface (rendered once per size, then cached) and the label face,
@@ -135,6 +137,9 @@ void sl_ui_ctx_surface(sl_ctx_t *ctx, sl_ui_surf_kind_t kind, uint32_t x, uint32
                        uint32_t r);
 const slsk_font_t *sl_ui_ctx_face(sl_ctx_t *ctx);   // NULL without the skin
 uint32_t sl_ui_ctx_text_width(sl_ctx_t *ctx, const char *text);
+// The mono face on fixed cells (the terminal): 0 without the skin.
+int sl_ui_ctx_mono_cell(sl_ctx_t *ctx, uint32_t *cell_w, uint32_t *cell_h);
+void sl_ui_ctx_mono_text(sl_ctx_t *ctx, uint32_t x, uint32_t y, const char *text, uint8_t r, uint8_t g, uint8_t b);
 
 void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
                  uint32_t cursor_x, uint32_t cursor_y,
@@ -142,6 +147,12 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
                  int32_t wheel_x, int32_t wheel_y,
                  uint32_t clipboard_cmds, uint8_t caps_lock_on);
 void sl_ui_theme_set_default(sl_ui_theme_t *theme);
+void sl_ui_theme_set_night(sl_ui_theme_t *theme);
+// The runtime theme as Starlight's own drawing uses it: a colour, the mode,
+// and a version that changes on every reload (cached lookups compare it).
+const sl_ui_color_t *sl_ui_runtime_color(sl_ui_color_token_t token);
+uint8_t sl_ui_runtime_night(void);
+uint32_t sl_ui_runtime_version(void);
 void sl_ui_theme_apply(sl_ui_ctx_t *ui, const sl_ui_theme_t *theme);
 void sl_ui_theme_reset(sl_ui_ctx_t *ui);
 void sl_ui_theme_set_accent(sl_ui_ctx_t *ui, uint8_t r, uint8_t g, uint8_t b);

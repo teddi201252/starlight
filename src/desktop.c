@@ -5,6 +5,7 @@
 #include "render/pixels.h"
 #include "render/surface.h"
 #include "peos/net.h"
+#include "ui_sdk.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -315,7 +316,8 @@ static void sl_desk_draw_calendar(sl_ctx_t *ctx, const struct tm *now) {
         sl_text_draw(&t, g_desk.cal, cx - (int32_t)sl_text_width(g_desk.cal, k_week[c]) / 2, base, k_week[c], head[0],
                      head[1], head[2]);
     }
-    sl_surf_style_t today = { 0x59, 0xD0, 0xFF, 1, { { 0, 0, 10, 0, 0x59, 0xD0, 0xFF, 160 } } };
+    const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+    sl_surf_style_t today = { n->r, n->g, n->b, 1, { { 0, 0, 10, 0, n->r, n->g, n->b, 160 } } };
     for (int d = 1; d <= days; d++) {
         int cell = lead + d - 1;
         int32_t cx = gx + (cell % 7) * cw + cw / 2;

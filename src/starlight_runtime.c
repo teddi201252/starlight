@@ -678,6 +678,12 @@ static void sl_load_theme_config(void) {
     sl_ui_theme_set_default(&theme);
 
     char *cfg = sl_load_text_file(SL_RESOURCE_THEME_FILE, SL_CFG_FILE_MAX);
+    // mode=night starts from the night palette; the colour keys then
+    // override single tokens in either mode.
+    if (cfg) {
+        const char *m = strstr(cfg, "mode=");
+        if (m && (m == cfg || m[-1] == '\n') && strncmp(m + 5, "night", 5) == 0) sl_ui_theme_set_night(&theme);
+    }
     if (!cfg) {
         sl_write_default_theme_config();
         sl_ui_theme_runtime_set(&theme);
@@ -916,8 +922,12 @@ void sl_reload_display(sl_ctx_t *ctx) {
 }
 
 void sl_reload_theme(sl_ctx_t *ctx) {
-    (void)ctx;
     sl_load_theme_config();
+    // Everything drawn from the theme comes again: window caches, the
+    // desktop layer (its neon), the dock and frames (they look up their
+    // sprites again when the theme version changes).
+    sl_windows_theme_changed(ctx);
+    sl_desk_build(ctx);
     sl_dirty_mark_full();
 }
 
