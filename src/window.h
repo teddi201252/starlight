@@ -63,11 +63,16 @@ struct sl_window {
     int8_t pressed_btn;         // title bar button under a press, SL_WIN_BTN_NONE
     uint32_t top_bar_height;    // the title bar: dragging starts here
     uint32_t restore_x, restore_y, restore_w, restore_h;
+    // Resizing (Soft UI plan, phase 12): the frame's limits, from app.ini
+    // (0 = none: the screen), and whether it may change at all.
+    uint32_t min_w, min_h, max_w, max_h;
+    uint8_t resizable;
     char title[64];
 
     // Task
     app_instance_t* task;
     uint8_t* client_surface;
+    size_t client_cap;          // bytes allocated: a resize reallocates only to grow
     uint32_t client_width;
     uint32_t client_height;
     uint32_t client_stride;

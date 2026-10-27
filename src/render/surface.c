@@ -78,7 +78,7 @@ static void paint(uint8_t *px, const uint16_t *m, size_t n, uint8_t r, uint8_t g
     }
 }
 
-int sl_surf_render(const sl_surf_style_t *st, uint32_t sw, uint32_t sh, uint32_t r, sl_surf_t *out) {
+int sl_surf_render_exact(const sl_surf_style_t *st, uint32_t sw, uint32_t sh, uint32_t r, sl_surf_t *out) {
     if (!st || !out || sw == 0u || sh == 0u || sw > 4096u || sh > 4096u) return 0;
     memset(out, 0, sizeof(*out));
     if (r * 2u > sw) r = sw / 2u;
@@ -154,6 +154,66 @@ int sl_surf_render(const sl_surf_style_t *st, uint32_t sw, uint32_t sh, uint32_t
     out->pad_l = (uint32_t)pl;
     out->pad_t = (uint32_t)pt;
     out->px = px;
+    return 1;
+}
+
+// Far enough from the edges of the shape (radius, shadow offset, blur
+// reach) every column is the same, and so is every row: a big surface is
+// rendered with a middle one pixel wide and high, then that pixel is
+// repeated. The result is the same, pixel for pixel, and a window resized
+// does not render all its controls' shadows again at every new size.
+static uint32_t surf_margin(const sl_surf_style_t *st, uint32_t r, int vertical) {
+    uint32_t m = 0u;
+    for (uint32_t i = 0; i < st->shadow_count; i++) {
+        const sl_surf_shadow_t *s = &st->shadows[i];
+        int32_t d = vertical ? s->dy : s->dx;
+        uint32_t reach = (uint32_t)(d < 0 ? -d : d) + (uint32_t)(3 * blur_radius(s->blur));
+        if (reach > m) m = reach;
+    }
+    return r + m + 2u;
+}
+
+int sl_surf_render(const sl_surf_style_t *st, uint32_t sw, uint32_t sh, uint32_t r, sl_surf_t *out) {
+    if (!st || !out || sw == 0u || sh == 0u || sw > 4096u || sh > 4096u) return 0;
+    if (r * 2u > sw) r = sw / 2u;
+    if (r * 2u > sh) r = sh / 2u;
+    uint32_t mx = surf_margin(st, r, 0), my = surf_margin(st, r, 1);
+    uint32_t cw = (sw > 2u * mx + 1u) ? 2u * mx + 1u : sw;
+    uint32_t ch = (sh > 2u * my + 1u) ? 2u * my + 1u : sh;
+    if (cw == sw && ch == sh) return sl_surf_render_exact(st, sw, sh, r, out);
+
+    sl_surf_t small;
+    if (!sl_surf_render_exact(st, cw, ch, r, &small)) return 0;
+    uint32_t ex = sw - cw, ey = sh - ch;          // pixels the middle grows by
+    uint32_t w = small.w + ex, h = small.h + ey;
+    uint8_t *px = (uint8_t *)malloc((size_t)w * h * 4u);
+    if (!px) {
+        sl_surf_free(&small);
+        return 0;
+    }
+    // The middle column and row of the small surface, in its pixels.
+    uint32_t col = small.pad_l + (cw == sw ? 0u : mx), row = small.pad_t + (ch == sh ? 0u : my);
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t sy = (ch == sh || y <= row) ? y : (y >= row + ey ? y - ey : row);
+        const uint8_t *src = small.px + (size_t)sy * small.w * 4u;
+        uint8_t *dst = px + (size_t)y * w * 4u;
+        if (cw == sw) {
+            memcpy(dst, src, (size_t)w * 4u);
+            continue;
+        }
+        memcpy(dst, src, (size_t)(col + 1u) * 4u);
+        uint32_t mid = 0;
+        memcpy(&mid, src + (size_t)col * 4u, 4u);
+        uint32_t *run = (uint32_t *)(void *)(dst + (size_t)(col + 1u) * 4u);
+        for (uint32_t k = 0; k < ex; k++) run[k] = mid;
+        memcpy(dst + (size_t)(col + 1u + ex) * 4u, src + (size_t)(col + 1u) * 4u, (size_t)(small.w - col - 1u) * 4u);
+    }
+    out->w = w;
+    out->h = h;
+    out->pad_l = small.pad_l;
+    out->pad_t = small.pad_t;
+    out->px = px;
+    sl_surf_free(&small);
     return 1;
 }
 

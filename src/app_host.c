@@ -28,6 +28,8 @@
 #define ORBIT_POLL_INTERVAL_BUSY_NS   4000000ull
 #define ORBIT_POLL_INTERVAL_IDLE_NS  16000000ull
 #define ORBIT_UI_CMD_SOFT_CHUNK 64u
+// A window being resized tells its app the new size at most this often.
+#define SL_RESIZE_EVENT_NS 80000000ull
 #define ORBIT_UI_CMD_HARD_MAX 1024u
 #define ORBIT_SLUI_PROTO_VERSION 1u
 #define ORBIT_FB_MAX_WIDTH 4096u
@@ -184,6 +186,9 @@ typedef struct {
     uint8_t hello_seen;
     uint8_t host_hello_sent;
     uint32_t sent_body_w, sent_body_h;   // the body size the app was last told (RESIZE)
+    uint32_t pending_body_w, pending_body_h;   // a newer size, not sent yet (too soon after the last)
+    uint8_t resize_pending;
+    uint64_t resize_sent_ns;
     uint8_t dup_warned;                  // two controls with one id: said once
     uint8_t client_proto_ver;
     uint32_t client_caps_mask;
@@ -3742,10 +3747,22 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
     // A SLUI app learns its body's size, and again whenever it changes
     // (maximized, restored): it lays its controls out for it.
+    // While the window is being resized it changes at every frame: the app
+    // is told at most every SL_RESIZE_EVENT_NS (it lays out and redraws all
+    // of its body each time), and the last size always (sl_app_host_tick).
     if (shell->ui.enabled && (shell->ui.sent_body_w != body_w || shell->ui.sent_body_h != body_h)) {
-        shell->ui.sent_body_w = body_w;
-        shell->ui.sent_body_h = body_h;
-        orbit_send_ui_event_resize(shell, body_w, body_h);
+        uint64_t now = peos_time_ns();
+        if (now - shell->ui.resize_sent_ns >= SL_RESIZE_EVENT_NS) {
+            shell->ui.sent_body_w = body_w;
+            shell->ui.sent_body_h = body_h;
+            shell->ui.resize_sent_ns = now;
+            shell->ui.resize_pending = 0u;
+            orbit_send_ui_event_resize(shell, body_w, body_h);
+        } else {
+            shell->ui.pending_body_w = body_w;
+            shell->ui.pending_body_h = body_h;
+            shell->ui.resize_pending = 1u;
+        }
     }
 
     if (shell->ui.enabled && shell->ui.committed) {
@@ -4367,6 +4384,17 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
         }
 
         g_orbit_app[i]->pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);
+    }
+    for (size_t i = 0u; i < g_orbit_slot_count; i++) {   // the last size of a resize
+        orbit_shell_t *shell = g_orbit[i];
+        if (!shell || !shell->initialized || !shell->ui.resize_pending) continue;
+        if (now - shell->ui.resize_sent_ns < SL_RESIZE_EVENT_NS) continue;
+        shell->ui.resize_pending = 0u;
+        if (shell->ui.pending_body_w == shell->ui.sent_body_w && shell->ui.pending_body_h == shell->ui.sent_body_h) continue;
+        shell->ui.sent_body_w = shell->ui.pending_body_w;
+        shell->ui.sent_body_h = shell->ui.pending_body_h;
+        shell->ui.resize_sent_ns = now;
+        orbit_send_ui_event_resize(shell, shell->ui.sent_body_w, shell->ui.sent_body_h);
     }
 }
 

@@ -66,6 +66,14 @@ int sl_launcher_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y);
 int sl_windows_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y);
 // An app was just opened and has not shown anything yet.
 uint8_t sl_windows_launching(void);
+// Resizing a window by its edges (Soft UI plan, phase 12).
+int sl_windows_resize_press(sl_ctx_t *ctx, uint32_t x, uint32_t y);   // 1: an edge was taken
+uint8_t sl_windows_resizing(void);
+void sl_windows_resize_move(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+void sl_windows_resize_release(sl_ctx_t *ctx);
+// Remember where a window is (windows.cfg): it opens there again.
+void sl_windows_remember(const sl_window_t *win);
+void sl_windows_toggle_maximize(sl_ctx_t *ctx);
 // A window (not minimized) covers x,y.
 int sl_windows_any_at(uint32_t x, uint32_t y);
 // Open (or bring forward) the app with this title, case aside: 0 if none.

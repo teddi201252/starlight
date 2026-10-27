@@ -980,6 +980,13 @@ int sl_handle_input(sl_ctx_t *ctx) {
         return input.quit_requested ? 1 : 0;
     }
 
+    // A window being resized by an edge owns the mouse until it is let go.
+    if (sl_windows_resizing()) {
+        if (input.mouse_moved) sl_windows_resize_move(ctx, ctx->cursor_x, ctx->cursor_y);
+        if (input.mouse_left_released) sl_windows_resize_release(ctx);
+        return input.quit_requested ? 1 : 0;
+    }
+
     // A widget held down owns the mouse until it is let go (the volume
     // follows a drag).
     if (sl_desk_held()) {
@@ -1086,6 +1093,11 @@ int sl_handle_input(sl_ctx_t *ctx) {
             return 0;
         }
 
+        if (sl_windows_resize_press(ctx, ctx->cursor_x, ctx->cursor_y)) {   // an edge or a corner
+            sl_drag_stop();
+            return 0;
+        }
+
         if (on_desktop && sl_desk_press(ctx, ctx->cursor_x, ctx->cursor_y)) {
             sl_drag_stop();
             return 0;
@@ -1113,6 +1125,20 @@ int sl_handle_input(sl_ctx_t *ctx) {
                                (ctx->cursor_x < (focused->x + focused->width));
             uint8_t inside_topbar = (ctx->cursor_y >= focused->y) &&
                                     (ctx->cursor_y < (focused->y + top_bar_h));
+            // A double click on the title bar maximizes (or goes back).
+            static uint64_t last_title_ns;
+            static const void *last_title_task;
+            uint64_t now = peos_time_ns();
+            if (inside_x && inside_topbar && last_title_task == focused->task &&
+                now - last_title_ns <= (uint64_t)ctx->double_click_ms * 1000000ull) {
+                last_title_task = NULL;
+                sl_windows_toggle_maximize(ctx);
+                return 0;
+            }
+            if (inside_x && inside_topbar) {
+                last_title_ns = now;
+                last_title_task = focused->task;
+            }
             if (inside_x && inside_topbar) {
                 g_drag_active = 1u;
                 g_drag_window = focused;
@@ -1124,6 +1150,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
     }
 
     if (input.mouse_left_released) {
+        if (g_drag_active && g_drag_window) sl_windows_remember(g_drag_window);   // opens there next time
         sl_drag_stop();
     }
 
