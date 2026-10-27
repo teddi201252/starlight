@@ -81,6 +81,7 @@ typedef struct {
     const char *select_overlay_options_pipe;
     uint32_t select_scroll_idx;
     uint32_t font_px;
+    const slsk_font_t *label_face;   // FACE: the skin font labels use (NULL: by font_px)
     sl_ui_theme_t theme;
     uint8_t theme_initialized;
     uint32_t theme_version;
@@ -291,3 +292,16 @@ uint8_t sl_ui_grid_next(sl_ui_grid_t *grid,
                         uint32_t *out_w, uint32_t *out_h);
 
 void sl_ui_draw_overlays(sl_ui_ctx_t *ui);
+
+// What the apps draw beyond the controls (SLUI SURF, FACE, LABELA, RING,
+// GRAPH): a soft surface of any size, labels in a face of the skin ("mono-24",
+// "ui-30-light"; NULL or "" back to the size's), aligned at x (0 left, 1
+// centre, 2 right), a ring filled to permille from the top, and a graph of
+// values 0..1000 (an area under a line).
+void sl_ui_soft_surface(sl_ui_ctx_t *ui, uint32_t kind, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t r);
+void sl_ui_set_label_face(sl_ui_ctx_t *ui, const char *name);
+uint32_t sl_ui_label_width(sl_ui_ctx_t *ui, const char *text);
+void sl_ui_ring(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t size, uint32_t thick, uint32_t permille,
+                const uint8_t track[3], const uint8_t fill[3]);
+void sl_ui_graph(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                 const uint16_t *values, uint32_t count, const uint8_t line[3], const uint8_t fill[4]);

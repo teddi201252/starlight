@@ -8,6 +8,8 @@
 #include "ui_sdk.h"
 #include "notify.h"
 #include "peos/audio.h"
+#include "peos/calendar_file.h"
+#include "peos/notify.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -872,6 +874,37 @@ void sl_desk_build(sl_ctx_t *ctx) {
     sl_desk_draw_widgets(ctx, &now, 1u);
 }
 
+// The calendar's reminders (Soft UI plan, phase 13): every minute the events
+// of the Calendario app are read, and a reminder due since the last look is
+// sent as a notification, the app open or not. After a long gap (a suspended
+// machine) only the last 10 minutes count, so they do not come in a flood.
+static cal_store_t g_cal_store;
+static int64_t g_cal_checked = -1;
+
+static void sl_desk_calendar_reminders(sl_ctx_t *ctx, int64_t minute) {
+    if (g_cal_checked < 0 || minute - g_cal_checked > 10) g_cal_checked = minute - 1;
+    if (minute <= g_cal_checked) return;
+    if (cal_store_load(&g_cal_store, CAL_FILE_PATH)) {
+        for (uint32_t i = 0u; i < g_cal_store.count; i++) {
+            const cal_event_t *e = &g_cal_store.events[i];
+            if (e->all_day || e->remind_min == 0u) continue;
+            int64_t at = e->day * 1440 + (int64_t)e->start_min - (int64_t)e->remind_min;
+            if (at <= g_cal_checked || at > minute) continue;
+            char text[PEOS_NOTIFY_TEXT_MAX];
+            if (e->remind_min == 60u) {
+                snprintf(text, sizeof(text), "Tra 1 ora: %s (%02u:%02u)", e->title,
+                         (unsigned)(e->start_min / 60u), (unsigned)(e->start_min % 60u));
+            } else {
+                snprintf(text, sizeof(text), "Tra %u min: %s (%02u:%02u)", (unsigned)e->remind_min, e->title,
+                         (unsigned)(e->start_min / 60u), (unsigned)(e->start_min % 60u));
+            }
+            printf("[CAL] reminder: %s\n", text);
+            sl_notify_post(ctx, "Calendario", text);
+        }
+    }
+    g_cal_checked = minute;
+}
+
 void sl_desk_tick(sl_ctx_t *ctx) {
     if (!ctx || !ctx->desk_frame || g_desk.ready != 1u) return;
     int64_t minute = sl_desk_local_seconds(ctx) / 60;
@@ -902,6 +935,7 @@ void sl_desk_tick(sl_ctx_t *ctx) {
     sl_desk_draw_bar(ctx, &now);
     if (minute != g_desk.minute) {
         g_desk.minute = minute;
+        sl_desk_calendar_reminders(ctx, minute);
         sl_desk_draw_clock(ctx, &now);
         if (minute / 1440 != g_desk.day_no) {
             g_desk.day_no = minute / 1440;
