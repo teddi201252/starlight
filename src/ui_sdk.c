@@ -2498,6 +2498,7 @@ void sl_ui_ring(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t size, uint32_t
 void sl_ui_graph(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                  const uint16_t *values, uint32_t count, const uint8_t line[3], const uint8_t fill[4]) {
     if (!ui || !ui->ctx || !values || count < 2u || w < 2u || h < 4u) return;
+    if (w > ui->ctx->fb.width || h > ui->ctx->fb.height) return;   // an app's arithmetic gone wrong
     // y of the line at column px, in 1/256 of a pixel
     #define SL_GRAPH_Y(px) ({ \
         uint64_t pos_ = (uint64_t)(px) * (count - 1u) * 256u / (w - 1u); \
