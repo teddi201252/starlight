@@ -156,9 +156,18 @@ static int sl_window_ensure_surface(sl_window_t *win, uint32_t w, uint32_t h) {
     if (win->client_surface && win->client_width == w && win->client_height == h && win->client_stride == stride) {
         return 1;
     }
-    uint8_t *buf = (uint8_t *)realloc(win->client_surface, (size_t)stride * h);
-    if (!buf) return 0;
-    win->client_surface = buf;
+    size_t need = (size_t)stride * h;
+    if (!win->client_surface || need > win->client_cap) {   // while resizing, grown once and reused
+        // Not realloc: the old pixels would be copied, and the cache of a
+        // window that changed size is drawn again anyway.
+        free(win->client_surface);
+        win->client_cap = 0u;
+        uint8_t *buf = (uint8_t *)malloc(need + need / 4u);
+        win->client_surface = buf;
+        if (!buf) return 0;
+        win->client_surface = buf;
+        win->client_cap = need + need / 4u;
+    }
     win->client_width = w;
     win->client_height = h;
     win->client_stride = stride;
@@ -323,6 +332,7 @@ int sl_window_init(sl_window_t *win, sl_ctx_t *ctx, app_instance_t* task, uint32
     win->z_index = 0u;
     win->focused = 0u;
     win->pressed_btn = SL_WIN_BTN_NONE;
+    win->resizable = 1u;
     win->top_bar_height = SL_WIN_PAD_TOP + SL_WIN_BAR_H;
     win->cache_valid = 0u;
     win->force_redraw = 1u;
@@ -349,6 +359,7 @@ void sl_window_shutdown(sl_window_t *win) {
         free(win->anim_underlay);
         win->anim_underlay = NULL;
     }
+    win->client_cap = 0u;
     win->client_width = 0u;
     win->client_height = 0u;
     win->client_stride = 0u;

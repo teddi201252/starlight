@@ -4,7 +4,10 @@
 // and CSS-like box-shadows, premultiplied BGRA. The controls of the apps come
 // in many small sizes that nine slices cannot cut (their corners overlap),
 // so each (style, size) is rendered once, the first time it is drawn, and
-// kept in a small cache: after that, drawing it is copying it.
+// kept in a small cache: after that, drawing it is copying it. A big one is
+// rendered small, with a middle one pixel wide and high, and that pixel is
+// repeated (the same result: far from the edges every column and every row
+// is the same), so a new size costs a copy, not a render.
 //
 // Pure C with integer blurs and no libm, so it also builds on the host for
 // tests.
@@ -36,6 +39,8 @@ typedef struct {
 // Render style at shape size sw x sh with radius r. Returns 1 on success;
 // out->px is malloc'd (free it with sl_surf_free).
 int sl_surf_render(const sl_surf_style_t *style, uint32_t sw, uint32_t sh, uint32_t r, sl_surf_t *out);
+// The same, rendered at full size: slower, for the tests.
+int sl_surf_render_exact(const sl_surf_style_t *style, uint32_t sw, uint32_t sh, uint32_t r, sl_surf_t *out);
 void sl_surf_free(sl_surf_t *s);
 
 // The cache: the surface for (style, sw, sh, r), rendered on first use.
