@@ -184,6 +184,7 @@ typedef struct {
     uint8_t hello_seen;
     uint8_t host_hello_sent;
     uint32_t sent_body_w, sent_body_h;   // the body size the app was last told (RESIZE)
+    uint8_t dup_warned;                  // two controls with one id: said once
     uint8_t client_proto_ver;
     uint32_t client_caps_mask;
     uint8_t key_down[256];
@@ -959,6 +960,27 @@ static orbit_ui_cmd_t *orbit_ui_next_cmd(orbit_shell_t *shell, uint8_t type) {
     return cmd;
 }
 
+static int orbit_ui_cmd_is_interactive(const orbit_ui_cmd_t *cmd);
+
+// Two controls with one id share the press: the first one drawn takes the
+// click and the other never sees it (only the keyboard reaches it). Said
+// once per app in the log, for whoever writes it.
+static void orbit_ui_warn_duplicate_ids(orbit_shell_t *shell) {
+    if (shell->ui.dup_warned) return;
+    for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *a = &shell->ui.cmds[i];
+        if (!a->id || !orbit_ui_cmd_is_interactive(a)) continue;
+        for (size_t k = i + 1u; k < shell->ui.cmd_count; k++) {
+            const orbit_ui_cmd_t *b = &shell->ui.cmds[k];
+            if (b->id != a->id || !orbit_ui_cmd_is_interactive(b)) continue;
+            printf("starlight: %s: two controls with id %u (a click reaches only the first)\n", shell->title,
+                   (unsigned)a->id);
+            shell->ui.dup_warned = 1u;
+            return;
+        }
+    }
+}
+
 static void orbit_send_ui_event_button(orbit_shell_t *shell, uint32_t id) {
     if (!shell || shell->child_stdin_fd < 0) return;
     char msg[48];
@@ -1504,6 +1526,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         shell->ui.staged_count = 0u;
         shell->ui.cmd_limit_reached = 0u;
         shell->ui.committed = 1u;
+        orbit_ui_warn_duplicate_ids(shell);
         return 1;
     }
 
@@ -3267,6 +3290,54 @@ static int orbit_ui_cmd_find_by_id(const sl_window_t *win, const orbit_shell_t *
         return 1;
     }
     return 0;
+}
+
+int sl_app_host_ready(const void *userdata) {
+    const orbit_shell_t *shell = (const orbit_shell_t *)userdata;
+    if (!shell) return 1;
+    return shell->ui.committed || shell->surface.active || shell->line_count > 0u || shell->pending_len > 0u;
+}
+
+int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x, uint32_t y) {
+    const orbit_shell_t *shell = (const orbit_shell_t *)userdata;
+    if (!win || !shell) return SL_CUR_ARROW;
+    uint32_t bx, by, bw, bh;
+    sl_window_body_rect(win, &bx, &by, &bw, &bh);
+    if (x < bx || y < by || x >= bx + bw || y >= by + bh) return SL_CUR_ARROW;
+    if (shell->surface.active) return SL_CUR_ARROW;
+    if (!shell->ui.enabled || !shell->ui.committed) return SL_CUR_TEXT;   // the terminal
+    // The topmost command under the mouse (the last one drawn there).
+    for (size_t i = shell->ui.cmd_count; i > 0u; i--) {
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i - 1u];
+        uint32_t cx = bx + cmd->x, cy = by + cmd->y;
+        uint32_t ch = cmd->type == ORBIT_UI_CMD_SLIDER ? 16u : cmd->h;   // a slider has no height of its own
+        if (x < cx || y < cy || x >= cx + cmd->w || y >= cy + ch) continue;
+        switch (cmd->type) {
+        case ORBIT_UI_CMD_TEXT_INPUT:
+        case ORBIT_UI_CMD_TEXT_AREA:
+            return cmd->enabled ? SL_CUR_TEXT : SL_CUR_NO;
+        case ORBIT_UI_CMD_BUTTON:
+        case ORBIT_UI_CMD_TOGGLE:
+        case ORBIT_UI_CMD_SELECT:
+        case ORBIT_UI_CMD_SEGMENT:
+        case ORBIT_UI_CMD_SWATCH:
+        case ORBIT_UI_CMD_LIST_ITEM:
+        case ORBIT_UI_CMD_SLIDER:
+            return cmd->enabled ? SL_CUR_HAND : SL_CUR_NO;
+        case ORBIT_UI_CMD_LABEL:
+        case ORBIT_UI_CMD_LABEL_THEME:
+        case ORBIT_UI_CMD_SEPARATOR:
+        case ORBIT_UI_CMD_CLIP_PUSH:
+        case ORBIT_UI_CMD_CLIP_POP:
+        case ORBIT_UI_CMD_FONT_SIZE:
+        case ORBIT_UI_CMD_CONTEXT_MENU:
+        case ORBIT_UI_CMD_SCROLL_V:
+            continue;   // see through to what is under them
+        default:
+            return SL_CUR_ARROW;
+        }
+    }
+    return SL_CUR_ARROW;
 }
 
 int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t *frame,

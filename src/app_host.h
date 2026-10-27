@@ -22,5 +22,12 @@ size_t sl_app_host_slot_count_enabled(void);
 int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t *frame,
                                  const void *userdata,
                                  uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
+/* The cursor inside the app's body at x,y (sl_cursor_kind_t): the text one
+ * over a field or the terminal, the hand over a control, "not allowed" over
+ * a disabled one, the arrow elsewhere. */
+int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x, uint32_t y);
+/* The app has shown something (its first SLUI frame, its framebuffer, or
+ * the terminal's first line). */
+int sl_app_host_ready(const void *userdata);
 int sl_app_host_cache_update_rect(const sl_window_t *win, const void *userdata,
                                   uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);

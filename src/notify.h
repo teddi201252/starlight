@@ -20,3 +20,5 @@ int sl_notify_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev);
 void sl_notify_post(sl_ctx_t *ctx, const char *source, const char *text);
 // Open or close the centre (the clock widget).
 void sl_notify_toggle_center(sl_ctx_t *ctx);
+// The cursor over the centre and the time in the bar, or -1.
+int sl_notify_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y);
