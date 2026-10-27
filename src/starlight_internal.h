@@ -42,6 +42,10 @@ void sl_windows_focus_at_cursor(uint32_t x, uint32_t y);
 // under it this frame (none while it fades or if every window is minimized).
 int sl_windows_top_opaque_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+// A window (not minimized) covers x,y.
+int sl_windows_any_at(uint32_t x, uint32_t y);
+// Open (or bring forward) the app with this title, case aside: 0 if none.
+int sl_windows_open_app_title(sl_ctx_t *ctx, const char *title);
 int sl_windows_title_button_held(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 int sl_windows_title_button_release(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_windows_destroy_all(void);

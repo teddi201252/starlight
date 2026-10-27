@@ -16,3 +16,7 @@ uint32_t sl_notify_badge(const char *title);
 // click elsewhere or Esc closes it. 1 when the event was its.
 int sl_notify_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 int sl_notify_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev);
+// A notification from Starlight itself (a widget's app not installed...).
+void sl_notify_post(sl_ctx_t *ctx, const char *source, const char *text);
+// Open or close the centre (the clock widget).
+void sl_notify_toggle_center(sl_ctx_t *ctx);
