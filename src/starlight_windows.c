@@ -2069,6 +2069,31 @@ static void sl_launcher_tick_catalog(sl_ctx_t *ctx) {
     free(entries);
 }
 
+int sl_windows_any_at(uint32_t x, uint32_t y) {
+    for (size_t i = 0; g_windows && i < g_window_count; i++) {
+        if (g_windows[i].minimized || sl_window_is_closing(&g_windows[i])) continue;
+        if (sl_window_contains_point(&g_windows[i], x, y)) return 1;
+    }
+    return 0;
+}
+
+int sl_windows_open_app_title(sl_ctx_t *ctx, const char *title) {
+    if (!ctx || !title) return 0;
+    for (size_t i = 0; i < g_launcher_count; i++) {
+        const char *a = g_launcher_items[i].title, *b = title;
+        for (; *a && *b; a++, b++) {
+            char x = *a, y = *b;
+            if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+            if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+            if (x != y) break;
+        }
+        if (*a || *b) continue;
+        (void)sl_windows_open_launcher_item(ctx, i);
+        return 1;
+    }
+    return 0;
+}
+
 void sl_windows_focus_at_cursor(uint32_t x, uint32_t y) {
     if (!g_windows || g_window_count == 0u) return;
     for (size_t i = g_window_count; i > 0u; i--) {

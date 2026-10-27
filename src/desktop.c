@@ -6,6 +6,8 @@
 #include "render/surface.h"
 #include "peos/net.h"
 #include "ui_sdk.h"
+#include "notify.h"
+#include "peos/audio.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +34,9 @@
 
 typedef struct { int32_t x, y; uint32_t w, h; } sl_desk_rect_t;
 
+// The widgets (Soft UI plan, phase 10): each one also answers the mouse.
+enum { SL_DW_CLOCK = 0, SL_DW_CAL, SL_DW_VOL, SL_DW_CPU, SL_DW_NET, SL_DW_COUNT };
+
 // What the widgets show, as last drawn.
 static struct {
     uint8_t ready;
@@ -40,6 +45,11 @@ static struct {
     const slsk_font_t *w_label, *w_value, *w_small, *mono, *mono_small;
     sl_desk_rect_t bar_r, clock_r, cal_r;
     sl_desk_rect_t vol_r, cpu_r, net_r;   // the widgets themselves (0 wide: no room)
+    sl_desk_rect_t cal_card;              // the calendar's card, inside cal_r
+    int8_t hot, pressed;                  // widget under the mouse / held down (SL_DW_*, -1 none)
+    uint8_t dragging;                     // the pressed widget follows the mouse (the volume)
+    int32_t local_volume;                 // set from the desktop, until the poller reads it back
+    uint64_t local_volume_until;
     int32_t shown_volume, shown_cpu;      // last drawn
     uint32_t shown_net;                   // feed version of the network card
     uint8_t dark_bar, dark_clock;    // the wallpaper under them is dark: light text
@@ -146,6 +156,7 @@ static int sl_desk_feed(uint8_t ip[4], uint8_t *has_ip, int32_t *volume, uint32_
     *volume = g_feed.volume;
     if (__atomic_load_n(&g_feed.version, __ATOMIC_ACQUIRE) != v0) return 0;
     *version = v0;
+    if (g_desk.local_volume >= 0 && peos_time_ns() < g_desk.local_volume_until) *volume = g_desk.local_volume;
     return 1;
 }
 
@@ -168,6 +179,7 @@ static int sl_desk_widgets_feed(sl_desk_widgets_feed_t *out) {
     out->net_version = g_feed.net_version;
     memcpy(out->ip, g_feed.ip, 4);
     out->has_ip = g_feed.has_ip;
+    if (g_desk.local_volume >= 0 && peos_time_ns() < g_desk.local_volume_until) out->volume = g_desk.local_volume;
     return __atomic_load_n(&g_feed.version, __ATOMIC_ACQUIRE) == v0;
 }
 
@@ -207,6 +219,8 @@ static int sl_desk_ready(sl_ctx_t *ctx) {
     }
     g_feed.volume = -1;
     g_feed.cpu = -1;
+    g_desk.hot = g_desk.pressed = -1;
+    g_desk.local_volume = -1;
     g_desk.ready = 1u;
     return 1;
 }
@@ -361,7 +375,12 @@ static void sl_desk_draw_clock(sl_ctx_t *ctx, const struct tm *now) {
     sl_text_draw(&t, g_desk.digits, right - (int32_t)sl_text_width(g_desk.digits, mm), base, mm, ink[0], ink[1], ink[2]);
     const char *day = k_days[now->tm_wday % 7];
     base += 68;
-    sl_text_draw(&t, g_desk.day, right - (int32_t)sl_text_width(g_desk.day, day), base, day, ink[0], ink[1], ink[2]);
+    if (g_desk.hot == SL_DW_CLOCK) {   // under the mouse: the day in the accent
+        const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+        sl_text_draw(&t, g_desk.day, right - (int32_t)sl_text_width(g_desk.day, day), base, day, n->r, n->g, n->b);
+    } else {
+        sl_text_draw(&t, g_desk.day, right - (int32_t)sl_text_width(g_desk.day, day), base, day, ink[0], ink[1], ink[2]);
+    }
     base += 46;
     sl_text_draw(&t, g_desk.date, right - (int32_t)sl_text_width(g_desk.date, date), base, date, muted[0], muted[1],
                  muted[2]);
@@ -378,6 +397,23 @@ static void sl_desk_surface(sl_ctx_t *ctx, sl_target_t *t, const sl_surf_style_t
     e.height = (uint16_t)s->h;
     (void)ctx;
     sl_blit_sprite(t, &e, s->px, x - (int32_t)s->pad_l, y - (int32_t)s->pad_t, s->w, s->h);
+}
+
+// A widget's look by its state: under the mouse it rises (raised ones) or
+// lights up in the accent (night ones); held down it sinks.
+static sl_surf_style_t sl_desk_night_card_style(int id) {
+    if (g_desk.pressed == id) {
+        sl_surf_style_t st = { 0x0D, 0x11, 0x1E, 1, { { 2, 2, 6, 0, 0x00, 0x00, 0x00, 90 } } };
+        return st;
+    }
+    if (g_desk.hot == id) {
+        const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+        sl_surf_style_t st = { 0x11, 0x16, 0x26, 2,
+                               { { 0, 0, 14, 0, n->r, n->g, n->b, 120 }, { 8, 8, 20, 0, 0x00, 0x00, 0x00, 120 } } };
+        return st;
+    }
+    sl_surf_style_t st = { 0x11, 0x16, 0x26, 1, { { 6, 6, 18, 0, 0x00, 0x00, 0x00, 110 } } };
+    return st;
 }
 
 static int sl_desk_days_in(int month, int year) {
@@ -398,7 +434,8 @@ static void sl_desk_draw_calendar(sl_ctx_t *ctx, const struct tm *now, const sl_
 
     int32_t x0 = g_desk.cal_r.x + 20, y0 = g_desk.cal_r.y + 20;
     uint32_t row = 32u, h = 24u + 30u + 14u + (uint32_t)(weeks + 1) * row - 12u + 26u;
-    sl_surf_style_t card = { 0x11, 0x16, 0x26, 1, { { 6, 6, 18, 0, 0x00, 0x00, 0x00, 110 } } };
+    g_desk.cal_card = (sl_desk_rect_t){ x0, y0, SL_DESK_CAL_W, h };
+    sl_surf_style_t card = sl_desk_night_card_style(SL_DW_CAL);
     sl_desk_surface(ctx, &t, &card, x0, y0, SL_DESK_CAL_W, h, 34u);
 
     static const uint8_t text[3] = { 0xE8, 0xF4, 0xFF }, head[3] = { 0x9F, 0xB4, 0xD8 };
@@ -440,16 +477,21 @@ static sl_desk_rect_t sl_desk_widget_area(const sl_desk_rect_t *r) {
 }
 
 // The theme's raised (day pearl, night navy) or night surface.
-static sl_surf_style_t sl_desk_raised_style(void) {
+static sl_surf_style_t sl_desk_raised_style(int id) {
     const sl_ui_color_t *bg = sl_ui_runtime_color(SL_UI_COLOR_BG_CANVAS);
     const sl_ui_color_t *dk = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_DARK);
     const sl_ui_color_t *lt = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_LIGHT);
+    int8_t d = 9, blur = 20;
+    if (g_desk.pressed == id) d = 3, blur = 8;          // sunk, nearly flat
+    else if (g_desk.hot == id) d = 12, blur = 26;       // a little higher
     sl_surf_style_t st = { bg->r, bg->g, bg->b, 2,
-                           { { 9, 9, 20, 0, dk->r, dk->g, dk->b, 255 }, { -9, -9, 20, 0, lt->r, lt->g, lt->b, 255 } } };
+                           { { d, d, (uint8_t)blur, 0, dk->r, dk->g, dk->b, 255 },
+                             { (int8_t)-d, (int8_t)-d, (uint8_t)blur, 0, lt->r, lt->g, lt->b, 255 } } };
     return st;
 }
 
-static sl_surf_style_t sl_desk_night_style(void) {
+static sl_surf_style_t sl_desk_night_style(int id) {
+    if (g_desk.hot == id || g_desk.pressed == id) return sl_desk_night_card_style(id);
     const sl_ui_color_t *dk = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_DARK);
     const sl_ui_color_t *lt = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_LIGHT);
     sl_surf_style_t st = { 0x11, 0x16, 0x26, 2,
@@ -566,7 +608,7 @@ static void sl_desk_draw_volume(sl_ctx_t *ctx, int32_t volume, const sl_desk_rec
     if (r->w == 0u) return;
     sl_desk_shapes();
     sl_target_t t = sl_desk_target(ctx, clip);
-    sl_surf_style_t raised = sl_desk_raised_style();
+    sl_surf_style_t raised = sl_desk_raised_style(SL_DW_VOL);
     sl_desk_surface(ctx, &t, &raised, r->x, r->y, r->w, r->h, r->w / 2u);
 
     // The night capsule, then the wave over it below its edge (smooth on
@@ -616,7 +658,7 @@ static void sl_desk_draw_cpu(sl_ctx_t *ctx, int32_t cpu, const sl_desk_rect_t *c
     if (r->w == 0u) return;
     sl_desk_shapes();
     sl_target_t t = sl_desk_target(ctx, clip);
-    sl_surf_style_t raised = sl_desk_raised_style();
+    sl_surf_style_t raised = sl_desk_raised_style(SL_DW_CPU);
     sl_desk_surface(ctx, &t, &raised, r->x, r->y, r->w, r->h, 30u);
 
     const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
@@ -668,7 +710,7 @@ static void sl_desk_draw_net(sl_ctx_t *ctx, const sl_desk_widgets_feed_t *f, con
     const sl_desk_rect_t *r = &g_desk.net_r;
     if (r->w == 0u) return;
     sl_target_t t = sl_desk_target(ctx, clip);
-    sl_surf_style_t night = sl_desk_night_style();
+    sl_surf_style_t night = sl_desk_night_style(SL_DW_NET);
     sl_desk_surface(ctx, &t, &night, r->x, r->y, r->w, r->h, 40u);
 
     const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
@@ -872,4 +914,221 @@ void sl_desk_free(sl_ctx_t *ctx) {
     if (!ctx) return;
     free(ctx->desk_frame);
     ctx->desk_frame = NULL;
+}
+
+// ------------------------------------------------------------- the mouse
+
+// The widgets' own reactions; anything else a click does is its shortcut.
+static void sl_desk_volume_at(sl_ctx_t *ctx, int32_t y);
+static void sl_desk_volume_save(void);
+static void sl_desk_volume_step(sl_ctx_t *ctx, int32_t delta);
+static void sl_desk_clock_click(sl_ctx_t *ctx);
+
+typedef struct {
+    const char *name;
+    // Pressed: may start a drag (1). Dragged: follows the mouse. Released.
+    uint8_t (*press)(sl_ctx_t *ctx, int32_t x, int32_t y);
+    void (*drag)(sl_ctx_t *ctx, int32_t x, int32_t y);
+    void (*release)(sl_ctx_t *ctx);
+    void (*wheel)(sl_ctx_t *ctx, int32_t delta);
+    // A click: this function, or else open the app with this title (a
+    // notification says so when it is not installed yet).
+    void (*click)(sl_ctx_t *ctx);
+    const char *app;
+} sl_desk_widget_t;
+
+static uint8_t sl_desk_volume_press(sl_ctx_t *ctx, int32_t x, int32_t y) {
+    (void)x;
+    sl_desk_volume_at(ctx, y);
+    return 1u;
+}
+
+static void sl_desk_volume_drag(sl_ctx_t *ctx, int32_t x, int32_t y) {
+    (void)x;
+    sl_desk_volume_at(ctx, y);
+}
+
+static void sl_desk_volume_release(sl_ctx_t *ctx) {
+    (void)ctx;
+    sl_desk_volume_save();
+}
+
+// The registry: a new widget is a row here (and its rectangle and drawing).
+static const sl_desk_widget_t k_widgets[SL_DW_COUNT] = {
+    [SL_DW_CLOCK] = { "orologio", NULL, NULL, NULL, NULL, sl_desk_clock_click, NULL },
+    [SL_DW_CAL] = { "calendario", NULL, NULL, NULL, NULL, NULL, "Calendario" },
+    [SL_DW_VOL] = { "volume", sl_desk_volume_press, sl_desk_volume_drag, sl_desk_volume_release, sl_desk_volume_step,
+                    NULL, NULL },
+    [SL_DW_CPU] = { "cpu", NULL, NULL, NULL, NULL, NULL, "Monitor" },
+    [SL_DW_NET] = { "rete", NULL, NULL, NULL, NULL, NULL, "Impostazioni" },
+};
+
+static const sl_desk_rect_t *sl_desk_widget_rect(int id) {
+    switch (id) {
+    case SL_DW_CLOCK: return &g_desk.clock_r;
+    case SL_DW_CAL: return g_desk.cal_r.w ? &g_desk.cal_card : &g_desk.cal_r;
+    case SL_DW_VOL: return &g_desk.vol_r;
+    case SL_DW_CPU: return &g_desk.cpu_r;
+    case SL_DW_NET: return &g_desk.net_r;
+    default: return NULL;
+    }
+}
+
+static int sl_desk_widget_at(int32_t x, int32_t y) {
+    for (int id = SL_DW_COUNT - 1; id >= 0; id--) {
+        const sl_desk_rect_t *r = sl_desk_widget_rect(id);
+        if (!r || r->w == 0u || r->h == 0u) continue;
+        if (x >= r->x && y >= r->y && x < r->x + (int32_t)r->w && y < r->y + (int32_t)r->h) return id;
+    }
+    return -1;
+}
+
+// Draw a widget again in its region (its state or its value changed).
+static void sl_desk_repaint(sl_ctx_t *ctx, int id) {
+    if (id < 0 || !ctx->desk_frame || g_desk.ready != 1u) return;
+    struct tm now;
+    sl_desk_now(ctx, &now);
+    if (id == SL_DW_CLOCK) {
+        sl_desk_draw_clock(ctx, &now);
+        return;
+    }
+    sl_desk_widgets_feed_t f;
+    if (!sl_desk_widgets_feed(&f)) {
+        memset(&f, 0, sizeof(f));
+        f.volume = g_desk.shown_volume;
+        f.cpu = g_desk.shown_cpu;
+    }
+    if (id == SL_DW_VOL) g_desk.shown_volume = f.volume;
+    sl_desk_rect_t area = id == SL_DW_CAL ? g_desk.cal_r : sl_desk_widget_area(sl_desk_widget_rect(id));
+    sl_desk_paint(ctx, &area, &now, &f);
+}
+
+static void sl_desk_set_state(sl_ctx_t *ctx, int hot, int pressed) {
+    int old_hot = g_desk.hot, old_pressed = g_desk.pressed;
+    if (old_hot == hot && old_pressed == pressed) return;
+    g_desk.hot = (int8_t)hot;
+    g_desk.pressed = (int8_t)pressed;
+    int ids[4] = { old_hot, old_pressed, hot, pressed };
+    for (int i = 0; i < 4; i++) {
+        int dup = 0;
+        for (int k = 0; k < i; k++) dup |= ids[k] == ids[i];
+        if (!dup) sl_desk_repaint(ctx, ids[i]);
+    }
+}
+
+// The volume from the mouse's height on the inner capsule (bottom 0, top
+// 100); set in the kernel at once, shown at once.
+static void sl_desk_set_volume(sl_ctx_t *ctx, int32_t v) {
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+    if (audio_set_volume((uint32_t)v) != 0) {
+        sl_notify_post(ctx, "Starlight", "Volume: Starlight non ha il permesso audio");
+        return;
+    }
+    if (v == g_desk.local_volume && peos_time_ns() < g_desk.local_volume_until) return;
+    g_desk.local_volume = v;
+    g_desk.local_volume_until = peos_time_ns() + 3u * SL_DESK_POLL_MS * 1000000ull;   // the poller catches up
+    sl_desk_repaint(ctx, SL_DW_VOL);
+    struct tm now;
+    sl_desk_now(ctx, &now);
+    sl_desk_draw_bar(ctx, &now);   // the number in the bar too
+}
+
+static void sl_desk_volume_at(sl_ctx_t *ctx, int32_t y) {
+    int32_t bottom = g_desk.vol_r.y + 15 + SL_DESK_CAP_H;
+    sl_desk_set_volume(ctx, (bottom - y) * 100 / SL_DESK_CAP_H);
+}
+
+static int32_t sl_desk_volume_now(void) {
+    if (g_desk.local_volume >= 0 && peos_time_ns() < g_desk.local_volume_until) return g_desk.local_volume;
+    return g_feed.volume < 0 ? 0 : g_feed.volume;
+}
+
+static void sl_desk_volume_step(sl_ctx_t *ctx, int32_t delta) {
+    sl_desk_set_volume(ctx, sl_desk_volume_now() + delta * 5);
+    sl_desk_volume_save();
+}
+
+// As setvolume does: the level survives a restart (where the disk can be
+// written: not on the live ISO).
+static void sl_desk_volume_save(void) {
+    static const char dir1[] = "/system", dir2[] = "/system/config", path[] = "/system/config/audio.cfg";
+    (void)peos_mkdir(dir1, sizeof(dir1) - 1u);
+    (void)peos_mkdir(dir2, sizeof(dir2) - 1u);
+    uint64_t fd = peos_fopen(path, sizeof(path) - 1u, PEOS_O_CREAT | PEOS_O_TRUNC | PEOS_O_WRITE);
+    if ((int64_t)fd < 0) return;
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "# PeOS global audio config\nvolume=%d\n", (int)sl_desk_volume_now());
+    if (n > 0) (void)peos_fwrite(fd, buf, (size_t)n);
+    (void)peos_fclose(fd);
+}
+
+static void sl_desk_clock_click(sl_ctx_t *ctx) {
+    sl_notify_toggle_center(ctx);
+}
+
+static void sl_desk_activate(sl_ctx_t *ctx, int id) {
+    const sl_desk_widget_t *w = &k_widgets[id];
+    if (w->click) {
+        w->click(ctx);
+        return;
+    }
+    if (!w->app) return;
+    if (!sl_windows_open_app_title(ctx, w->app)) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s non e' ancora installata", w->app);
+        sl_notify_post(ctx, "Starlight", msg);
+    }
+}
+
+void sl_desk_hover(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint8_t covered) {
+    if (!ctx || g_desk.ready != 1u || g_desk.pressed >= 0) return;
+    sl_desk_set_state(ctx, covered ? -1 : sl_desk_widget_at((int32_t)x, (int32_t)y), -1);
+}
+
+int sl_desk_press(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || g_desk.ready != 1u) return 0;
+    int id = sl_desk_widget_at((int32_t)x, (int32_t)y);
+    if (id < 0) return 0;
+    sl_desk_set_state(ctx, id, id);
+    g_desk.dragging = k_widgets[id].press ? k_widgets[id].press(ctx, (int32_t)x, (int32_t)y) : 0u;
+    return 1;
+}
+
+uint8_t sl_desk_held(void) {
+    return g_desk.pressed >= 0;
+}
+
+void sl_desk_drag(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || g_desk.pressed < 0) return;
+    int id = g_desk.pressed;
+    if (g_desk.dragging && k_widgets[id].drag) {
+        k_widgets[id].drag(ctx, (int32_t)x, (int32_t)y);
+        return;
+    }
+    // A plain click: sunk while the mouse is on it, up when it leaves.
+    int over = sl_desk_widget_at((int32_t)x, (int32_t)y) == id;
+    if (over != (g_desk.hot == id)) sl_desk_set_state(ctx, over ? id : -1, id);
+}
+
+void sl_desk_release(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || g_desk.pressed < 0) return;
+    int id = g_desk.pressed;
+    uint8_t dragged = g_desk.dragging;
+    g_desk.dragging = 0u;
+    int over = sl_desk_widget_at((int32_t)x, (int32_t)y);
+    sl_desk_set_state(ctx, over, -1);
+    if (dragged) {
+        if (k_widgets[id].release) k_widgets[id].release(ctx);
+        return;
+    }
+    if (over == id) sl_desk_activate(ctx, id);
+}
+
+int sl_desk_wheel(sl_ctx_t *ctx, uint32_t x, uint32_t y, int32_t delta) {
+    if (!ctx || g_desk.ready != 1u || delta == 0) return 0;
+    int id = sl_desk_widget_at((int32_t)x, (int32_t)y);
+    if (id < 0 || !k_widgets[id].wheel) return 0;
+    k_widgets[id].wheel(ctx, delta);
+    return 1;
 }

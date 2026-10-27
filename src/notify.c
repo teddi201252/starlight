@@ -190,6 +190,20 @@ static void sl_note_receive(sl_ctx_t *ctx, const peos_notify_msg_t *msg) {
     sl_note_count(ctx, n.source);
 }
 
+void sl_notify_post(sl_ctx_t *ctx, const char *source, const char *text) {
+    if (!ctx || !source || !text) return;
+    peos_notify_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.magic = PEOS_NOTIFY_MAGIC;
+    snprintf(msg.source, sizeof(msg.source), "%s", source);
+    snprintf(msg.text, sizeof(msg.text), "%s", text);
+    sl_note_receive(ctx, &msg);
+}
+
+void sl_notify_toggle_center(sl_ctx_t *ctx) {
+    if (ctx) sl_center_set(ctx, (uint8_t)!g_note.center_open);
+}
+
 static int sl_note_assets(sl_ctx_t *ctx) {
     if (g_note.source_f) return 1;
     if (!ctx->skin_loaded) return 0;

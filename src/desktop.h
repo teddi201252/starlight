@@ -17,5 +17,15 @@ void sl_desk_free(sl_ctx_t *ctx);
 // The local time as "hh:mm" (the timezone of settings.cfg).
 void sl_desk_local_hhmm(const sl_ctx_t *ctx, char *out, size_t cap);
 
+// The widgets answer the mouse on the desktop (outside windows and dock):
+// hover lights them, a click is their shortcut, the volume follows a drag
+// and the wheel. covered: something else is under the mouse.
+void sl_desk_hover(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint8_t covered);
+int sl_desk_press(sl_ctx_t *ctx, uint32_t x, uint32_t y);       // 1: a widget took it
+uint8_t sl_desk_held(void);                                      // a widget is held down
+void sl_desk_drag(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+void sl_desk_release(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+int sl_desk_wheel(sl_ctx_t *ctx, uint32_t x, uint32_t y, int32_t delta);   // 1: taken
+
 // The top bar's height: the time at its right opens the notification centre.
 #define SL_DESK_BAR_HEIGHT 44u
