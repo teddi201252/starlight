@@ -1095,6 +1095,11 @@ int sl_desk_press(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     return 1;
 }
 
+int sl_desk_cursor(uint32_t x, uint32_t y) {
+    if (g_desk.ready != 1u) return -1;
+    return sl_desk_widget_at((int32_t)x, (int32_t)y) >= 0 ? SL_CUR_HAND : -1;
+}
+
 uint8_t sl_desk_held(void) {
     return g_desk.pressed >= 0;
 }

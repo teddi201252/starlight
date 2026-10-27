@@ -331,6 +331,7 @@ int sl_window_init(sl_window_t *win, sl_ctx_t *ctx, app_instance_t* task, uint32
     win->fps_unfocused = 24u;
     win->next_render_ns = 0ull;
     win->last_activity_ns = peos_time_ns();
+    win->opened_ns = win->last_activity_ns;
     if (ctx) (void)sl_window_frame_ready(ctx);
     if (task) {
         win->task = task;

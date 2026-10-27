@@ -443,6 +443,7 @@ static void sl_write_default_starlight_config(void) {
     if (!f) return;
     (void)fprintf(f, "# Starlight desktop config\n");
     (void)fprintf(f, "background=%s\n", SL_RESOURCE_BACKGROUND_ALT);
+    (void)fprintf(f, "cursor_theme=soft\n");
     (void)fprintf(f, "cursor=%s\n", SL_RESOURCE_CURSOR);
     (void)fprintf(f, "cursor_scale=100\n");
     (void)fprintf(f, "font=%s\n", SL_RESOURCE_FONT_DEFAULT);
@@ -560,6 +561,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     sl_copy_text(ctx->font_manifest_path, sizeof(ctx->font_manifest_path), SL_RESOURCE_FONT_DEFAULT);
     sl_copy_text(ctx->keyboard_layout_path, sizeof(ctx->keyboard_layout_path), "us");
     ctx->hw_cursor_scale_pct = SL_HW_CURSOR_SCALE_DEFAULT;
+    ctx->cursor_theme = 1u;   // the Soft UI set, unless cursor_theme=image
     ctx->animations_enabled = SL_ANIMATIONS_ENABLED_DEFAULT;
     ctx->animation_speed_pct = SL_ANIMATION_SPEED_DEFAULT;
     ctx->double_click_ms = SL_DOUBLE_CLICK_MS_DEFAULT;
@@ -600,6 +602,8 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     sl_copy_text(ctx->background_path, sizeof(ctx->background_path), val);
                 } else if (strcmp(key, "cursor") == 0 && val[0]) {
                     sl_copy_text(ctx->cursor_path, sizeof(ctx->cursor_path), val);
+                } else if (strcmp(key, "cursor_theme") == 0) {
+                    ctx->cursor_theme = strcmp(val, "image") == 0 ? 0u : 1u;
                 } else if (strcmp(key, "font") == 0 && val[0]) {
                     sl_copy_text(ctx->font_manifest_path, sizeof(ctx->font_manifest_path), val);
                 } else if (strcmp(key, "cursor_scale") == 0) {
@@ -930,6 +934,32 @@ void sl_reload_theme(sl_ctx_t *ctx) {
     sl_windows_theme_changed(ctx);
     sl_desk_build(ctx);
     sl_dirty_mark_full();
+}
+
+// The cursor for what is under the mouse, from the top: a window being
+// moved, the notification centre, the dock and app manager, the windows (and
+// inside an app, its control), the desktop's widgets. While an app is
+// starting, the arrow and the hand are the waiting one.
+void sl_cursor_update(sl_ctx_t *ctx) {
+    static uint32_t last_x = 0xFFFFFFFFu, last_y;
+    static uint32_t frames;
+    if (!ctx) return;
+    uint32_t x = ctx->cursor_x, y = ctx->cursor_y;
+    // Worked out again when the mouse moves, and every few frames (an app
+    // starts, a control under a still mouse changes).
+    if (x == last_x && y == last_y && (++frames % 8u) != 0u) return;
+    last_x = x;
+    last_y = y;
+    int k = -1;
+    if (g_drag_active) k = SL_CUR_MOVE;
+    if (k < 0) k = sl_notify_cursor(ctx, x, y);
+    if (k < 0) k = sl_launcher_cursor(ctx, x, y);
+    if (k < 0) k = sl_windows_cursor(ctx, x, y);
+    if (k < 0) k = sl_desk_cursor(x, y);
+    if (k < 0) k = SL_CUR_ARROW;
+    // Over the tile just clicked too: the hand would say "click again".
+    if ((k == SL_CUR_ARROW || k == SL_CUR_HAND) && sl_windows_launching()) k = SL_CUR_WAIT;
+    sl_cursor_set(ctx, (sl_cursor_kind_t)k);
 }
 
 int sl_handle_input(sl_ctx_t *ctx) {

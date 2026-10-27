@@ -162,6 +162,15 @@ int sl_notify_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     return 1;
 }
 
+int sl_notify_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx) return -1;
+    if (y < SL_DESK_BAR_HEIGHT && x + 140u >= ctx->fb.width) return SL_CUR_HAND;   // the time opens the centre
+    if (!g_note.center_open) return -1;
+    uint32_t cx = sl_center_x(ctx);
+    if (x < cx || x >= cx + SL_CENTER_W || y < SL_NOTIFY_TOP || y >= SL_NOTIFY_TOP + sl_center_h()) return -1;
+    return (g_note.history_count && sl_center_clear_hit(ctx, x, y)) ? SL_CUR_HAND : SL_CUR_ARROW;
+}
+
 int sl_notify_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev) {
     if (!ctx || !ev || !g_note.center_open) return 0;
     if (ev->code == PEOS_KEY_ESC && ev->pressed) sl_center_set(ctx, 0u);

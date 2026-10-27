@@ -68,6 +68,7 @@ int main(int argc, char **argv) {
             peos_puts("starlight: skin " SL_RESOURCE_SKIN " missing or invalid\n");
         }
     }
+    sl_cursor_init(&ctx);   // again, now that the skin (and its cursors) is there
     sl_audio_init();
     peos_puts("starlight: minimal skeleton running\n");
     if (ctx.fb_direct) {
@@ -83,7 +84,7 @@ int main(int argc, char **argv) {
     if (!ctx.hw_cursor) {
         sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);
         sl_render_cursor(&ctx);
-        sl_dirty_add(&ctx, ctx.cursor_x, ctx.cursor_y, SL_CURSOR_W, SL_CURSOR_H);
+        sl_sw_cursor_dirty(&ctx);
     }
     else sl_hw_cursor_sync_pos(&ctx);
     if (!sl_present(&ctx)) {
@@ -117,6 +118,7 @@ int main(int argc, char **argv) {
         uint32_t old_x = ctx.cursor_x;
         uint32_t old_y = ctx.cursor_y;
         if (sl_handle_input(&ctx)) break;
+        sl_cursor_update(&ctx);
         if (ctx.cursor_x != old_x || ctx.cursor_y != old_y) {
             if (ctx.hw_cursor) {
                 sl_hw_cursor_sync_pos(&ctx);
@@ -175,7 +177,7 @@ int main(int argc, char **argv) {
         if (!ctx.hw_cursor) {
             sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);
             sl_render_cursor(&ctx);
-            sl_dirty_add(&ctx, ctx.cursor_x, ctx.cursor_y, SL_CURSOR_W, SL_CURSOR_H);
+            sl_sw_cursor_dirty(&ctx);
         }
         sl_perf_add_render(peos_time_ns() - render_start_ns);
         if (!sl_present(&ctx)) break;

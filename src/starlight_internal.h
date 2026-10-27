@@ -8,8 +8,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SL_CURSOR_W 3u
-#define SL_CURSOR_H 3u
+// The cursors of the Soft UI set (Soft UI plan, phase 11): which one shows
+// depends on what is under the mouse.
+typedef enum {
+    SL_CUR_ARROW = 0,
+    SL_CUR_HAND,
+    SL_CUR_TEXT,
+    SL_CUR_RESIZE_H,
+    SL_CUR_RESIZE_V,
+    SL_CUR_RESIZE_NWSE,
+    SL_CUR_RESIZE_NESW,
+    SL_CUR_MOVE,
+    SL_CUR_WAIT,
+    SL_CUR_NO,
+    SL_CUR_COUNT
+} sl_cursor_kind_t;
 
 void sl_audio_init(void);
 void sl_audio_shutdown(void);
@@ -26,10 +39,16 @@ int sl_present(sl_ctx_t *ctx);
 void sl_frame_pace(uint64_t *next_deadline_ns, int64_t input_fd, int drew);
 
 void sl_cursor_init(sl_ctx_t *ctx);
+// Show this cursor (nothing to do if it shows already): a new image for the
+// hardware cursor, or the one the software cursor draws.
+void sl_cursor_set(sl_ctx_t *ctx, sl_cursor_kind_t kind);
+// Once a frame: pick the cursor for what is under the mouse.
+void sl_cursor_update(sl_ctx_t *ctx);
 void sl_render_cursor(sl_ctx_t *ctx);
-void sl_render_cursor_at(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_sw_cursor_capture(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_sw_cursor_restore(sl_ctx_t *ctx);
+// The software cursor's rectangle now, marked dirty.
+void sl_sw_cursor_dirty(sl_ctx_t *ctx);
 void sl_hw_cursor_sync_pos(sl_ctx_t *ctx);
 
 void sl_windows_create_test(sl_ctx_t *ctx, size_t count);
@@ -42,6 +61,11 @@ void sl_windows_focus_at_cursor(uint32_t x, uint32_t y);
 // under it this frame (none while it fades or if every window is minimized).
 int sl_windows_top_opaque_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 int sl_windows_close_at_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+// The cursor each part wants at x,y (sl_cursor_kind_t), or -1: not theirs.
+int sl_launcher_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y);
+int sl_windows_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y);
+// An app was just opened and has not shown anything yet.
+uint8_t sl_windows_launching(void);
 // A window (not minimized) covers x,y.
 int sl_windows_any_at(uint32_t x, uint32_t y);
 // Open (or bring forward) the app with this title, case aside: 0 if none.
