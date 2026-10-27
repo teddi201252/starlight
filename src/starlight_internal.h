@@ -111,6 +111,10 @@ typedef void (*sl_dirty_rect_fn)(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
 void sl_dirty_for_each_intersection(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                     sl_dirty_rect_fn fn, void *userdata);
 void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata);
+// The same for all of the window, title bar and frame (a modal dialog's veil).
+void sl_windows_mark_app_dirty_all(const sl_ctx_t *ctx, const void *userdata);
+// Close the window of an app that was ended (SYS_PROC_KILL, from Monitor).
+void sl_windows_close_task(sl_ctx_t *ctx, const app_instance_t *task);
 void sl_windows_tick_animations(sl_ctx_t *ctx);
 
 void sl_app_host_tick(sl_ctx_t *ctx);

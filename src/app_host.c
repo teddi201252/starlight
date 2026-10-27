@@ -130,6 +130,11 @@ typedef enum {
     ORBIT_UI_CMD_CONTEXT_MENU = 22,
     ORBIT_UI_CMD_SEGMENT = 23,
     ORBIT_UI_CMD_SWATCH = 24,
+    ORBIT_UI_CMD_SURF = 25,      // SURF kind x y w h r: a soft surface
+    ORBIT_UI_CMD_FACE = 26,      // FACE name: the skin font of the labels after it
+    ORBIT_UI_CMD_RING = 27,      // RING x y size thick permille tr tg tb fr fg fb
+    ORBIT_UI_CMD_GRAPH = 28,     // GRAPH x y w h lr lg lb fr fg fb fa v1 v2 ...
+    ORBIT_UI_CMD_VEIL = 29,      // VEIL alpha: night over the whole window, title bar included
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -154,6 +159,7 @@ typedef struct {
     uint8_t image_failed;
     uint8_t enabled;
     uint8_t primary;            // BUTTONP: the night button of its group
+    uint8_t align;              // LABELA/LABELAT: 0 left of x, 1 centred on it, 2 right of it
 } orbit_ui_cmd_t;
 
 typedef struct {
@@ -188,6 +194,7 @@ typedef struct {
     uint32_t sent_body_w, sent_body_h;   // the body size the app was last told (RESIZE)
     uint32_t pending_body_w, pending_body_h;   // a newer size, not sent yet (too soon after the last)
     uint8_t resize_pending;
+    uint8_t veil_drawn;         // a VEIL was in the last frame: its title bar must be repainted
     uint64_t resize_sent_ns;
     uint8_t dup_warned;                  // two controls with one id: said once
     uint8_t client_proto_ver;
@@ -268,6 +275,8 @@ typedef struct {
     uint8_t super_down;
     uint8_t initialized;
     int64_t child_pid;
+    uint8_t ended;              // the app was ended from outside: close its window
+    uint8_t veil_changed;       // a VEIL came or went: all of the window to the screen (next tick)
     int64_t child_stdin_fd;
     int64_t child_stdout_fd;
     uint64_t next_poll_ns;
@@ -1758,6 +1767,114 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         return 1;
     }
 
+    // LABELA x y align r g b text / LABELAT x y align token text: a label
+    // aligned on x (0 left, 1 centre, 2 right).
+    if (orbit_token_is(cmd_tok, cmd_len, "LABELA") || orbit_token_is(cmd_tok, cmd_len, "LABELAT")) {
+        uint8_t themed = orbit_token_is(cmd_tok, cmd_len, "LABELAT") ? 1u : 0u;
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, themed ? ORBIT_UI_CMD_LABEL_THEME : ORBIT_UI_CMD_LABEL);
+        if (!cmd) return 1;
+        uint32_t align = 0u, rv = 0u, gv = 0u, bv = 0u;
+        int ok = orbit_parse_u32(&p, &cmd->x) && orbit_parse_u32(&p, &cmd->y) && orbit_parse_u32(&p, &align);
+        if (ok && themed) ok = orbit_parse_u32(&p, &cmd->value) && cmd->value < SL_UI_COLOR_COUNT;
+        if (ok && !themed) ok = orbit_parse_u32(&p, &rv) && orbit_parse_u32(&p, &gv) && orbit_parse_u32(&p, &bv);
+        if (!ok || align > 2u) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "labela_invalid_args");
+            cmd->type = ORBIT_UI_CMD_NONE;
+            return 1;
+        }
+        cmd->align = (uint8_t)align;
+        cmd->r = (uint8_t)rv;
+        cmd->g = (uint8_t)gv;
+        cmd->b = (uint8_t)bv;
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "labela_text_alloc_failed");
+            return 1;
+        }
+        return 1;
+    }
+
+    // SURF kind x y w h r: a soft surface (raised, raised lit, inset, flat,
+    // night, night lit, neon, night flat).
+    if (orbit_token_is(cmd_tok, cmd_len, "SURF")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_SURF);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->value) || !orbit_parse_u32(&p, &cmd->x) ||
+            !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
+            !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->min_v) || cmd->value > 7u) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "surf_invalid_args");
+            cmd->type = ORBIT_UI_CMD_NONE;
+        }
+        return 1;
+    }
+
+    // FACE name: labels after it in that font of the skin ("-" for the default).
+    if (orbit_token_is(cmd_tok, cmd_len, "FACE")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_FACE);
+        if (!cmd) return 1;
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, (p[0] == '-' && (p[1] == '\0' || p[1] == '\n')) ? "" : p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "face_alloc_failed");
+        }
+        return 1;
+    }
+
+    // VEIL alpha: a modal dialog's veil, over the whole window (its title bar
+    // too, which the app cannot draw on); what comes after it is on top.
+    if (orbit_token_is(cmd_tok, cmd_len, "VEIL")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_VEIL);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->value) || cmd->value > 255u) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "veil_invalid_args");
+            cmd->type = ORBIT_UI_CMD_NONE;
+        }
+        return 1;
+    }
+
+    // RING x y size thick permille tr tg tb fr fg fb
+    if (orbit_token_is(cmd_tok, cmd_len, "RING")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_RING);
+        if (!cmd) return 1;
+        uint32_t c[6] = { 0u };
+        int ok = orbit_parse_u32(&p, &cmd->x) && orbit_parse_u32(&p, &cmd->y) &&
+                 orbit_parse_u32(&p, &cmd->w) && orbit_parse_u32(&p, &cmd->min_v) &&
+                 orbit_parse_u32(&p, &cmd->value);
+        for (int i = 0; ok && i < 6; i++) ok = orbit_parse_u32(&p, &c[i]);
+        if (!ok) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "ring_invalid_args");
+            cmd->type = ORBIT_UI_CMD_NONE;
+            return 1;
+        }
+        cmd->h = cmd->w;
+        for (int i = 0; i < 3; i++) {
+            cmd->grad[0][i] = (uint8_t)c[i];
+            cmd->grad[1][i] = (uint8_t)c[3 + i];
+        }
+        return 1;
+    }
+
+    // GRAPH x y w h lr lg lb fr fg fb fa v1 v2 ...: values 0..1000.
+    if (orbit_token_is(cmd_tok, cmd_len, "GRAPH")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_GRAPH);
+        if (!cmd) return 1;
+        uint32_t c[7] = { 0u };
+        int ok = orbit_parse_u32(&p, &cmd->x) && orbit_parse_u32(&p, &cmd->y) &&
+                 orbit_parse_u32(&p, &cmd->w) && orbit_parse_u32(&p, &cmd->h);
+        for (int i = 0; ok && i < 7; i++) ok = orbit_parse_u32(&p, &c[i]);
+        if (!ok) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "graph_invalid_args");
+            cmd->type = ORBIT_UI_CMD_NONE;
+            return 1;
+        }
+        for (int i = 0; i < 3; i++) cmd->grad[0][i] = (uint8_t)c[i];
+        for (int i = 0; i < 4; i++) cmd->grad[1][i] = (uint8_t)c[3 + i];
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "graph_alloc_failed");
+        }
+        return 1;
+    }
+
     // SWATCH id x y size r g b chosen enabled: answered with BUTTON events.
     if (orbit_token_is(cmd_tok, cmd_len, "SWATCH")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_SWATCH);
@@ -2476,7 +2593,10 @@ static uint8_t orbit_poll_output(orbit_shell_t *shell) {
         int status = 0;
         uint64_t w = peos_waitpid_flags((uint64_t)shell->child_pid, &status, PEOS_WAIT_NOHANG);
         if (w == (uint64_t)shell->child_pid) {
+            uint8_t app = shell->ui.enabled;   // an app with its own window, not the terminal
             orbit_mark_child_exited(shell);
+            // Ended from outside (SYS_PROC_KILL: 137): its window goes too.
+            if (app && status == 137) shell->ended = 1u;
             changed = 1u;
         }
     }
@@ -3337,7 +3457,18 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_FONT_SIZE:
         case ORBIT_UI_CMD_CONTEXT_MENU:
         case ORBIT_UI_CMD_SCROLL_V:
+        case ORBIT_UI_CMD_SURF:
+        case ORBIT_UI_CMD_FACE:
+        case ORBIT_UI_CMD_RING:
+        case ORBIT_UI_CMD_GRAPH:
+        case ORBIT_UI_CMD_VEIL:
+        case ORBIT_UI_CMD_RECT:
+        case ORBIT_UI_CMD_RECTA:
+        case ORBIT_UI_CMD_RECT_THEME:
+        case ORBIT_UI_CMD_RECTA_THEME:
             continue;   // see through to what is under them
+        case ORBIT_UI_CMD_PANEL:
+            return cmd->enabled ? SL_CUR_HAND : SL_CUR_ARROW;
         default:
             return SL_CUR_ARROW;
         }
@@ -3729,6 +3860,10 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     // all of their body themselves, so nothing is drawn under them (it was
     // a whole night surface blended at every redraw).
     uint8_t own_body = (!shell->surface.active && shell->ui.enabled && shell->ui.committed) ? 1u : 0u;
+    if (!own_body && win->veil_alpha) {   // the app went with its dialog open
+        ((sl_window_t *)win)->veil_alpha = 0u;
+        shell->veil_changed = 1u;
+    }
     if (!own_body) {
         uint32_t cw = 0u, ch = 0u;
         if (sl_ui_ctx_mono_cell(ctx, &cw, &ch)) {
@@ -3766,6 +3901,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     }
 
     if (shell->ui.enabled && shell->ui.committed) {
+        uint8_t veil_now = 0u;
         uint32_t select_open_before = shell->ui.ui.select_open_id;
         uint32_t context_open_before = shell->ui.context_open_id;
         sl_ui_begin(&shell->ui.ui, ctx, win,
@@ -3969,10 +4105,42 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 continue;
             } else if (cmd->type == ORBIT_UI_CMD_FONT_SIZE) {
                 sl_ui_set_font_px(&shell->ui.ui, cmd->value);
-            } else if (cmd->type == ORBIT_UI_CMD_LABEL) {
-                sl_ui_label_rgb(&shell->ui.ui, x, y, cmd->text, cmd->r, cmd->g, cmd->b);
-            } else if (cmd->type == ORBIT_UI_CMD_LABEL_THEME) {
-                sl_ui_label(&shell->ui.ui, x, y, cmd->text, (sl_ui_color_token_t)cmd->value);
+            } else if (cmd->type == ORBIT_UI_CMD_LABEL || cmd->type == ORBIT_UI_CMD_LABEL_THEME) {
+                uint32_t lx = x;
+                if (cmd->align && cmd->text) {
+                    uint32_t tw = sl_ui_label_width(&shell->ui.ui, cmd->text);
+                    if (cmd->align == 1u) tw /= 2u;
+                    lx = x > tw ? x - tw : 0u;
+                }
+                if (cmd->type == ORBIT_UI_CMD_LABEL) sl_ui_label_rgb(&shell->ui.ui, lx, y, cmd->text, cmd->r, cmd->g, cmd->b);
+                else sl_ui_label(&shell->ui.ui, lx, y, cmd->text, (sl_ui_color_token_t)cmd->value);
+            } else if (cmd->type == ORBIT_UI_CMD_VEIL) {
+                // Here only over the cached inside; the frame around it is
+                // veiled by the window when it is repainted (veil_alpha).
+                veil_now = (uint8_t)cmd->value;
+                sl_win_rect_t in = { (int32_t)(win->x + SL_WIN_OPAQUE_INSET), (int32_t)(win->y + SL_WIN_OPAQUE_INSET),
+                                     win->width - 2u * SL_WIN_OPAQUE_INSET, win->height - 2u * SL_WIN_OPAQUE_INSET };
+                sl_clip_set(ctx, (uint32_t)in.x, (uint32_t)in.y, in.w, in.h);
+                sl_window_draw_veil(ctx, win, veil_now);
+                if (clip_depth > 0u) {
+                    sl_clip_set(ctx, clip_x[clip_depth - 1u], clip_y[clip_depth - 1u],
+                                clip_w[clip_depth - 1u], clip_h[clip_depth - 1u]);
+                } else {
+                    sl_clip_set(ctx, body_x, body_y, body_w, body_h);
+                }
+            } else if (cmd->type == ORBIT_UI_CMD_SURF) {
+                sl_ui_soft_surface(&shell->ui.ui, cmd->value, x, y, cmd->w, cmd->h, cmd->min_v);
+            } else if (cmd->type == ORBIT_UI_CMD_FACE) {
+                sl_ui_set_label_face(&shell->ui.ui, cmd->text);
+            } else if (cmd->type == ORBIT_UI_CMD_RING) {
+                sl_ui_ring(&shell->ui.ui, x, y, cmd->w, cmd->min_v, cmd->value, cmd->grad[0], cmd->grad[1]);
+            } else if (cmd->type == ORBIT_UI_CMD_GRAPH) {
+                uint16_t vals[256];
+                uint32_t n = 0u;
+                const char *q = cmd->text ? cmd->text : "";
+                uint32_t v = 0u;
+                while (n < 256u && orbit_parse_u32(&q, &v)) vals[n++] = (uint16_t)(v > 1000u ? 1000u : v);
+                sl_ui_graph(&shell->ui.ui, x, y, cmd->w, cmd->h, vals, n, cmd->grad[0], cmd->grad[1]);
             } else if (cmd->type == ORBIT_UI_CMD_BUTTON) {
                 uint8_t en = cmd_enabled;
                 uint8_t clicked = cmd->primary
@@ -4245,6 +4413,13 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         }
         sl_clip_clear(ctx);
 
+        // A veil covers the title bar and frame too: when it comes or goes,
+        // all of the window is repainted, not just the body.
+        if (veil_now != shell->ui.veil_drawn) {
+            shell->ui.veil_drawn = veil_now;
+            ((sl_window_t *)win)->veil_alpha = veil_now;
+            shell->veil_changed = 1u;
+        }
         if (select_open_before != shell->ui.ui.select_open_id ||
             context_open_before != shell->ui.context_open_id) {
             // Ensure all controls refresh visual state immediately when dropdown opens/closes.
@@ -4381,6 +4556,14 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
 
         if (changed) {
             sl_windows_mark_app_dirty(ctx, shell);
+        }
+        if (shell->veil_changed) {   // the title bar and the frame changed too, not just the body
+            shell->veil_changed = 0u;
+            sl_windows_mark_app_dirty_all(ctx, shell);
+        }
+        if (shell->ended) {
+            shell->ended = 0u;
+            sl_windows_close_task(ctx, g_orbit_app[i]);
         }
 
         g_orbit_app[i]->pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);

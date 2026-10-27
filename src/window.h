@@ -67,6 +67,7 @@ struct sl_window {
     // (0 = none: the screen), and whether it may change at all.
     uint32_t min_w, min_h, max_w, max_h;
     uint8_t resizable;
+    uint8_t veil_alpha;   // SLUI VEIL: night over all of the window (a modal dialog's)
     char title[64];
 
     // Task
@@ -101,6 +102,8 @@ sl_win_rect_t sl_window_outer_rect(const sl_window_t *win);
 // (the app redrew).
 void sl_window_dirty_all(const sl_ctx_t *ctx, const sl_window_t *win);
 void sl_window_dirty_body(const sl_ctx_t *ctx, const sl_window_t *win);
+// Night at alpha over the window's rounded shape, within the ctx clip.
+void sl_window_draw_veil(sl_ctx_t *ctx, const sl_window_t *win, uint8_t alpha);
 // Which title bar button is at (x, y), or SL_WIN_BTN_NONE.
 int sl_window_button_at(const sl_window_t *win, uint32_t x, uint32_t y);
 void sl_window_button_rect(const sl_window_t *win, int button, uint32_t *x, uint32_t *y);
