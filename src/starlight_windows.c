@@ -1844,6 +1844,9 @@ static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index) {
     if (!ctx || launcher_index >= g_launcher_count) return 0;
 
     sl_launcher_item_t *item = &g_launcher_items[launcher_index];
+    // Starting the process holds Starlight a moment: the wait cursor first
+    // (the hardware one shows it at once).
+    if (!sl_app_host_instance_peek_at(item->slot)) sl_cursor_set(ctx, SL_CUR_WAIT);
     app_instance_t *app = sl_app_host_instance_at(item->slot);
     if (!app) return 0;
     item->instance = app;
@@ -2067,6 +2070,30 @@ static void sl_launcher_tick_catalog(sl_ctx_t *ctx) {
     }
     (void)sl_launcher_reconcile_catalog(ctx, entries, count, 0u);
     free(entries);
+}
+
+#define SL_LAUNCH_WAIT_NS 5000000000ull   // the wait cursor at most this long
+
+uint8_t sl_windows_launching(void) {
+    uint64_t now = peos_time_ns();
+    for (size_t i = 0; g_windows && i < g_window_count; i++) {
+        const sl_window_t *w = &g_windows[i];
+        if (now - w->opened_ns >= SL_LAUNCH_WAIT_NS || !w->task) continue;
+        if (!sl_app_host_ready(w->task->userdata)) return 1u;
+    }
+    return 0u;
+}
+
+int sl_windows_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    (void)ctx;
+    for (size_t i = g_window_count; g_windows && i > 0u; i--) {
+        const sl_window_t *w = &g_windows[i - 1u];
+        if (w->minimized || sl_window_is_closing(w) || !sl_window_contains_point(w, x, y)) continue;
+        if (sl_window_button_at(w, x, y) != SL_WIN_BTN_NONE) return SL_CUR_HAND;
+        if (y < w->y + w->top_bar_height) return SL_CUR_ARROW;
+        return w->task ? sl_app_host_cursor(w, w->task->userdata, x, y) : SL_CUR_ARROW;
+    }
+    return -1;
 }
 
 int sl_windows_any_at(uint32_t x, uint32_t y) {
@@ -2517,6 +2544,33 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
         return 1;
     }
     return sl_point_in_rect(x, y, L.px, L.py, L.pw, L.ph) ? 1 : 0;
+}
+
+int sl_launcher_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || g_dock.ready != 1u) return -1;
+    if (g_launcher_ctx_open && sl_point_in_rect(x, y, g_launcher_ctx_x, g_launcher_ctx_y, g_launcher_ctx_w, g_launcher_ctx_h)) {
+        return g_launcher_ctx_info ? SL_CUR_ARROW : SL_CUR_HAND;
+    }
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    if (L.count == 0u) return -1;
+    size_t i = 0u;
+    uint32_t fx, fy;
+    sl_fin_rect(&L, &fx, &fy);
+    uint8_t on_fin = sl_point_in_rect(x, y, fx, fy, SL_FIN_W, SL_FIN_H);
+    if (g_launcher_extra_width != 0u) {   // the app manager
+        if (!on_fin && !sl_point_in_rect(x, y, L.cx, L.cy, L.cw, L.ch)) return -1;
+        if (!sl_dock_expanded_fully()) return SL_CUR_ARROW;
+        if (on_fin || sl_dock_hit_tile(&L, x, y, &i) || sl_mgr_hit_tile(&L, x, y, &i)) return SL_CUR_HAND;
+        sl_mgr_header_t H;
+        sl_mgr_header(&L, &H);
+        if (sl_point_in_rect(x, y, H.search_x, H.y, H.search_w, SL_MGR_HDR_H)) return SL_CUR_TEXT;
+        if (sl_point_in_rect(x, y, H.seg_x, H.y, H.seg_w, SL_MGR_HDR_H)) return SL_CUR_HAND;
+        return SL_CUR_ARROW;
+    }
+    if ((g_dock_hot && on_fin) || sl_dock_hit_tile(&L, x, y, &i)) return SL_CUR_HAND;
+    if (sl_point_in_rect(x, y, L.px, L.py, L.pw, L.ph)) return SL_CUR_ARROW;
+    return -1;
 }
 
 uint8_t sl_launcher_manager_open(void) {

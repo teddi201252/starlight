@@ -1,6 +1,8 @@
 #include "starlight_internal.h"
 #include "render/image_decode.h"
 #include "render/pixels.h"
+#include "render/blit.h"
+#include "render/skin.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -192,55 +194,183 @@ static int sl_hw_cursor_load_resource(sl_ctx_t *ctx, const char *path) {
     return ok;
 }
 
+// ------------------------------------------------------------- the set
+
+static const char *const k_cursor_names[SL_CUR_COUNT] = {
+    "cursor-arrow", "cursor-hand", "cursor-text", "cursor-resize-h", "cursor-resize-v",
+    "cursor-resize-nwse", "cursor-resize-nesw", "cursor-move", "cursor-wait", "cursor-no",
+};
+
+// The cursor showing: premultiplied BGRA at the configured scale, its hot
+// spot, and what the software cursor saved under it.
+static struct {
+    uint8_t ready;                 // the set is in the skin and in use
+    int kind;                      // showing, -1 none yet
+    uint8_t px[SL_HW_CURSOR_MAX_SIDE * SL_HW_CURSOR_MAX_SIDE * 4u];
+    uint32_t w, h, hx, hy;
+    uint32_t crop_x, crop_y;       // columns and rows cut off the hardware image (screen edge)
+    uint8_t saved[SL_HW_CURSOR_MAX_SIDE * SL_HW_CURSOR_MAX_SIDE * 4u];
+} g_cur = { .kind = -1 };
+
+// The hot spot is Starlight's to place, not the host's: the hardware
+// cursor gets its image with the hot spot at 0,0 and is moved to the mouse
+// minus the hot spot (QEMU's displays do not all honour a hot spot, and the
+// tip of the arrow sat 10,7 px off). Near the left or top edge, where that
+// would be below zero, the image goes with its first columns or rows cut.
+static void sl_cursor_hw_place(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y, uint32_t *cx, uint32_t *cy) {
+    *cx = ctx->cursor_x < g_cur.hx ? g_cur.hx - ctx->cursor_x : 0u;
+    *cy = ctx->cursor_y < g_cur.hy ? g_cur.hy - ctx->cursor_y : 0u;
+    *x = ctx->cursor_x + *cx - g_cur.hx;
+    *y = ctx->cursor_y + *cy - g_cur.hy;
+}
+
+// Hand the current image (less crop_x, crop_y) to the hardware cursor, in
+// straight RGBA, its hot spot at 0,0.
+static int sl_cursor_apply_hw(sl_ctx_t *ctx) {
+    uint8_t rgba[SL_HW_CURSOR_MAX_SIDE * SL_HW_CURSOR_MAX_SIDE * 4u];
+    peos_memset(rgba, 0, (size_t)g_cur.w * g_cur.h * 4u);
+    for (uint32_t y = g_cur.crop_y; y < g_cur.h; y++) {
+        for (uint32_t x = g_cur.crop_x; x < g_cur.w; x++) {
+            const uint8_t *s = &g_cur.px[(y * g_cur.w + x) * 4u];
+            uint8_t *d = &rgba[((y - g_cur.crop_y) * g_cur.w + (x - g_cur.crop_x)) * 4u];
+            uint32_t a = s[3];
+            d[0] = a ? (uint8_t)((s[2] * 255u + a / 2u) / a) : 0u;
+            d[1] = a ? (uint8_t)((s[1] * 255u + a / 2u) / a) : 0u;
+            d[2] = a ? (uint8_t)((s[0] * 255u + a / 2u) / a) : 0u;
+            d[3] = (uint8_t)a;
+        }
+    }
+    if ((int64_t)peos_cursor_set_image_rgba(rgba, g_cur.w, g_cur.h, 0u, 0u) < 0) return 0;
+    uint32_t x, y, cx, cy;
+    sl_cursor_hw_place(ctx, &x, &y, &cx, &cy);
+    (void)peos_cursor_move_abs(x, y);
+    if ((int64_t)peos_cursor_set_visible(1) < 0) return 0;
+    ctx->hw_cursor = 1u;
+    return 1;
+}
+
+void sl_cursor_set(sl_ctx_t *ctx, sl_cursor_kind_t kind) {
+    if (!ctx || !g_cur.ready || (int)kind == g_cur.kind || kind >= SL_CUR_COUNT) return;
+    const slsk_entry_t *e = sl_skin_find(&ctx->skin, k_cursor_names[kind]);
+    if (!e) e = sl_skin_find(&ctx->skin, k_cursor_names[SL_CUR_ARROW]);
+    if (!e) return;
+    uint32_t scale = sl_cursor_effective_scale_pct(e->width, e->height, ctx->hw_cursor_scale_pct);
+    uint32_t w = 0u, h = 0u;
+    if (scale == 0u || !sl_cursor_scale_rgba_nn(sl_skin_data(&ctx->skin, e), e->width, e->height, e->width * 4u, scale,
+                                                g_cur.px, &w, &h)) {
+        return;
+    }
+    g_cur.kind = (int)kind;
+    g_cur.w = w;
+    g_cur.h = h;
+    // The hot spot is kept in pad_l/pad_t (slskin's "cursor").
+    g_cur.hx = (e->pad_l * scale + 50u) / 100u;
+    g_cur.hy = (e->pad_t * scale + 50u) / 100u;
+    if (g_cur.hx >= w) g_cur.hx = w - 1u;
+    if (g_cur.hy >= h) g_cur.hy = h - 1u;
+    if (ctx->hw_cursor) {
+        uint32_t x, y;
+        sl_cursor_hw_place(ctx, &x, &y, &g_cur.crop_x, &g_cur.crop_y);
+        (void)sl_cursor_apply_hw(ctx);
+    }
+}
+
 void sl_cursor_init(sl_ctx_t *ctx) {
     if (!ctx) return;
     ctx->hw_cursor = 0u;
+    g_cur.ready = 0u;
+    g_cur.kind = -1;
+    // The Soft UI set: the hardware cursor where there is one (virtio-gpu,
+    // Intel), else drawn by Starlight with the same images.
+    if (ctx->cursor_theme && ctx->skin_loaded && sl_skin_find(&ctx->skin, k_cursor_names[SL_CUR_ARROW])) {
+        g_cur.ready = 1u;
+        ctx->hw_cursor = 1u;   // try it first
+        sl_cursor_set(ctx, SL_CUR_ARROW);
+        if (g_cur.kind < 0 || !sl_cursor_apply_hw(ctx)) ctx->hw_cursor = 0u;
+        return;
+    }
+    // One image of the user's (cursor= in settings.cfg).
     if (!sl_hw_cursor_load_resource(ctx, ctx->cursor_path)) {
         (void)sl_hw_cursor_set_default(ctx);
+    }
+    if (!ctx->hw_cursor && ctx->skin_loaded && sl_skin_find(&ctx->skin, k_cursor_names[SL_CUR_ARROW])) {
+        g_cur.ready = 1u;   // no hardware cursor: draw the arrow at least
+        sl_cursor_set(ctx, SL_CUR_ARROW);
     }
 }
 
 void sl_hw_cursor_sync_pos(sl_ctx_t *ctx) {
     if (!ctx || !ctx->hw_cursor) return;
-    (void)peos_cursor_move_abs(ctx->cursor_x, ctx->cursor_y);
+    if (!g_cur.ready || g_cur.kind < 0) {   // a single image: its hot spot is 0,0
+        (void)peos_cursor_move_abs(ctx->cursor_x, ctx->cursor_y);
+        return;
+    }
+    uint32_t x, y, cx, cy;
+    sl_cursor_hw_place(ctx, &x, &y, &cx, &cy);
+    if (cx != g_cur.crop_x || cy != g_cur.crop_y) {   // at an edge: the image cut differently
+        g_cur.crop_x = cx;
+        g_cur.crop_y = cy;
+        (void)sl_cursor_apply_hw(ctx);
+        return;
+    }
+    (void)peos_cursor_move_abs(x, y);
 }
 
-void sl_render_cursor_at(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
-    if (!ctx || !ctx->frame) return;
-    if (x >= ctx->fb.width || y >= ctx->fb.height) return;
-    sl_fill_rect(ctx, x, y, SL_CURSOR_W, SL_CURSOR_H, 0xFF, 0xFF, 0xFF);
+// ------------------------------------------------------ the software cursor
+
+// Where the software cursor is drawn now, clipped to the screen.
+static int sl_sw_cursor_rect(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t *rx, uint32_t *ry,
+                             uint32_t *rw, uint32_t *rh) {
+    if (!ctx || g_cur.kind < 0 || x >= ctx->fb.width || y >= ctx->fb.height) return 0;
+    int64_t x0 = (int64_t)x - g_cur.hx, y0 = (int64_t)y - g_cur.hy;
+    int64_t x1 = x0 + g_cur.w, y1 = y0 + g_cur.h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int64_t)ctx->fb.width) x1 = ctx->fb.width;
+    if (y1 > (int64_t)ctx->fb.height) y1 = ctx->fb.height;
+    if (x1 <= x0 || y1 <= y0) return 0;
+    *rx = (uint32_t)x0;
+    *ry = (uint32_t)y0;
+    *rw = (uint32_t)(x1 - x0);
+    *rh = (uint32_t)(y1 - y0);
+    return 1;
 }
 
 void sl_render_cursor(sl_ctx_t *ctx) {
-    sl_render_cursor_at(ctx, ctx->cursor_x, ctx->cursor_y);
+    if (!ctx || !ctx->frame || g_cur.kind < 0) return;
+    slsk_entry_t e;
+    peos_memset(&e, 0, sizeof(e));
+    e.kind = SLSK_KIND_PREMUL;
+    e.width = (uint16_t)g_cur.w;
+    e.height = (uint16_t)g_cur.h;
+    uint8_t clip = ctx->clip_enabled;
+    ctx->clip_enabled = 0u;
+    sl_target_t t = sl_target_from_ctx(ctx);
+    ctx->clip_enabled = clip;
+    sl_blit_sprite(&t, &e, g_cur.px, (int32_t)ctx->cursor_x - (int32_t)g_cur.hx,
+                   (int32_t)ctx->cursor_y - (int32_t)g_cur.hy, g_cur.w, g_cur.h);
+}
+
+void sl_sw_cursor_dirty(sl_ctx_t *ctx) {
+    uint32_t x, y, w, h;
+    if (sl_sw_cursor_rect(ctx, ctx->cursor_x, ctx->cursor_y, &x, &y, &w, &h)) sl_dirty_add(ctx, x, y, w, h);
 }
 
 void sl_sw_cursor_capture(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx || !ctx->frame) return;
-    if (x >= ctx->fb.width || y >= ctx->fb.height) {
+    uint32_t rx, ry, w, h;
+    if (!sl_sw_cursor_rect(ctx, x, y, &rx, &ry, &w, &h)) {
         ctx->cursor_saved_valid = 0u;
         return;
     }
-
-    uint32_t w = SL_CURSOR_W;
-    uint32_t h = SL_CURSOR_H;
-    if (x + w > ctx->fb.width) w = ctx->fb.width - x;
-    if (y + h > ctx->fb.height) h = ctx->fb.height - y;
-    if (w == 0 || h == 0) {
-        ctx->cursor_saved_valid = 0u;
-        return;
-    }
-
-    const size_t save_stride = (size_t)SL_CURSOR_W * 4u;
+    const size_t save_stride = (size_t)SL_HW_CURSOR_MAX_SIDE * 4u;
     const size_t row_bytes = (size_t)w * (size_t)ctx->bytespp;
     for (uint32_t j = 0; j < h; j++) {
-        const uint8_t *src = ctx->frame + ((size_t)(y + j) * ctx->row_stride) +
-                             ((size_t)x * (size_t)ctx->bytespp);
-        peos_memcpy(&ctx->cursor_saved[(size_t)j * save_stride], src, row_bytes);
+        const uint8_t *src = ctx->frame + ((size_t)(ry + j) * ctx->row_stride) + ((size_t)rx * (size_t)ctx->bytespp);
+        peos_memcpy(&g_cur.saved[(size_t)j * save_stride], src, row_bytes);
     }
-
-    ctx->cursor_saved_x = x;
-    ctx->cursor_saved_y = y;
+    ctx->cursor_saved_x = rx;
+    ctx->cursor_saved_y = ry;
     ctx->cursor_saved_w = w;
     ctx->cursor_saved_h = h;
     ctx->cursor_saved_valid = 1u;
@@ -248,29 +378,12 @@ void sl_sw_cursor_capture(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
 
 void sl_sw_cursor_restore(sl_ctx_t *ctx) {
     if (!ctx || !ctx->frame || !ctx->cursor_saved_valid) return;
-
-    uint32_t x = ctx->cursor_saved_x;
-    uint32_t y = ctx->cursor_saved_y;
-    uint32_t w = ctx->cursor_saved_w;
-    uint32_t h = ctx->cursor_saved_h;
-    if (x >= ctx->fb.width || y >= ctx->fb.height) {
-        ctx->cursor_saved_valid = 0u;
-        return;
-    }
-    if (x + w > ctx->fb.width) w = ctx->fb.width - x;
-    if (y + h > ctx->fb.height) h = ctx->fb.height - y;
-    if (w == 0 || h == 0) {
-        ctx->cursor_saved_valid = 0u;
-        return;
-    }
-
-    const size_t save_stride = (size_t)SL_CURSOR_W * 4u;
+    uint32_t x = ctx->cursor_saved_x, y = ctx->cursor_saved_y, w = ctx->cursor_saved_w, h = ctx->cursor_saved_h;
+    const size_t save_stride = (size_t)SL_HW_CURSOR_MAX_SIDE * 4u;
     const size_t row_bytes = (size_t)w * (size_t)ctx->bytespp;
     for (uint32_t j = 0; j < h; j++) {
-        uint8_t *dst = ctx->frame + ((size_t)(y + j) * ctx->row_stride) +
-                       ((size_t)x * (size_t)ctx->bytespp);
-        peos_memcpy(dst, &ctx->cursor_saved[(size_t)j * save_stride], row_bytes);
+        uint8_t *dst = ctx->frame + ((size_t)(y + j) * ctx->row_stride) + ((size_t)x * (size_t)ctx->bytespp);
+        peos_memcpy(dst, &g_cur.saved[(size_t)j * save_stride], row_bytes);
     }
-
     ctx->cursor_saved_valid = 0u;
 }

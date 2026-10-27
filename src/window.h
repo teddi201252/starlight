@@ -81,6 +81,7 @@ struct sl_window {
     uint16_t fps_unfocused;
     uint64_t next_render_ns;
     uint64_t last_activity_ns;
+    uint64_t opened_ns;         // when it opened: the wait cursor until the app shows something
 };
 
 int sl_window_init(sl_window_t *win, sl_ctx_t *ctx, app_instance_t* task, uint32_t x, uint32_t y, uint32_t w, uint32_t h);

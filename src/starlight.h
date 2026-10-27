@@ -19,7 +19,7 @@ typedef struct {
     uint8_t hw_cursor;
     uint8_t cursor_saved_valid;
     uint8_t clip_enabled;
-    uint8_t cursor_saved[36]; // 3x3 cursor * max 4 bytes/pixel
+    uint8_t cursor_theme;     // 1: the Soft UI set of the skin, 0: the single image cursor_path
     int input_raw;
     int64_t input_fd;      // input endpoint (wait-able), -1 = legacy input_poll/input_mouse
     uint32_t cursor_x;
