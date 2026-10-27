@@ -950,6 +950,14 @@ int sl_handle_input(sl_ctx_t *ctx) {
         return input.quit_requested ? 1 : 0;
     }
 
+    // A widget held down owns the mouse until it is let go (the volume
+    // follows a drag).
+    if (sl_desk_held()) {
+        if (input.mouse_moved) sl_desk_drag(ctx, ctx->cursor_x, ctx->cursor_y);
+        if (input.mouse_left_released) sl_desk_release(ctx, ctx->cursor_x, ctx->cursor_y);
+        return input.quit_requested ? 1 : 0;
+    }
+
     if (input.mouse_moved) {
         sl_launcher_handle_context_hover(ctx);
         sl_launcher_handle_hover(ctx);
@@ -958,6 +966,13 @@ int sl_handle_input(sl_ctx_t *ctx) {
     uint32_t reserved_left = sl_launcher_reserved_left(ctx);
     uint8_t mouse_on_launcher = ((reserved_left > 0u && ctx->cursor_x < reserved_left) ||
                                  sl_launcher_covers_point(ctx, ctx->cursor_x, ctx->cursor_y)) ? 1u : 0u;
+    // The desktop's widgets are under the mouse when nothing else is.
+    uint8_t on_desktop = (!mouse_on_launcher && !sl_windows_any_at(ctx->cursor_x, ctx->cursor_y)) ? 1u : 0u;
+    if (input.mouse_moved) sl_desk_hover(ctx, ctx->cursor_x, ctx->cursor_y, (uint8_t)!on_desktop);
+    if (on_desktop && input.mouse_wheel_y != 0 &&
+        sl_desk_wheel(ctx, ctx->cursor_x, ctx->cursor_y, input.mouse_wheel_y)) {
+        input.mouse_wheel_y = 0;
+    }
     if (input.mouse_left_released) sl_launcher_handle_release(ctx);
     // A title bar button held down owns the mouse until it is let go.
     if (input.mouse_left_released && sl_windows_title_button_release(ctx, ctx->cursor_x, ctx->cursor_y)) return 0;
@@ -1037,6 +1052,11 @@ int sl_handle_input(sl_ctx_t *ctx) {
         }
 
         if (sl_windows_close_at_cursor(ctx, ctx->cursor_x, ctx->cursor_y)) {
+            sl_drag_stop();
+            return 0;
+        }
+
+        if (on_desktop && sl_desk_press(ctx, ctx->cursor_x, ctx->cursor_y)) {
             sl_drag_stop();
             return 0;
         }
