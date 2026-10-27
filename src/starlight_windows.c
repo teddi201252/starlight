@@ -640,6 +640,15 @@ static char *sl_read_app_directory(size_t *out_len) {
     return NULL;
 }
 
+// a before b, ignoring case.
+static int sl_title_before(const char *a, const char *b) {
+    for (;; a++, b++) {
+        char ca = (*a >= 'A' && *a <= 'Z') ? (char)(*a - 'A' + 'a') : *a;
+        char cb = (*b >= 'A' && *b <= 'Z') ? (char)(*b - 'A' + 'a') : *b;
+        if (ca != cb || !ca) return (unsigned char)ca < (unsigned char)cb;
+    }
+}
+
 static int sl_scan_apps_from_system(sl_scanned_app_t **out_entries, size_t *out_count) {
     if (!out_entries || !out_count) return 0;
     *out_entries = NULL;
@@ -703,6 +712,18 @@ static int sl_scan_apps_from_system(sl_scanned_app_t **out_entries, size_t *out_
     }
 
     free(list);
+    // By title, whatever order the file system lists them in (the tar, the
+    // live ramfs and XFS differ): the dock and the manager look the same
+    // everywhere.
+    for (size_t i = 1u; i < count; i++) {
+        sl_scanned_app_t e = entries[i];
+        size_t j = i;
+        while (j > 0u && sl_title_before(e.app.title, entries[j - 1u].app.title)) {
+            entries[j] = entries[j - 1u];
+            j--;
+        }
+        entries[j] = e;
+    }
     *out_entries = entries;
     *out_count = count;
     return 1;

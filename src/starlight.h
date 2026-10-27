@@ -69,4 +69,10 @@ typedef struct {
     uint64_t fps_last_ns;
     uint32_t fps_frames;
     uint32_t fps_value;
+    // show_performance=1: the performance card (fps, work per frame) at the
+    // bottom right; the work is measured from the frame's start to present.
+    uint8_t show_perf;
+    uint8_t perf_shown;          // drawn last frame: its place to repaint when it goes
+    uint64_t perf_work_ns, perf_work_max_ns;
+    uint32_t perf_work_avg_us, perf_work_peak_us;
 } sl_ctx_t;

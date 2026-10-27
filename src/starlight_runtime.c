@@ -8,6 +8,7 @@
 #include "damage.h"
 #include "desktop.h"
 #include "notify.h"
+#include "sysmenu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -457,6 +458,7 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "clipboard_feedback_audio=1\n");
     (void)fprintf(f, "clipboard_feedback_visual=1\n");
     (void)fprintf(f, "graphics_perf=0\n");
+    (void)fprintf(f, "show_performance=0\n");
     (void)fprintf(f, "timezone=Europe/Rome\n");
     (void)fclose(f);
 }
@@ -571,6 +573,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->clipboard_feedback_audio_enabled = SL_CLIPBOARD_FEEDBACK_AUDIO_DEFAULT;
     ctx->clipboard_feedback_visual_enabled = SL_CLIPBOARD_FEEDBACK_VISUAL_DEFAULT;
     ctx->graphics_perf_enabled = 0u;
+    ctx->show_perf = 0u;
     ctx->timezone_eu_central = 1u;
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
@@ -667,6 +670,9 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     }
                 } else if (strcmp(key, "timezone") == 0) {
                     ctx->timezone_eu_central = (strcmp(val, "UTC") != 0) ? 1u : 0u;
+                } else if (strcmp(key, "show_performance") == 0) {
+                    uint32_t n = 0u;
+                    if (sl_parse_u32(val, &n)) ctx->show_perf = n ? 1u : 0u;
                 } else if (strcmp(key, "graphics_perf") == 0) {
                     uint32_t n = 0;
                     if (sl_parse_u32(val, &n)) ctx->graphics_perf_enabled = n ? 1u : 0u;
@@ -952,6 +958,7 @@ void sl_cursor_update(sl_ctx_t *ctx) {
     last_y = y;
     int k = -1;
     if (g_drag_active) k = SL_CUR_MOVE;
+    if (k < 0) k = sl_sysmenu_cursor(ctx, x, y);
     if (k < 0) k = sl_notify_cursor(ctx, x, y);
     if (k < 0) k = sl_launcher_cursor(ctx, x, y);
     if (k < 0) k = sl_windows_cursor(ctx, x, y);
@@ -1044,7 +1051,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
     }
 
     for (uint8_t i = 0u; i < input.key_event_count; i++) {   // Esc closes the notification centre
-        if (sl_notify_handle_key(ctx, &input.key_events[i])) {
+        if (sl_sysmenu_handle_key(ctx, &input.key_events[i]) || sl_notify_handle_key(ctx, &input.key_events[i])) {
             input.key_events[i] = input.key_events[--input.key_event_count];
             i--;
         }
@@ -1078,7 +1085,8 @@ int sl_handle_input(sl_ctx_t *ctx) {
         const app_instance_t *prev_task = focused ? focused->task : NULL;
         sl_win_rect_t prev_outer = focused ? sl_window_outer_rect(focused) : (sl_win_rect_t){ 0, 0, 0u, 0u };
 
-        if (sl_notify_handle_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
+        if (sl_sysmenu_handle_click(ctx, ctx->cursor_x, ctx->cursor_y) ||
+            sl_notify_handle_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
             sl_drag_stop();
             return 0;
         }

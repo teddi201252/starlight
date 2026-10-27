@@ -2,47 +2,89 @@
 #include "perf_stats.h"
 #include "desktop.h"
 #include "notify.h"
+#include "sysmenu.h"
 #include "render/pixels.h"
+#include "render/blit.h"
+#include "ui_sdk.h"
 
 #include <stdio.h>
 #include <string.h>
 
-static void sl_fps_draw(sl_ctx_t *ctx, uint32_t fps_value) {
-    if (!ctx) return;
-    char fps_str[16];
-    if (!sl_u32_to_str(fps_value, fps_str, sizeof(fps_str))) {
-        fps_str[0] = '?';
-        fps_str[1] = '\0';
-    }
-    sl_dirty_add(ctx, 0u, 0u, 128u, 16u);
-    sl_fill_rect(ctx, 0, 0, 128, 16, 0x00, 0x00, 0x00);
-    sl_draw_text(ctx, 0, 0, "fps: ", 0xFF, 0xFF, 0xFF);
-    sl_draw_text(ctx, 32, 0, fps_str, 0xFF, 0xFF, 0xFF);
+// The performance card (settings: show_performance=1), at the bottom right:
+// the frames of the last second and the work they took, average and peak.
+#define SL_PERF_W 250u
+#define SL_PERF_H 72u
+#define SL_PERF_MARGIN 40u
+
+static void sl_perf_card_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y) {
+    *x = ctx->fb.width > SL_PERF_W + SL_PERF_MARGIN ? ctx->fb.width - SL_PERF_W - SL_PERF_MARGIN : 0u;
+    *y = ctx->fb.height > SL_PERF_H + SL_PERF_MARGIN ? ctx->fb.height - SL_PERF_H - SL_PERF_MARGIN : 0u;
 }
 
-static void sl_fps_tick(sl_ctx_t *ctx, uint32_t *prev_value) {
-    if (!ctx || !prev_value) return;
+static void sl_perf_card_dirty(sl_ctx_t *ctx) {
+    uint32_t x, y;
+    sl_perf_card_rect(ctx, &x, &y);
+    sl_dirty_add(ctx, x > 24u ? x - 24u : 0u, y > 24u ? y - 24u : 0u, SL_PERF_W + 48u, SL_PERF_H + 48u);
+}
 
+static void sl_perf_card_draw_rect(uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, void *userdata) {
+    sl_ctx_t *ctx = (sl_ctx_t *)userdata;
+    static const slsk_font_t *big, *small;
+    if (!big) {
+        const slsk_entry_t *b = sl_skin_find(&ctx->skin, "mono-24"), *m = sl_skin_find(&ctx->skin, "ui-14");
+        if (!b || !m) return;
+        big = sl_skin_font(&ctx->skin, b);
+        small = sl_skin_font(&ctx->skin, m);
+    }
+    uint32_t x, y;
+    sl_perf_card_rect(ctx, &x, &y);
+    sl_clip_set(ctx, dx, dy, dw, dh);
+    sl_target_t t = sl_target_from_ctx(ctx);
+    sl_ui_ctx_surface(ctx, SL_UI_SURF_NIGHT, x, y, SL_PERF_W, SL_PERF_H, SL_PERF_H / 2u);
+    const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+    char fps[16], work[64];
+    snprintf(fps, sizeof(fps), "%u", (unsigned)ctx->fps_value);
+    snprintf(work, sizeof(work), "lavoro %u,%u ms \xC2\xB7 picco %u,%u ms",
+             (unsigned)(ctx->perf_work_avg_us / 1000u), (unsigned)(ctx->perf_work_avg_us / 100u % 10u),
+             (unsigned)(ctx->perf_work_peak_us / 1000u), (unsigned)(ctx->perf_work_peak_us / 100u % 10u));
+    int32_t fx = (int32_t)x + 30, base = (int32_t)y + 34;
+    int32_t end = sl_text_draw(&t, big, fx, base, fps, n->r, n->g, n->b);
+    sl_text_draw(&t, small, end + 8, base, "fps", 0x9F, 0xB4, 0xD8);
+    sl_text_draw(&t, small, fx, (int32_t)y + 56, work, 0x9F, 0xB4, 0xD8);
+    sl_clip_clear(ctx);
+}
+
+static void sl_fps_tick(sl_ctx_t *ctx, uint64_t frame_start_ns) {
+    if (!ctx) return;
     ctx->fps_frames++;
     uint64_t now = peos_time_ns();
+    uint64_t work = now - frame_start_ns;
+    ctx->perf_work_ns += work;
+    if (work > ctx->perf_work_max_ns) ctx->perf_work_max_ns = work;
     uint64_t dt = now - ctx->fps_last_ns;
     if (dt >= 1000000000ull) {
         ctx->fps_value = (uint32_t)(((uint64_t)ctx->fps_frames * 1000000000ull) / dt);
+        ctx->perf_work_avg_us = (uint32_t)(ctx->perf_work_ns / (ctx->fps_frames ? ctx->fps_frames : 1u) / 1000u);
+        ctx->perf_work_peak_us = (uint32_t)(ctx->perf_work_max_ns / 1000u);
         ctx->fps_frames = 0u;
+        ctx->perf_work_ns = 0u;
+        ctx->perf_work_max_ns = 0u;
         ctx->fps_last_ns = now;
+        if (ctx->show_perf) sl_perf_card_dirty(ctx);   // new numbers, once a second
     }
+    if (ctx->show_perf != ctx->perf_shown) {   // turned on or off (Impostazioni)
+        ctx->perf_shown = ctx->show_perf;
+        sl_perf_card_dirty(ctx);
+    }
+}
 
-    /*
-     * Intentionally redraw only when the numeric FPS value changes.
-     * We use this widget as a visual probe: if it disappears/flickers while
-     * values are stable, something else is over-invalidating or repainting.
-     * Do not switch this to "redraw whenever dirty" unless explicitly needed
-     * for debugging with a different method.
-     */
-    if (ctx->fps_value != *prev_value) {
-        *prev_value = ctx->fps_value;
-        sl_fps_draw(ctx, ctx->fps_value);
-    }
+// Drawn wherever its place was repainted this frame.
+static void sl_perf_card_render(sl_ctx_t *ctx) {
+    if (!ctx->show_perf || !ctx->skin_loaded) return;
+    uint32_t x, y;
+    sl_perf_card_rect(ctx, &x, &y);
+    sl_dirty_for_each_intersection(x > 24u ? x - 24u : 0u, y > 24u ? y - 24u : 0u, SL_PERF_W + 48u, SL_PERF_H + 48u,
+                                   sl_perf_card_draw_rect, ctx);
 }
 
 // Entry point of the Starlight desktop loop.
@@ -100,10 +142,10 @@ int main(int argc, char **argv) {
     uint64_t next_frame_ns = 0;
     uint64_t tween_last_ns = peos_time_ns();
     uint8_t app_prompt_blink_prev = 0u;
-    uint32_t fps_value_prev = 0xFFFFFFFFu;
 
     for (;;) {
-        sl_perf_frame_begin(peos_time_ns());
+        uint64_t frame_start_ns = peos_time_ns();
+        sl_perf_frame_begin(frame_start_ns);
         if (!ctx.hw_cursor) {
             if (ctx.cursor_saved_valid) {
                 sl_dirty_add(&ctx, ctx.cursor_saved_x, ctx.cursor_saved_y,
@@ -169,8 +211,10 @@ int main(int argc, char **argv) {
             sl_perf_add_dock(peos_time_ns() - w1);
         }
         sl_notify_render(&ctx);
+        sl_sysmenu_render(&ctx);
         sl_clipboard_render_overlay(&ctx);
-        sl_fps_tick(&ctx, &fps_value_prev);
+        sl_fps_tick(&ctx, frame_start_ns);
+        sl_perf_card_render(&ctx);
 
         int frame_active = (sl_dirty_request_count() != dirty_mark) ||
                            ctx.cursor_x != old_x || ctx.cursor_y != old_y;
