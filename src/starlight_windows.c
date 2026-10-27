@@ -61,6 +61,10 @@ typedef struct {
     peos_path_grant_t paths[PEOS_PATH_MAX_GRANTS];
     uint32_t path_count;
     uint8_t category;               // SL_CAT_*: app.ini category=sistema|strumenti|svago
+    // The body's limits when the window is resized (0: none) and whether it
+    // may be (resizable=0: a fixed size).
+    uint32_t min_width, min_height, max_width, max_height;
+    uint8_t fixed_size;
 } sl_app_bundle_t;
 
 // The app manager's filters (tavola App manager aperto): every app, or one
@@ -84,6 +88,8 @@ typedef struct {
     uint32_t width;
     uint32_t height;
     uint8_t category;               // SL_CAT_*
+    uint32_t min_width, min_height, max_width, max_height;   // app.ini, body (0: none)
+    uint8_t fixed_size;
     uint64_t signature;
     app_instance_t *instance;
     // Dock and app manager tiles (render/slsk.h), resolved on first draw.
@@ -506,6 +512,16 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
             out->category = strcmp(val, "sistema") == 0 ? SL_CAT_SYSTEM
                             : strcmp(val, "strumenti") == 0 ? SL_CAT_TOOLS
                             : strcmp(val, "svago") == 0 ? SL_CAT_FUN : SL_CAT_ALL;
+        } else if (strcmp(key, "min_width") == 0) {
+            (void)sl_parse_u32(val, &out->min_width);
+        } else if (strcmp(key, "min_height") == 0) {
+            (void)sl_parse_u32(val, &out->min_height);
+        } else if (strcmp(key, "max_width") == 0) {
+            (void)sl_parse_u32(val, &out->max_width);
+        } else if (strcmp(key, "max_height") == 0) {
+            (void)sl_parse_u32(val, &out->max_height);
+        } else if (strcmp(key, "resizable") == 0) {
+            out->fixed_size = (strcmp(val, "0") == 0 || strcmp(val, "no") == 0) ? 1u : 0u;
         } else if (strcmp(key, "width") == 0) {
             (void)sl_parse_u32(val, &out->width);
         } else if (strcmp(key, "height") == 0) {
@@ -575,6 +591,8 @@ static uint64_t sl_catalog_signature(const sl_scanned_app_t *entry) {
     hash = sl_catalog_hash_text(hash, entry->app.icon);
     hash = sl_catalog_hash_bytes(hash, &entry->app.width, sizeof(entry->app.width));
     hash = sl_catalog_hash_bytes(hash, &entry->app.category, sizeof(entry->app.category));
+    hash = sl_catalog_hash_bytes(hash, &entry->app.min_width, sizeof(entry->app.min_width) * 4u);
+    hash = sl_catalog_hash_bytes(hash, &entry->app.fixed_size, sizeof(entry->app.fixed_size));
     return sl_catalog_hash_bytes(hash, &entry->app.height, sizeof(entry->app.height));
 }
 
@@ -741,6 +759,11 @@ static int sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app,
     item->width = app->width;
     item->height = app->height;
     item->category = app->category;
+    item->min_width = app->min_width;
+    item->min_height = app->min_height;
+    item->max_width = app->max_width;
+    item->max_height = app->max_height;
+    item->fixed_size = app->fixed_size;
     item->instance = NULL;
     item->icon_loaded = 0u;
     item->icon_failed = 0u;
@@ -1795,6 +1818,82 @@ static void sl_launcher_try_load_icon(sl_launcher_item_t *item) {
     }
 }
 
+// ------------------------------------------------------- remembered rects
+
+// Each app's window as it was last placed (moved or resized), by bundle:
+// it opens there again. windows.cfg: "x y w h bundle" a line.
+#define SL_GEOM_MAX 32u
+static struct { char bundle[256]; uint32_t x, y, w, h; } g_geom[SL_GEOM_MAX];
+static size_t g_geom_count;
+static uint8_t g_geom_loaded;
+
+static void sl_geom_load(void) {
+    if (g_geom_loaded) return;
+    g_geom_loaded = 1u;
+    FILE *f = fopen(SL_RESOURCE_WINDOWS_FILE, "r");
+    if (!f) return;
+    char line[320];
+    while (fgets(line, sizeof(line), f) && g_geom_count < SL_GEOM_MAX) {
+        unsigned x, y, w, h;
+        char bundle[256];
+        if (line[0] == '#' || sscanf(line, "%u %u %u %u %255s", &x, &y, &w, &h, bundle) != 5) continue;
+        sl_copy_str(g_geom[g_geom_count].bundle, sizeof(g_geom[0].bundle), bundle);
+        g_geom[g_geom_count].x = x;
+        g_geom[g_geom_count].y = y;
+        g_geom[g_geom_count].w = w;
+        g_geom[g_geom_count].h = h;
+        g_geom_count++;
+    }
+    fclose(f);
+}
+
+static int sl_geom_find(const char *bundle) {
+    sl_geom_load();
+    for (size_t i = 0u; bundle && bundle[0] && i < g_geom_count; i++) {
+        if (strcmp(g_geom[i].bundle, bundle) == 0) return (int)i;
+    }
+    return -1;
+}
+
+static sl_launcher_item_t *sl_launcher_item_for_task(const app_instance_t *task);
+
+// Remember where a window is (after a move or a resize; not while
+// maximized: then it is the rect to go back to).
+void sl_windows_remember(const sl_window_t *win) {
+    if (!win || win->maximized || !win->task) return;
+    sl_launcher_item_t *item = sl_launcher_item_for_task(win->task);
+    if (!item || !item->bundle_path[0] || strchr(item->bundle_path, ' ')) return;
+    int i = sl_geom_find(item->bundle_path);
+    if (i < 0) {
+        if (g_geom_count >= SL_GEOM_MAX) {   // the oldest goes
+            memmove(&g_geom[0], &g_geom[1], sizeof(g_geom[0]) * (SL_GEOM_MAX - 1u));
+            g_geom_count--;
+        }
+        i = (int)g_geom_count++;
+        sl_copy_str(g_geom[i].bundle, sizeof(g_geom[0].bundle), item->bundle_path);
+    }
+    if (g_geom[i].x == win->x && g_geom[i].y == win->y && g_geom[i].w == win->width && g_geom[i].h == win->height) return;
+    g_geom[i].x = win->x;
+    g_geom[i].y = win->y;
+    g_geom[i].w = win->width;
+    g_geom[i].h = win->height;
+    FILE *f = fopen(SL_RESOURCE_WINDOWS_FILE, "w");   // a read-only disk (the live ISO): for this session only
+    if (!f) return;
+    fprintf(f, "# Starlight: where each app's window opens (x y width height bundle)\n");
+    for (size_t k = 0u; k < g_geom_count; k++) {
+        fprintf(f, "%u %u %u %u %s\n", (unsigned)g_geom[k].x, (unsigned)g_geom[k].y, (unsigned)g_geom[k].w,
+                (unsigned)g_geom[k].h, g_geom[k].bundle);
+    }
+    fclose(f);
+}
+
+static sl_launcher_item_t *sl_launcher_item_for_task(const app_instance_t *task) {
+    for (size_t i = 0u; task && i < g_launcher_count; i++) {
+        if (g_launcher_items[i].instance == task) return &g_launcher_items[i];
+    }
+    return NULL;
+}
+
 static void sl_launcher_pick_window_rect(const sl_ctx_t *ctx, const sl_launcher_item_t *item,
                                          uint32_t *out_x, uint32_t *out_y,
                                          uint32_t *out_w, uint32_t *out_h) {
@@ -1832,6 +1931,17 @@ static void sl_launcher_pick_window_rect(const sl_ctx_t *ctx, const sl_launcher_
     if (x < reserved_left) x = reserved_left;
     if (y + h > ctx->fb.height) {
         y = (ctx->fb.height > h) ? (ctx->fb.height - h) : 0u;
+    }
+
+    // Where it was last time, if that still fits the screen and its limits.
+    int g = item ? sl_geom_find(item->bundle_path) : -1;
+    if (g >= 0 && g_geom[g].x >= reserved_left && g_geom[g].x + g_geom[g].w <= ctx->fb.width &&
+        g_geom[g].y + g_geom[g].h <= ctx->fb.height && (item->fixed_size ? (g_geom[g].w == w && g_geom[g].h == h)
+                                                                           : (g_geom[g].w >= 120u && g_geom[g].h >= 120u))) {
+        x = g_geom[g].x;
+        y = g_geom[g].y;
+        w = g_geom[g].w;
+        h = g_geom[g].h;
     }
 
     *out_x = x;
@@ -1874,6 +1984,21 @@ static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index) {
         return 0;
     }
     sl_copy_str(win.title, sizeof(win.title), item->title);
+    // The limits of a resize: app.ini's min_width/min_height (else its
+    // width/height: the size its layout was made for), max_*, resizable.
+    {
+        uint32_t base_w = item->width ? item->width + SL_WIN_FRAME_EXTRA_W : w;
+        uint32_t base_h = item->height ? item->height + SL_WIN_FRAME_EXTRA_H : h;
+        win.min_w = item->min_width ? item->min_width + SL_WIN_FRAME_EXTRA_W : base_w;
+        win.min_h = item->min_height ? item->min_height + SL_WIN_FRAME_EXTRA_H : base_h;
+        if (win.min_w > w) win.min_w = w;   // the screen was smaller than that
+        if (win.min_h > h) win.min_h = h;
+        win.max_w = item->max_width ? item->max_width + SL_WIN_FRAME_EXTRA_W : 0u;
+        win.max_h = item->max_height ? item->max_height + SL_WIN_FRAME_EXTRA_H : 0u;
+        win.resizable = item->fixed_size ? 0u : 1u;
+        if (win.resizable && win.width < win.min_w) win.width = win.min_w;
+        if (win.resizable && win.height < win.min_h) win.height = win.min_h;
+    }
     sl_window_set_fps_profile(&win, 30u, 8u);
 
     sl_window_t *new_windows =
@@ -2002,6 +2127,11 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
         item->width = entry->app.width;
         item->height = entry->app.height;
         item->category = entry->app.category;
+        item->min_width = entry->app.min_width;
+        item->min_height = entry->app.min_height;
+        item->max_width = entry->app.max_width;
+        item->max_height = entry->app.max_height;
+        item->fixed_size = entry->app.fixed_size;
         item->signature = entry->signature;
         item->instance = sl_app_host_instance_peek_at(slot);
         sl_copy_str(item->title, sizeof(item->title), entry->app.title);
@@ -2084,8 +2214,161 @@ uint8_t sl_windows_launching(void) {
     return 0u;
 }
 
+// ----------------------------------------------------------------- resize
+
+// The edges a press at x,y would move: a band a little outside and inside
+// the frame, wider at the corners.
+enum { SL_EDGE_L = 1, SL_EDGE_R = 2, SL_EDGE_T = 4, SL_EDGE_B = 8 };
+#define SL_RESIZE_OUT 6
+#define SL_RESIZE_IN 8
+#define SL_RESIZE_CORNER 26
+
+static uint32_t sl_window_resize_edges(const sl_window_t *w, uint32_t px, uint32_t py) {
+    if (!w->resizable || w->maximized || w->minimized || sl_window_is_closing(w)) return 0u;
+    int64_t x = px, y = py, x0 = w->x, y0 = w->y, x1 = x0 + w->width, y1 = y0 + w->height;
+    if (x < x0 - SL_RESIZE_OUT || x >= x1 + SL_RESIZE_OUT || y < y0 - SL_RESIZE_OUT || y >= y1 + SL_RESIZE_OUT) return 0u;
+    uint32_t e = 0u;
+    if (x < x0 + SL_RESIZE_IN) e |= SL_EDGE_L;
+    else if (x >= x1 - SL_RESIZE_IN) e |= SL_EDGE_R;
+    if (y < y0 + SL_RESIZE_IN) e |= SL_EDGE_T;
+    else if (y >= y1 - SL_RESIZE_IN) e |= SL_EDGE_B;
+    if (e & (SL_EDGE_L | SL_EDGE_R)) {
+        if (y < y0 + SL_RESIZE_CORNER) e |= SL_EDGE_T;
+        else if (y >= y1 - SL_RESIZE_CORNER) e |= SL_EDGE_B;
+    }
+    if (e & (SL_EDGE_T | SL_EDGE_B)) {
+        if (x < x0 + SL_RESIZE_CORNER) e |= SL_EDGE_L;
+        else if (x >= x1 - SL_RESIZE_CORNER) e |= SL_EDGE_R;
+    }
+    return e;
+}
+
+static int sl_resize_cursor(uint32_t e) {
+    if (e == (SL_EDGE_L | SL_EDGE_T) || e == (SL_EDGE_R | SL_EDGE_B)) return SL_CUR_RESIZE_NWSE;
+    if (e == (SL_EDGE_R | SL_EDGE_T) || e == (SL_EDGE_L | SL_EDGE_B)) return SL_CUR_RESIZE_NESW;
+    if (e & (SL_EDGE_L | SL_EDGE_R)) return SL_CUR_RESIZE_H;
+    return SL_CUR_RESIZE_V;
+}
+
+// The window whose edge is at x,y (the top one: a window over another hides
+// the lower one's edges), and those edges.
+static size_t sl_windows_edge_at(uint32_t x, uint32_t y, uint32_t *edges) {
+    for (size_t i = g_window_count; g_windows && i > 0u; i--) {
+        const sl_window_t *w = &g_windows[i - 1u];
+        if (w->minimized || sl_window_is_closing(w)) continue;
+        uint32_t e = sl_window_resize_edges(w, x, y);
+        if (e) {
+            *edges = e;
+            return i - 1u;
+        }
+        if (sl_window_contains_point(w, x, y)) return (size_t)-1;
+    }
+    return (size_t)-1;
+}
+
+static struct {
+    uint8_t active;
+    const app_instance_t *task;    // the window (the array moves; its task does not)
+    uint32_t edges;
+    int64_t mx, my;                // the mouse at the press
+    int64_t x, y, w, h;            // the frame at the press
+} g_resize;
+
+uint8_t sl_windows_resizing(void) {
+    return g_resize.active;
+}
+
+int sl_windows_resize_press(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    uint32_t edges = 0u;
+    size_t idx = sl_windows_edge_at(x, y, &edges);
+    if (!ctx || idx == (size_t)-1 || !g_windows[idx].task) return 0;
+    if (idx != g_focused_window) {
+        sl_window_rect_snapshot_t before = sl_window_snapshot_index(g_focused_window);
+        sl_focus_window(idx);
+        sl_dirty_add_snapshot(ctx, &before);
+        idx = g_focused_window;
+        sl_window_dirty_all(ctx, &g_windows[idx]);
+    }
+    const sl_window_t *w = &g_windows[idx];
+    g_resize.active = 1u;
+    g_resize.task = w->task;
+    g_resize.edges = edges;
+    g_resize.mx = x;
+    g_resize.my = y;
+    g_resize.x = w->x;
+    g_resize.y = w->y;
+    g_resize.w = w->width;
+    g_resize.h = w->height;
+    return 1;
+}
+
+// One axis: the moving edge follows the mouse, the other stays; the size
+// within [lo, hi]; the window within [min_pos, max_end].
+static void sl_resize_axis(int64_t start, int64_t size, int64_t d, uint8_t low_edge, uint8_t high_edge, int64_t lo,
+                           int64_t hi, int64_t min_pos, int64_t max_end, int64_t *pos, int64_t *len) {
+    int64_t p = start, n = size;
+    if (low_edge) {
+        int64_t end = start + size;
+        p = start + d;
+        if (p < min_pos) p = min_pos;
+        n = end - p;
+        if (n < lo) n = lo;
+        if (n > hi) n = hi;
+        p = end - n;
+    } else if (high_edge) {
+        n = size + d;
+        if (n < lo) n = lo;
+        if (n > hi) n = hi;
+        if (p + n > max_end) n = max_end - p;
+        if (n < lo) n = lo;
+    }
+    *pos = p;
+    *len = n;
+}
+
+void sl_windows_resize_move(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || !g_resize.active) return;
+    size_t idx = sl_window_index_for_task(g_resize.task);
+    if (idx == (size_t)-1) {
+        g_resize.active = 0u;
+        return;
+    }
+    sl_window_t *w = &g_windows[idx];
+    int64_t left = sl_launcher_reserved_left(ctx);
+    int64_t max_w = w->max_w ? w->max_w : (int64_t)ctx->fb.width - left;
+    int64_t max_h = w->max_h ? w->max_h : (int64_t)ctx->fb.height;
+    int64_t min_w = w->min_w ? w->min_w : 200, min_h = w->min_h ? w->min_h : 150;
+    if (max_w < min_w) max_w = min_w;
+    if (max_h < min_h) max_h = min_h;
+    int64_t nx, ny, nw, nh;
+    sl_resize_axis(g_resize.x, g_resize.w, (int64_t)x - g_resize.mx, (g_resize.edges & SL_EDGE_L) != 0u,
+                   (g_resize.edges & SL_EDGE_R) != 0u, min_w, max_w, left, ctx->fb.width, &nx, &nw);
+    sl_resize_axis(g_resize.y, g_resize.h, (int64_t)y - g_resize.my, (g_resize.edges & SL_EDGE_T) != 0u,
+                   (g_resize.edges & SL_EDGE_B) != 0u, min_h, max_h, 0, ctx->fb.height, &ny, &nh);
+    if (nx == w->x && ny == w->y && nw == w->width && nh == w->height) return;
+    sl_window_dirty_all(ctx, w);   // where it was, shadow included
+    w->x = (uint32_t)nx;
+    w->y = (uint32_t)ny;
+    w->width = (uint32_t)nw;
+    w->height = (uint32_t)nh;
+    w->force_redraw = 1u;
+    sl_window_mark_activity(w, 0ull);
+    sl_window_dirty_all(ctx, w);
+}
+
+void sl_windows_resize_release(sl_ctx_t *ctx) {
+    (void)ctx;
+    if (!g_resize.active) return;
+    g_resize.active = 0u;
+    size_t idx = sl_window_index_for_task(g_resize.task);
+    if (idx != (size_t)-1) sl_windows_remember(&g_windows[idx]);
+}
+
 int sl_windows_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     (void)ctx;
+    if (g_resize.active) return sl_resize_cursor(g_resize.edges);
+    uint32_t edges = 0u;
+    if (sl_windows_edge_at(x, y, &edges) != (size_t)-1) return sl_resize_cursor(edges);
     for (size_t i = g_window_count; g_windows && i > 0u; i--) {
         const sl_window_t *w = &g_windows[i - 1u];
         if (w->minimized || sl_window_is_closing(w) || !sl_window_contains_point(w, x, y)) continue;
@@ -2170,6 +2453,13 @@ int sl_windows_title_button_held(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
 }
 
 static int sl_windows_title_button_act(sl_ctx_t *ctx, size_t idx, int b);
+
+// A double click on the title bar: maximize, or back.
+void sl_windows_toggle_maximize(sl_ctx_t *ctx) {
+    if (!ctx || !g_windows || g_focused_window >= g_window_count) return;
+    if (!g_windows[g_focused_window].resizable && !g_windows[g_focused_window].maximized) return;
+    (void)sl_windows_title_button_act(ctx, g_focused_window, SL_WIN_BTN_MAX);
+}
 
 int sl_windows_title_button_release(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx || !g_title_press_active) return 0;

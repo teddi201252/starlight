@@ -5,6 +5,8 @@
 #define SL_RESOURCE_CONFIG_FILE SL_RESOURCE_CONFIG_DIR "/settings.cfg"
 #define SL_RESOURCE_THEME_FILE SL_RESOURCE_CONFIG_DIR "/theme.cfg"
 #define SL_RESOURCE_DOCK_FILE SL_RESOURCE_CONFIG_DIR "/dock.cfg"
+// Where each app's window was and how big (Soft UI plan, phase 12).
+#define SL_RESOURCE_WINDOWS_FILE SL_RESOURCE_CONFIG_DIR "/windows.cfg"
 #define SL_RESOURCE_FONT_DIR SL_RESOURCE_ROOT "/fonts"
 #define SL_RESOURCE_FONT_DEFAULT SL_RESOURCE_FONT_DIR "/default.font"
 #define SL_RESOURCE_KEYMAP_DIR SL_RESOURCE_ROOT "/keymaps"
