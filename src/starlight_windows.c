@@ -899,7 +899,7 @@ static const char *sl_dock_skin_key(const char *title) {
         { "orbit", "orbit" }, { "voyager", "voyager" }, { "calcolatrice", "calcolatrice" },
         { "curiosity", "curiosity" }, { "impostazioni", "impostazioni" }, { "installa peos", "installer" },
         { "installer", "installer" }, { "musica", "musica" }, { "rete", "rete" },
-        { "monitor", "monitor" }, { "sistema", "sistema" },
+        { "monitor", "monitor" }, { "sistema", "sistema" }, { "calendario", "calendario" },
     };
     char low[64];
     size_t i = 0u;
@@ -2577,6 +2577,15 @@ void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata) {
     }
 }
 
+void sl_windows_mark_app_dirty_all(const sl_ctx_t *ctx, const void *userdata) {
+    for (size_t i = 0; ctx && userdata && g_windows && i < g_window_count; i++) {
+        if (!g_windows[i].task || g_windows[i].task->userdata != userdata) continue;
+        g_windows[i].force_redraw = 1u;
+        sl_window_mark_activity(&g_windows[i], peos_time_ns());
+        sl_window_dirty_all(ctx, &g_windows[i]);
+    }
+}
+
 void sl_windows_mark_focused_activity(void) {
     sl_window_t *focused = sl_window_get_focused();
     if (!focused) return;
@@ -3209,4 +3218,10 @@ void sl_launcher_render(sl_ctx_t *ctx) {
     if (g_launcher_ctx_open && g_launcher_ctx_x + g_launcher_ctx_w + 4u > right) right = g_launcher_ctx_x + g_launcher_ctx_w + 4u;
     if (right > ctx->fb.width) right = ctx->fb.width;
     sl_dirty_for_each_intersection(0u, 0u, right, ctx->fb.height, sl_dock_draw_rect, ctx);
+}
+
+void sl_windows_close_task(sl_ctx_t *ctx, const app_instance_t *task) {
+    size_t idx = sl_window_index_for_task(task);
+    if (!ctx || idx == (size_t)-1 || sl_window_is_closing(&g_windows[idx])) return;
+    (void)sl_windows_title_button_act(ctx, idx, SL_WIN_BTN_CLOSE);
 }

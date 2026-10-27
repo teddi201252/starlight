@@ -575,6 +575,7 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
     if (!ui) return;
     ui->ctx = ctx;
     ui->win = win;
+    ui->label_face = NULL;
     ui->cursor_x = cursor_x;
     ui->cursor_y = cursor_y;
     ui->mouse_down = mouse_down;
@@ -601,13 +602,18 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
 void sl_ui_label(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text,
                  sl_ui_color_token_t token) {
     if (!ui || !ui->ctx || !text) return;
+    if (ui->label_face) {
+        const sl_ui_color_t *c = sl_ui_theme_color(ui, token);
+        sl_ui_label_rgb(ui, x, y, text, c->r, c->g, c->b);
+        return;
+    }
     sl_ui_text_tok(ui, x, y, text, token);
 }
 
 void sl_ui_label_rgb(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text,
                      uint8_t r, uint8_t g, uint8_t b) {
     if (!ui || !ui->ctx || !text) return;
-    const slsk_font_t *f = sl_ui_face(ui);
+    const slsk_font_t *f = ui->label_face ? ui->label_face : sl_ui_face(ui);
     if (f) {
         (void)sl_draw_text_face(ui->ctx, f, (int32_t)x, (int32_t)(y + sl_ui_cap(f)), text, r, g, b);
         return;
@@ -2395,4 +2401,128 @@ uint8_t sl_ui_grid_next(sl_ui_grid_t *grid,
 
     grid->cursor++;
     return 1u;
+}
+
+// ------------------------------------------------- what the apps draw freely
+
+void sl_ui_soft_surface(sl_ui_ctx_t *ui, uint32_t kind, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t r) {
+    if (!ui || kind > SL_UI_SURF_NIGHT_FLAT) return;
+    sl_ui_surface(ui, (sl_ui_surf_kind_t)kind, x, y, w, h, r);
+}
+
+void sl_ui_set_label_face(sl_ui_ctx_t *ui, const char *name) {
+    if (!ui) return;
+    ui->label_face = NULL;
+    if (!name || !name[0] || !ui->ctx || !ui->ctx->skin_loaded) return;
+    const slsk_entry_t *e = sl_skin_find(&ui->ctx->skin, name);
+    ui->label_face = e ? sl_skin_font(&ui->ctx->skin, e) : NULL;
+}
+
+uint32_t sl_ui_label_width(sl_ui_ctx_t *ui, const char *text) {
+    if (!ui || !text) return 0u;
+    const slsk_font_t *f = ui->label_face ? ui->label_face : sl_ui_face(ui);
+    return f ? sl_text_width(f, text) : sl_text_measure_width_px(text, ui->font_px);
+}
+
+// sin and cos of a (radians, 0..2pi) for the ring's round ends: a short
+// series around the nearest quarter turn is plenty for a few pixels.
+static void sl_ui_sincos(float a, float *s, float *c) {
+    const float q = 1.5707963f;
+    int k = (int)(a / q + 0.5f);
+    float x = a - (float)k * q, x2 = x * x;
+    float sx = x * (1.0f - x2 / 6.0f * (1.0f - x2 / 20.0f * (1.0f - x2 / 42.0f)));
+    float cx = 1.0f - x2 / 2.0f * (1.0f - x2 / 12.0f * (1.0f - x2 / 30.0f));
+    switch (k & 3) {
+    case 0: *s = sx; *c = cx; break;
+    case 1: *s = cx; *c = -sx; break;
+    case 2: *s = -sx; *c = -cx; break;
+    default: *s = -cx; *c = sx; break;
+    }
+}
+
+// A ring of outer diameter size and width thick: the track all round, the
+// fill clockwise from the top to permille, with round ends. 4x4 samples a
+// pixel, in quarters of a pixel, all in integers but the end's position.
+void sl_ui_ring(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t size, uint32_t thick, uint32_t permille,
+                const uint8_t track[3], const uint8_t fill[3]) {
+    if (!ui || !ui->ctx || size < 4u || size > 512u || thick == 0u || thick * 2u > size) return;
+    if (permille > 1000u) permille = 1000u;
+    int64_t c4 = (int64_t)size * 2;                       // the centre, in quarter pixels
+    int64_t ro = (int64_t)size * 2, ri = ro - (int64_t)thick * 4;
+    int64_t rm = (ro + ri) / 2, half = (int64_t)thick * 2;   // mid radius, half the width
+    float sa = 0.0f, ca = 1.0f;
+    sl_ui_sincos((float)permille / 1000.0f * 6.2831853f, &sa, &ca);
+    int64_t ex = (int64_t)(sa * 4096.0f), ey = (int64_t)(-ca * 4096.0f);   // where the fill ends
+    int64_t cap_x = c4 + (int64_t)(sa * (float)rm), cap_y = c4 - (int64_t)(ca * (float)rm);
+    uint8_t cov_t[512], cov_f[512];
+    for (uint32_t py = 0u; py < size; py++) {
+        uint8_t any = 0u;
+        for (uint32_t px = 0u; px < size; px++) {
+            uint32_t nt = 0u, nf = 0u;
+            for (int sy = 0; sy < 4; sy++) {
+                int64_t qy = (int64_t)py * 4 + sy - c4;
+                for (int sx = 0; sx < 4; sx++) {
+                    int64_t qx = (int64_t)px * 4 + sx - c4;
+                    int64_t d2 = qx * 2 + 1, e2 = qy * 2 + 1;   // sample centres, in eighths
+                    int64_t r2 = d2 * d2 + e2 * e2;
+                    uint8_t on_ring = r2 <= 4 * ro * ro && r2 >= 4 * ri * ri;
+                    uint8_t filled = 0u;
+                    if (permille > 0u) {
+                        if (permille >= 1000u) filled = on_ring;
+                        else if (on_ring) {
+                            uint8_t right = d2 > 0;                       // the first half turn
+                            int64_t cross = d2 * ey - e2 * ex;            // > 0: the end is clockwise from it
+                            filled = permille <= 500u ? (right && cross > 0) : (right || cross > 0);
+                        }
+                        // the round ends: the start at the top, and where the fill stops
+                        int64_t tx = d2, ty = e2 + 2 * rm;               // from the top end's centre
+                        int64_t ux = d2 - 2 * (cap_x - c4), uy = e2 - 2 * (cap_y - c4);
+                        if (tx * tx + ty * ty <= 4 * half * half || ux * ux + uy * uy <= 4 * half * half) filled = 1u;
+                    }
+                    if (filled) nf++;
+                    else if (on_ring) nt++;
+                }
+            }
+            cov_t[px] = (uint8_t)((nt + nf) * 255u / 16u);
+            cov_f[px] = (uint8_t)(nf * 255u / 16u);
+            any |= (uint8_t)(nt | nf);
+        }
+        if (!any) continue;
+        sl_blend_coverage_row(ui->ctx, (int32_t)x, (int32_t)(y + py), cov_t, size, track[0], track[1], track[2]);
+        if (permille > 0u) sl_blend_coverage_row(ui->ctx, (int32_t)x, (int32_t)(y + py), cov_f, size, fill[0], fill[1], fill[2]);
+    }
+}
+
+// A graph: values 0..1000 spread over the width, the area under them in
+// fill (with its alpha), and a line about 2.5 px wide on top.
+void sl_ui_graph(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                 const uint16_t *values, uint32_t count, const uint8_t line[3], const uint8_t fill[4]) {
+    if (!ui || !ui->ctx || !values || count < 2u || w < 2u || h < 4u) return;
+    // y of the line at column px, in 1/256 of a pixel
+    #define SL_GRAPH_Y(px) ({ \
+        uint64_t pos_ = (uint64_t)(px) * (count - 1u) * 256u / (w - 1u); \
+        uint32_t i_ = (uint32_t)(pos_ >> 8), f_ = (uint32_t)(pos_ & 255u); \
+        uint32_t a_ = values[i_] > 1000u ? 1000u : values[i_]; \
+        uint32_t b_ = i_ + 1u < count ? (values[i_ + 1u] > 1000u ? 1000u : values[i_ + 1u]) : a_; \
+        uint32_t v_ = (a_ * (256u - f_) + b_ * f_) >> 8; \
+        (int64_t)(h - 2u) * 256 - (int64_t)v_ * (h - 4u) * 256 / 1000; })
+    for (uint32_t px = 0u; px < w; px++) {
+        int64_t y0 = SL_GRAPH_Y(px);
+        int64_t y1 = SL_GRAPH_Y(px + 1u < w ? px + 1u : px);
+        int64_t top = y0 < y1 ? y0 : y1, bot = y0 < y1 ? y1 : y0;
+        int64_t ft = y0 >> 8;
+        if (ft < (int64_t)h) sl_fill_rect_a(ui->ctx, x + px, y + (uint32_t)ft, 1u, h - (uint32_t)ft, fill[0], fill[1], fill[2], fill[3]);
+        // the line: from top - 1.25 px to bot + 1.25 px, its ends anti-aliased
+        int64_t lt = top - 320, lb = bot + 320;
+        if (lt < 0) lt = 0;
+        int64_t r0 = lt >> 8, r1 = lb >> 8;
+        for (int64_t ry = r0; ry <= r1 && ry < (int64_t)h; ry++) {
+            int64_t a = ry * 256 > lt ? ry * 256 : lt, b = (ry + 1) * 256 < lb ? (ry + 1) * 256 : lb;
+            if (b <= a) continue;
+            uint32_t alpha = (uint32_t)((b - a) * 255 / 256);
+            if (alpha >= 250u) sl_fill_rect(ui->ctx, x + px, y + (uint32_t)ry, 1u, 1u, line[0], line[1], line[2]);
+            else sl_fill_rect_a(ui->ctx, x + px, y + (uint32_t)ry, 1u, 1u, line[0], line[1], line[2], (uint8_t)alpha);
+        }
+    }
+    #undef SL_GRAPH_Y
 }

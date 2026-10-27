@@ -208,6 +208,40 @@ static void sl_window_blit_cache_rect(uint32_t dx, uint32_t dy, uint32_t dw, uin
     (void)sl_window_cache_copy((sl_window_t *)userdata, dx, dy, dw, dh, 0);
 }
 
+// The veil of a modal dialog: night at alpha over the window's rounded shape,
+// title bar and frame included (SLUI VEIL), within the ctx clip.
+void sl_window_draw_veil(sl_ctx_t *ctx, const sl_window_t *win, uint8_t alpha) {
+    if (!ctx || !win || alpha == 0u || win->width < 2u * SL_WIN_RADIUS || win->height < 2u * SL_WIN_RADIUS) return;
+    const sl_ui_color_t *night = sl_ui_runtime_color(SL_UI_COLOR_ACCENT);
+    const int64_t R = SL_WIN_RADIUS, W = win->width, H = win->height;
+    uint8_t cov[SL_WIN_RADIUS];
+    for (int64_t y = 0; y < H; y++) {
+        int64_t dy = y < R ? R - y : (y >= H - R ? y - (H - R) + 1 : 0);
+        if (dy == 0) {
+            sl_fill_rect_a(ctx, win->x, win->y + (uint32_t)y, win->width, 1u, night->r, night->g, night->b, alpha);
+            continue;
+        }
+        // the corner columns, 4x4 samples a pixel against the circle of radius R
+        for (int64_t x = 0; x < R; x++) {
+            uint32_t hits = 0u;
+            for (int sy = 0; sy < 4; sy++) {
+                int64_t qy = (y < R ? (R - y) * 8 - (2 * sy + 1) : (y - (H - R)) * 8 + (2 * sy + 1));
+                for (int sx = 0; sx < 4; sx++) {
+                    int64_t qx = (R - x) * 8 - (2 * sx + 1);
+                    if (qx * qx + qy * qy <= R * R * 64) hits++;
+                }
+            }
+            cov[x] = (uint8_t)(hits * alpha / 16u);
+        }
+        sl_blend_coverage_row(ctx, (int32_t)win->x, (int32_t)(win->y + y), cov, (uint32_t)R, night->r, night->g, night->b);
+        uint8_t rev[SL_WIN_RADIUS];
+        for (int64_t x = 0; x < R; x++) rev[x] = cov[R - 1 - x];
+        sl_blend_coverage_row(ctx, (int32_t)(win->x + W - R), (int32_t)(win->y + y), rev, (uint32_t)R, night->r, night->g, night->b);
+        sl_fill_rect_a(ctx, win->x + (uint32_t)R, win->y + (uint32_t)y, (uint32_t)(W - 2 * R), 1u,
+                       night->r, night->g, night->b, alpha);
+    }
+}
+
 // ---------------------------------------------------------------- the frame
 
 // Shadow and corners: the sprite outside the opaque inside, only where the
@@ -238,6 +272,15 @@ static void sl_window_ring_rect(uint32_t dx, uint32_t dy, uint32_t dw, uint32_t 
         if (t.clip_x1 <= t.clip_x0 || t.clip_y1 <= t.clip_y0) continue;
         sl_blit_sprite(&t, e, sl_skin_data(&ctx->skin, e), (int32_t)win->x - e->pad_l, (int32_t)win->y - e->pad_t,
                        win->width + e->pad_l + e->pad_r, win->height + e->pad_t + e->pad_b);
+        if (win->veil_alpha) {   // a modal dialog's veil reaches the edge (the inside has its own)
+            uint8_t saved_clip = ctx->clip_enabled;
+            uint32_t scx = ctx->clip_x, scy = ctx->clip_y, scw = ctx->clip_w, sch = ctx->clip_h;
+            sl_clip_set(ctx, (uint32_t)t.clip_x0, (uint32_t)t.clip_y0, (uint32_t)(t.clip_x1 - t.clip_x0),
+                        (uint32_t)(t.clip_y1 - t.clip_y0));
+            sl_window_draw_veil(ctx, win, win->veil_alpha);
+            if (saved_clip) sl_clip_set(ctx, scx, scy, scw, sch);
+            else sl_clip_clear(ctx);
+        }
     }
 }
 
