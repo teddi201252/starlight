@@ -16,6 +16,11 @@
 #include <stdlib.h>
 
 #define SL_APP_DIR "/system/apps"
+// Apps installed later (appget, the kit's `make serve`): writable, also on
+// the live ISO. A bundle with the name of a system one is left out.
+#define SL_USER_APP_DIR "/apps"
+#define SL_APP_DIR_COUNT 2u
+static const char *const g_app_dirs[SL_APP_DIR_COUNT] = {SL_APP_DIR, SL_USER_APP_DIR};
 #define SL_APP_MANIFEST "app.ini"
 #define SL_APP_CATALOG_SCAN_INTERVAL_NS 1000000000ull
 #define SL_APP_DIRECTORY_BUFFER_INITIAL 4096u
@@ -150,8 +155,8 @@ static uint8_t g_launcher_expanded = 0u;
 static uint32_t g_launcher_extra_width = 0u;
 static sl_window_rect_snapshot_t g_launcher_last_rect;
 static uint64_t g_launcher_next_scan_ns = 0ull;
-static peos_stat_t g_launcher_dir_stat;      // SL_APP_DIR as of the last catalog scan
-static uint8_t g_launcher_dir_known = 0u;
+static peos_stat_t g_launcher_dir_stat[SL_APP_DIR_COUNT];   // g_app_dirs as of the last catalog scan
+static uint8_t g_launcher_dir_known = 0u;    // a bit per directory
 static sl_window_anim_t g_window_anims[SL_WIN_ANIM_MAX];
 
 static void sl_window_refresh_zorder(void);
@@ -613,15 +618,14 @@ static int sl_scan_reserve(sl_scanned_app_t **entries, size_t *cap, size_t neede
     return 1;
 }
 
-static char *sl_read_app_directory(size_t *out_len) {
+static char *sl_read_app_directory(const char *dir, size_t *out_len) {
     size_t cap = SL_APP_DIRECTORY_BUFFER_INITIAL;
     if (out_len) *out_len = 0u;
 
     while (cap <= SL_APP_DIRECTORY_BUFFER_MAX) {
         char *buf = (char *)malloc(cap);
         if (!buf) return NULL;
-        uint64_t result = peos_readdir(SL_APP_DIR, sizeof(SL_APP_DIR) - 1u,
-                                       buf, cap - 1u);
+        uint64_t result = peos_readdir(dir, strlen(dir), buf, cap - 1u);
         if ((int64_t)result < 0) {
             free(buf);
             return NULL;
@@ -649,18 +653,15 @@ static int sl_title_before(const char *a, const char *b) {
     }
 }
 
-static int sl_scan_apps_from_system(sl_scanned_app_t **out_entries, size_t *out_count) {
-    if (!out_entries || !out_count) return 0;
-    *out_entries = NULL;
-    *out_count = 0u;
-
+// The bundles of one directory, appended to entries. `system_count` entries
+// (from SL_APP_DIR) come first: a bundle with one of their names is left out.
+// 0: the directory cannot be read, or out of memory (entries is then freed).
+static int sl_scan_app_dir(const char *dir, sl_scanned_app_t **entries, size_t *count, size_t *cap,
+                           size_t system_count) {
     size_t list_len = 0u;
-    char *list = sl_read_app_directory(&list_len);
+    char *list = sl_read_app_directory(dir, &list_len);
     if (!list) return 0;
 
-    sl_scanned_app_t *entries = NULL;
-    size_t count = 0u;
-    size_t cap = 0u;
     size_t pos = 0u;
     while (pos < list_len) {
         size_t start = pos;
@@ -674,9 +675,16 @@ static int sl_scan_apps_from_system(sl_scanned_app_t **out_entries, size_t *out_
         name[len] = '\0';
         if (sl_trim_trailing_slash(name) == 0u || !sl_has_suffix(name, ".app")) continue;
 
+        uint8_t shadowed = 0u;
+        for (size_t k = 0u; k < system_count && !shadowed; k++) {
+            const char *base = (*entries)[k].bundle_path + sizeof(SL_APP_DIR);   // past "/system/apps/"
+            shadowed = strcmp(base, name) == 0;
+        }
+        if (shadowed) continue;
+
         sl_scanned_app_t entry;
         peos_memset(&entry, 0, sizeof(entry));
-        if (!sl_join_path(entry.bundle_path, sizeof(entry.bundle_path), SL_APP_DIR, name)) continue;
+        if (!sl_join_path(entry.bundle_path, sizeof(entry.bundle_path), dir, name)) continue;
 
         char manifest_path[320];
         if (!sl_join_path(manifest_path, sizeof(manifest_path), entry.bundle_path,
@@ -703,15 +711,38 @@ static int sl_scan_apps_from_system(sl_scanned_app_t **out_entries, size_t *out_
                                                          sizeof(stat_info));
             }
         }
-        if (!sl_scan_reserve(&entries, &cap, count + 1u)) {
-            free(entries);
+        if (!sl_scan_reserve(entries, cap, *count + 1u)) {
+            free(*entries);
+            *entries = NULL;
             free(list);
             return 0;
         }
-        entries[count++] = entry;
+        (*entries)[(*count)++] = entry;
     }
 
     free(list);
+    return 1;
+}
+
+static int sl_scan_apps_from_system(sl_scanned_app_t **out_entries, size_t *out_count) {
+    if (!out_entries || !out_count) return 0;
+    *out_entries = NULL;
+    *out_count = 0u;
+
+    sl_scanned_app_t *entries = NULL;
+    size_t count = 0u;
+    size_t cap = 0u;
+    // No system apps: not a catalog to show. Without /apps, the system ones.
+    if (!sl_scan_app_dir(SL_APP_DIR, &entries, &count, &cap, 0u)) {
+        free(entries);
+        return 0;
+    }
+    size_t system_count = count;
+    if (!sl_scan_app_dir(SL_USER_APP_DIR, &entries, &count, &cap, system_count) && !entries) {
+        // out of memory (an unreadable /apps leaves entries as they were)
+        return 0;
+    }
+
     // By title, whatever order the file system lists them in (the tar, the
     // live ramfs and XFS differ): the dock and the manager look the same
     // everywhere.
@@ -2189,18 +2220,26 @@ static size_t sl_load_apps_from_system(sl_ctx_t *ctx) {
 // the bundle folder) adds or removes an entry, which moves the directory's
 // mtime; reading every manifest instead stalls the frame on each tick.
 static uint8_t sl_launcher_dir_changed(void) {
-    peos_stat_t st;
-    peos_memset(&st, 0, sizeof(st));
-    if ((int64_t)peos_stat(SL_APP_DIR, sizeof(SL_APP_DIR) - 1u, &st, sizeof(st)) < 0) {
-        g_launcher_dir_known = 0u;
-        return 0u;
+    uint8_t changed = 0u;
+    for (uint32_t d = 0u; d < SL_APP_DIR_COUNT; d++) {
+        peos_stat_t st;
+        peos_memset(&st, 0, sizeof(st));
+        uint8_t bit = (uint8_t)(1u << d);
+        if ((int64_t)peos_stat(g_app_dirs[d], strlen(g_app_dirs[d]), &st, sizeof(st)) < 0) {
+            // gone (or not made yet): a change only if it was there
+            if (g_launcher_dir_known & bit) changed = 1u;
+            g_launcher_dir_known &= (uint8_t)~bit;
+            continue;
+        }
+        if (!(g_launcher_dir_known & bit) ||
+            st.mtime_ns != g_launcher_dir_stat[d].mtime_ns ||
+            st.ctime_ns != g_launcher_dir_stat[d].ctime_ns ||
+            st.size != g_launcher_dir_stat[d].size) {
+            changed = 1u;
+        }
+        g_launcher_dir_stat[d] = st;
+        g_launcher_dir_known |= bit;
     }
-    uint8_t changed = !g_launcher_dir_known ||
-                      st.mtime_ns != g_launcher_dir_stat.mtime_ns ||
-                      st.ctime_ns != g_launcher_dir_stat.ctime_ns ||
-                      st.size != g_launcher_dir_stat.size;
-    g_launcher_dir_stat = st;
-    g_launcher_dir_known = 1u;
     return changed;
 }
 
@@ -2219,6 +2258,11 @@ static void sl_launcher_tick_catalog(sl_ctx_t *ctx) {
         free(entries);
         return;
     }
+    size_t user = 0u;
+    for (size_t i = 0u; i < count; i++) {
+        user += strncmp(entries[i].bundle_path, SL_USER_APP_DIR "/", sizeof(SL_USER_APP_DIR)) == 0;
+    }
+    printf("starlight: %u apps (%u in " SL_USER_APP_DIR ")\n", (unsigned)count, (unsigned)user);
     (void)sl_launcher_reconcile_catalog(ctx, entries, count, 0u);
     free(entries);
 }
