@@ -2,6 +2,12 @@
 
 static uint8_t g_prev_mouse_buttons = 0u;
 
+// Records read but left for the next frame: a frame takes one change of the
+// buttons, so a click whose press and release come in the same frame (a slow
+// VM: UTM emulating x86) still is a press, then a release.
+static peos_input_record_t g_held[16];
+static uint32_t g_held_n = 0u;
+
 #define SL_KEY_REPEAT_SLOTS 32u
 #define SL_KEY_REPEAT_DELAY_MS_DEFAULT 250u
 #define SL_KEY_REPEAT_DELAY_MS_MIN 100u
@@ -209,6 +215,7 @@ void sl_input_set_actionmod_hold_config(uint32_t hold_ms) {
 
 void sl_input_state_reset(void) {
     g_prev_mouse_buttons = 0u;
+    g_held_n = 0u;
     peos_memset(g_key_repeat, 0, sizeof(g_key_repeat));
     peos_memset(&g_actionmod, 0, sizeof(g_actionmod));
 }
@@ -216,9 +223,10 @@ void sl_input_state_reset(void) {
 static uint8_t g_endpoint_buttons = 0u;
 
 // Pending keys (up to `cap`) and the mouse motion since the last call: from the
-// input endpoint when Starlight has one, else from the legacy poll calls.
+// input endpoint when Starlight has one, else from the legacy poll calls. A
+// tablet gives the position: *abs is set, and mev->dx/dy is the motion after it.
 static int sl_input_read(sl_ctx_t *ctx, peos_input_event_t *evs, uint64_t cap,
-                         uint64_t *n_out, peos_mouse_event_t *mev) {
+                         uint64_t *n_out, peos_mouse_event_t *mev, int32_t abs[2], uint8_t *has_abs) {
     if (ctx->input_fd < 0) {
         uint64_t n = peos_input_poll(evs, cap);
         int64_t mr = peos_input_mouse(mev);
@@ -230,15 +238,40 @@ static int sl_input_read(sl_ctx_t *ctx, peos_input_event_t *evs, uint64_t cap,
     peos_memset(mev, 0, sizeof(*mev));
     int32_t wheel_x = 0, wheel_y = 0;
     uint64_t n = 0;
+    uint8_t clicked = 0u;
     peos_input_record_t rec[16];
-    while (n < cap) {
+    uint8_t held = 0u;
+    while (n < cap && !held) {
         // never take more keys than fit: what is left stays queued for the next frame
         uint64_t want = cap - n;
+        uint64_t got = 0;
         if (want > sizeof(rec) / sizeof(rec[0])) want = sizeof(rec) / sizeof(rec[0]);
-        uint64_t got = peos_fread_nb((uint64_t)ctx->input_fd, rec, (size_t)want * sizeof(rec[0]));
-        if (got == (uint64_t)-1 || got < sizeof(rec[0])) break;
-        got /= sizeof(rec[0]);
+        if (g_held_n > 0u) {
+            // last frame's leftovers come first
+            got = g_held_n < want ? g_held_n : want;
+            peos_memcpy(rec, g_held, (size_t)got * sizeof(rec[0]));
+            g_held_n -= (uint32_t)got;
+            for (uint32_t k = 0u; k < g_held_n; k++) g_held[k] = g_held[k + got];
+            if (g_held_n > 0u) held = 1u;
+        } else {
+            got = peos_fread_nb((uint64_t)ctx->input_fd, rec, (size_t)want * sizeof(rec[0]));
+            if (got == (uint64_t)-1 || got < sizeof(rec[0])) break;
+            got /= sizeof(rec[0]);
+        }
         for (uint64_t i = 0; i < got; i++) {
+            if (rec[i].type == PEOS_INPUT_MOUSE && rec[i].buttons != g_endpoint_buttons) {
+                if (clicked) {
+                    // a second change: it and what follows go to the next frame
+                    uint32_t rest = (uint32_t)(got - i);
+                    // (at most 16 in all: rest came out of the room it frees)
+                    for (uint32_t k = g_held_n; k > 0u; k--) g_held[k - 1u + rest] = g_held[k - 1u];
+                    peos_memcpy(g_held, &rec[i], (size_t)rest * sizeof(rec[0]));
+                    g_held_n += rest;
+                    held = 1u;
+                    break;
+                }
+                clicked = 1u;
+            }
             if (rec[i].type == PEOS_INPUT_KEY) {
                 evs[n].code = rec[i].code;
                 evs[n].pressed = rec[i].pressed;
@@ -246,8 +279,15 @@ static int sl_input_read(sl_ctx_t *ctx, peos_input_event_t *evs, uint64_t cap,
                 evs[n].time_ns = rec[i].time_ns;
                 n++;
             } else if (rec[i].type == PEOS_INPUT_MOUSE) {
-                mev->dx += rec[i].dx;
-                mev->dy += rec[i].dy;
+                if (rec[i].code == PEOS_INPUT_MOUSE_ABSOLUTE) {
+                    abs[0] = rec[i].dx;
+                    abs[1] = rec[i].dy;
+                    *has_abs = 1u;
+                    mev->dx = mev->dy = 0;
+                } else {
+                    mev->dx += rec[i].dx;
+                    mev->dy += rec[i].dy;
+                }
                 wheel_x += rec[i].wheel_x;
                 wheel_y += rec[i].wheel_y;
                 g_endpoint_buttons = rec[i].buttons;
@@ -276,7 +316,9 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
     peos_input_event_t evs[16];
     peos_mouse_event_t mev;
     uint64_t n = 0;
-    int64_t mr = sl_input_read(ctx, evs, 16, &n, &mev);
+    int32_t abs[2] = {0, 0};
+    uint8_t has_abs = 0u;
+    int64_t mr = sl_input_read(ctx, evs, 16, &n, &mev, abs, &has_abs);
     if (mr < 0) return -1;
     uint64_t now_ns = peos_time_ns();
 
@@ -304,8 +346,8 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
         uint32_t old_x = ctx->cursor_x;
         uint32_t old_y = ctx->cursor_y;
 
-        int64_t nx = (int64_t)ctx->cursor_x + (int64_t)mev.dx;
-        int64_t ny = (int64_t)ctx->cursor_y + (int64_t)mev.dy;
+        int64_t nx = (has_abs ? (int64_t)abs[0] : (int64_t)ctx->cursor_x) + (int64_t)mev.dx;
+        int64_t ny = (has_abs ? (int64_t)abs[1] : (int64_t)ctx->cursor_y) + (int64_t)mev.dy;
 
         if (nx < 0) nx = 0;
         if (ny < 0) ny = 0;
@@ -315,6 +357,10 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
         ctx->cursor_x = (uint32_t)nx;
         ctx->cursor_y = (uint32_t)ny;
         out->mouse_moved = (ctx->cursor_x != old_x || ctx->cursor_y != old_y) ? 1u : 0u;
+        if (has_abs) {
+            out->mouse_dx = (int32_t)ctx->cursor_x - (int32_t)old_x;
+            out->mouse_dy = (int32_t)ctx->cursor_y - (int32_t)old_y;
+        }
 
         out->mouse_buttons = mev.buttons;
         uint8_t left_now = (uint8_t)(mev.buttons & 0x01u);
