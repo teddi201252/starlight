@@ -9,6 +9,7 @@
 #include "notify.h"
 
 #include "desktop.h"
+#include "i18n.h"
 #include "starlight_internal.h"
 #include "render/blit.h"
 #include "render/pixels.h"
@@ -328,7 +329,7 @@ void sl_notify_tick(sl_ctx_t *ctx) {
         uint32_t tw = sl_text_width(g_note.text_f, g_note.shown.text);
         uint32_t sw = sl_text_width(g_note.source_f, g_note.shown.source);
         uint32_t w = 2u * SL_NOTIFY_PAD + SL_NOTIFY_ICON + 2u * SL_NOTIFY_GAP + (tw > sw ? tw : sw) +
-                     sl_text_width(g_note.small_f, "ora");
+                     sl_text_width(g_note.small_f, sl_tr("notify.now"));
         uint32_t max_w = ctx->fb.width > 2u * SL_NOTIFY_RIGHT + SL_NOTIFY_MIN_W ? ctx->fb.width / 2u : ctx->fb.width;
         if (w < SL_NOTIFY_MIN_W) w = SL_NOTIFY_MIN_W;
         g_note.card_w = w > max_w ? max_w : w;
@@ -381,7 +382,7 @@ static void sl_note_draw_card(sl_ctx_t *ctx, sl_target_t *t, int32_t off) {
     int32_t ix = x + (int32_t)SL_NOTIFY_PAD, iy = y + (int32_t)(SL_NOTIFY_H - SL_NOTIFY_ICON) / 2;
     sl_note_icon(ctx, t, ix, iy, SL_NOTIFY_ICON, g_note.shown.source);
     sl_note_lines(t, &g_note.shown, ix + (int32_t)(SL_NOTIFY_ICON + SL_NOTIFY_GAP),
-                  x + (int32_t)(g_note.card_w - SL_NOTIFY_PAD), y + (int32_t)SL_NOTIFY_H / 2, "ora");
+                  x + (int32_t)(g_note.card_w - SL_NOTIFY_PAD), y + (int32_t)SL_NOTIFY_H / 2, sl_tr("notify.now"));
 }
 
 static void sl_note_draw_center(sl_ctx_t *ctx, sl_target_t *t) {
@@ -390,14 +391,14 @@ static void sl_note_draw_center(sl_ctx_t *ctx, sl_target_t *t) {
     sl_note_surface(t, &k_night_card, x, y, SL_CENTER_W, h, 40u);
     const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
     int32_t right = x + (int32_t)SL_CENTER_W - 30;
-    sl_text_draw(t, g_note.title_f, x + 30, y + 44, "Notifiche", 0xE8, 0xF4, 0xFF);
+    sl_text_draw(t, g_note.title_f, x + 30, y + 44, sl_tr("notify.title"), 0xE8, 0xF4, 0xFF);
     if (g_note.history_count) {
-        int32_t cw = (int32_t)sl_text_width(g_note.source_f, "Cancella");
-        sl_text_draw(t, g_note.source_f, right - cw, y + 42, "Cancella", n->r, n->g, n->b);
+        int32_t cw = (int32_t)sl_text_width(g_note.source_f, sl_tr("notify.clear"));
+        sl_text_draw(t, g_note.source_f, right - cw, y + 42, sl_tr("notify.clear"), n->r, n->g, n->b);
     }
     int32_t ry = y + (int32_t)SL_CENTER_HEAD;
     if (!g_note.history_count) {
-        sl_text_draw(t, g_note.text_f, x + 30, ry + 42, "Nessuna notifica", 0x9F, 0xB4, 0xD8);
+        sl_text_draw(t, g_note.text_f, x + 30, ry + 42, sl_tr("notify.none"), 0x9F, 0xB4, 0xD8);
         return;
     }
     for (uint32_t i = 0; i < g_note.history_count && i < SL_CENTER_ROWS; i++) {

@@ -10,6 +10,7 @@
 #include "render/pixels.h"
 #include "render/surface.h"
 #include "ui_sdk.h"
+#include "i18n.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -27,7 +28,7 @@
 enum { SM_ITEM_ABOUT = 0, SM_ITEM_REBOOT, SM_ITEM_OFF, SM_ITEMS };
 enum { SM_NONE = 0, SM_ASK_REBOOT, SM_ASK_OFF, SM_ABOUT };
 
-static const char *const k_items[SM_ITEMS] = { "Informazioni su PeOS", "Riavvia", "Spegni" };
+static const char *const k_items[SM_ITEMS] = { "menu.about", "menu.restart", "menu.shutdown" };
 
 static struct {
     uint8_t open;               // the menu
@@ -298,7 +299,7 @@ static void sm_draw_menu(sl_ctx_t *ctx, sl_target_t *t) {
     for (int i = 0; i < SM_ITEMS; i++) {
         uint32_t ry = sm_row_y(i);
         if (g_sm.hover == i) sl_ui_ctx_surface(ctx, SL_UI_SURF_INSET, x + SM_PAD, ry, SM_W - 2u * SM_PAD, SM_ROW, SM_ROW / 2u);
-        sm_text(t, g_sm.row_f, (int32_t)(x + SM_PAD + 18u), (int32_t)ry + 15, k_items[i], SL_UI_COLOR_TEXT_PRIMARY);
+        sm_text(t, g_sm.row_f, (int32_t)(x + SM_PAD + 18u), (int32_t)ry + 15, sl_tr(k_items[i]), SL_UI_COLOR_TEXT_PRIMARY);
     }
     const sl_ui_color_t *b = sl_ui_runtime_color(SL_UI_COLOR_BORDER);
     sl_fill_rect(ctx, x + SM_PAD + 14u, sm_row_y(SM_ITEM_REBOOT) - SM_SEP / 2u - 1u, SM_W - 2u * SM_PAD - 28u, 2u, b->r, b->g, b->b);
@@ -317,18 +318,18 @@ static void sm_draw_dialog(sl_ctx_t *ctx, sl_target_t *t) {
         memset(&si, 0, sizeof(si));
         (void)peos_sysinfo(&si);
         char rows[6][2][64];
-        snprintf(rows[0][0], 64, "Versione");
+        snprintf(rows[0][0], 64, "%s", sl_tr("about.version"));
         snprintf(rows[0][1], 64, "%s%s%s", g_sm.version, g_sm.commit[0] ? " \xC2\xB7 " : "", g_sm.commit);
         snprintf(rows[1][0], 64, "Starlight");
         snprintf(rows[1][1], 64, "%s", g_sm.starlight[0] ? g_sm.starlight : "?");
-        snprintf(rows[2][0], 64, "Processori");
+        snprintf(rows[2][0], 64, "%s", sl_tr("about.processors"));
         snprintf(rows[2][1], 64, "%u", (unsigned)(si.cpu_count ? si.cpu_count : 1u));
-        snprintf(rows[3][0], 64, "Memoria");
+        snprintf(rows[3][0], 64, "%s", sl_tr("about.memory"));
         snprintf(rows[3][1], 64, "%llu MB", (unsigned long long)(si.ram_total / (1024u * 1024u)));
-        snprintf(rows[4][0], 64, "Schermo");
+        snprintf(rows[4][0], 64, "%s", sl_tr("about.screen"));
         snprintf(rows[4][1], 64, "%u x %u", (unsigned)ctx->fb.width, (unsigned)ctx->fb.height);
-        snprintf(rows[5][0], 64, "Sistema");
-        snprintf(rows[5][1], 64, "%s", g_sm.live ? "sessione live: le modifiche non restano" : "dal disco");
+        snprintf(rows[5][0], 64, "%s", sl_tr("about.system"));
+        snprintf(rows[5][1], 64, "%s", sl_tr(g_sm.live ? "about.live" : "about.disk"));
         int32_t ry = ty + 64;
         for (int i = 0; i < 6; i++, ry += 32) {
             sm_text(t, g_sm.text_f, tx, ry, rows[i][0], SL_UI_COLOR_TEXT_SECONDARY);
@@ -336,21 +337,21 @@ static void sm_draw_dialog(sl_ctx_t *ctx, sl_target_t *t) {
                     SL_UI_COLOR_TEXT_PRIMARY);
         }
         if (g_sm.built[0]) {
-            char b[48];
-            snprintf(b, sizeof(b), "compilato il %s", g_sm.built);
+            char b[96];
+            snprintf(b, sizeof(b), sl_tr("about.built"), g_sm.built);
             sm_text(t, g_sm.text_f, tx, (int32_t)(y + h) - 28 - (int32_t)SM_BTN_H + 14, b, SL_UI_COLOR_TEXT_SECONDARY);
         }
-        sm_button(ctx, t, 1, "Chiudi", 1);
+        sm_button(ctx, t, 1, sl_tr("common.close"), 1);
         return;
     }
     int off = g_sm.dialog == SM_ASK_OFF;
-    sm_text(t, g_sm.title_f, tx, ty + 4, off ? "Spegnere PeOS?" : "Riavviare PeOS?", SL_UI_COLOR_TEXT_PRIMARY);
-    sm_text(t, g_sm.text_f, tx, ty + 50, "Le app aperte verranno chiuse.", SL_UI_COLOR_TEXT_SECONDARY);
+    sm_text(t, g_sm.title_f, tx, ty + 4, sl_tr(off ? "power.ask_off" : "power.ask_restart"), SL_UI_COLOR_TEXT_PRIMARY);
+    sm_text(t, g_sm.text_f, tx, ty + 50, sl_tr("power.apps_close"), SL_UI_COLOR_TEXT_SECONDARY);
     if (g_sm.live) {
-        sm_text(t, g_sm.text_f, tx, ty + 76, "Sessione live: quello che hai salvato andr\xC3\xA0 perso.", SL_UI_COLOR_TEXT_SECONDARY);
+        sm_text(t, g_sm.text_f, tx, ty + 76, sl_tr("power.live_lost"), SL_UI_COLOR_TEXT_SECONDARY);
     }
-    sm_button(ctx, t, 0, "Annulla", 0);
-    sm_button(ctx, t, 1, off ? "Spegni" : "Riavvia", 1);
+    sm_button(ctx, t, 0, sl_tr("common.cancel"), 0);
+    sm_button(ctx, t, 1, sl_tr(off ? "menu.shutdown" : "menu.restart"), 1);
 }
 
 static void sm_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, void *userdata) {
