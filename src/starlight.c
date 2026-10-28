@@ -6,6 +6,7 @@
 #include "render/pixels.h"
 #include "render/blit.h"
 #include "ui_sdk.h"
+#include "i18n.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -44,7 +45,7 @@ static void sl_perf_card_draw_rect(uint32_t dx, uint32_t dy, uint32_t dw, uint32
     const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
     char fps[16], work[64];
     snprintf(fps, sizeof(fps), "%u", (unsigned)ctx->fps_value);
-    snprintf(work, sizeof(work), "lavoro %u,%u ms \xC2\xB7 picco %u,%u ms",
+    snprintf(work, sizeof(work), sl_tr("perf.work"),
              (unsigned)(ctx->perf_work_avg_us / 1000u), (unsigned)(ctx->perf_work_avg_us / 100u % 10u),
              (unsigned)(ctx->perf_work_peak_us / 1000u), (unsigned)(ctx->perf_work_peak_us / 100u % 10u));
     int32_t fx = (int32_t)x + 30, base = (int32_t)y + 34;

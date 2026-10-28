@@ -7,6 +7,7 @@
 #include "render/image_decode.h"
 #include "peos/orbitfb.h"
 #include "peos/capability.h"
+#include "peos/lang.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -229,6 +230,7 @@ typedef struct {
     char title[ORBIT_TITLE_CHARS];
     char exec_path[ORBIT_EXEC_CHARS];
     char exec_args[ORBIT_ARGS_CHARS];
+    char bundle_dir[ORBIT_EXEC_CHARS];   // for the app's languages ("" if none)
     uint8_t caps_restrict;
     uint64_t caps_mask;
     uint8_t paths_restrict;
@@ -284,6 +286,7 @@ typedef struct {
     char title[ORBIT_TITLE_CHARS];
     char exec_path[ORBIT_EXEC_CHARS];
     char exec_args[ORBIT_ARGS_CHARS];
+    char bundle_dir[ORBIT_EXEC_CHARS];
     size_t slot_index;
     orbit_ui_state_t ui;
     orbit_surface_t surface;
@@ -304,6 +307,8 @@ static uint8_t g_reload_display_requested = 0u;
 static uint8_t g_reload_theme_requested = 0u;
 static uint8_t g_open_app_requested = 0u;
 static char g_open_app_bundle_path[256];
+// The language apps get (Technical Alpha plan, phase 4): sl_app_host_set_language.
+static char g_orbit_lang[PEOS_LANG_CODE_MAX] = PEOS_LANG_FALLBACK;
 
 static int orbit_pending_line_reserve(orbit_shell_t *shell, size_t need_cap) {
     if (!shell) return 0;
@@ -632,6 +637,18 @@ static void orbit_send_ui_error(orbit_shell_t *shell, uint32_t code, const char 
     if (n + 1u < sizeof(out)) out[n++] = '\n';
 
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, out, n);
+}
+
+// "@SLUI HOST LANG <code> <bundle>": the language, and where the app's
+// resources/<code>/ folders are ("-" without a bundle). Only to SLUI apps:
+// before the host's hello, and again when the language changes.
+static void orbit_send_host_lang(orbit_shell_t *shell) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[64 + ORBIT_EXEC_CHARS];
+    int n = snprintf(msg, sizeof(msg), "@SLUI HOST LANG %s %s\n", g_orbit_lang,
+                     shell->bundle_dir[0] ? shell->bundle_dir : "-");
+    if (n <= 0 || (size_t)n >= sizeof(msg)) return;
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
 }
 
 static void orbit_send_host_hello(orbit_shell_t *shell) {
@@ -1510,6 +1527,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         if (version > ORBIT_SLUI_PROTO_VERSION) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_HELLO, "unsupported_protocol_version");
         }
+        orbit_send_host_lang(shell);
         orbit_send_host_hello(shell);
         return 1;
     }
@@ -2478,7 +2496,19 @@ static int orbit_spawn_process(orbit_shell_t *shell) {
     }
     if (shell->slot_index < g_orbit_slot_count && g_orbit_cfg[shell->slot_index].paths_restrict) {
         const orbit_slot_cfg_t *cfg = &g_orbit_cfg[shell->slot_index];
-        if (peos_path_set_spawn_scope(cfg->paths, cfg->path_count) != 0) {
+        // An app always reads its own bundle: its resources and its languages
+        // (resources/<language>/), whatever else its manifest grants.
+        peos_path_grant_t grants[PEOS_PATH_MAX_GRANTS];
+        size_t count = cfg->path_count;
+        for (size_t i = 0u; i < count; i++) grants[i] = cfg->paths[i];
+        size_t blen = peos_strlen(shell->bundle_dir);
+        if (blen > 0u && blen < PEOS_PATH_MAX_PREFIX && count < PEOS_PATH_MAX_GRANTS) {
+            memset(&grants[count], 0, sizeof(grants[count]));
+            memcpy(grants[count].prefix, shell->bundle_dir, blen + 1u);
+            grants[count].rights = PEOS_PATH_READ;
+            count++;
+        }
+        if (peos_path_set_spawn_scope(grants, count) != 0) {
             // Never fall back to the full filesystem when the scope cannot be applied.
             (void)peos_fclose((uint64_t)child_stdin_rd);
             (void)peos_fclose((uint64_t)child_stdout_wr);
@@ -4646,6 +4676,7 @@ static void orbit_cfg_apply_to_shell(size_t index) {
     orbit_copy_str(shell->title, sizeof(shell->title), g_orbit_cfg[index].title);
     orbit_copy_str(shell->exec_path, sizeof(shell->exec_path), g_orbit_cfg[index].exec_path);
     orbit_copy_str(shell->exec_args, sizeof(shell->exec_args), g_orbit_cfg[index].exec_args);
+    orbit_copy_str(shell->bundle_dir, sizeof(shell->bundle_dir), g_orbit_cfg[index].bundle_dir);
 }
 
 void sl_app_host_slots_clear(void) {
@@ -4654,6 +4685,7 @@ void sl_app_host_slots_clear(void) {
         g_orbit_cfg[i].title[0] = '\0';
         g_orbit_cfg[i].exec_path[0] = '\0';
         g_orbit_cfg[i].exec_args[0] = '\0';
+        g_orbit_cfg[i].bundle_dir[0] = '\0';
         g_orbit_cfg[i].caps_restrict = 0u;
         g_orbit_cfg[i].caps_mask = 0u;
         g_orbit_cfg[i].paths_restrict = 0u;
@@ -4671,6 +4703,7 @@ int sl_app_host_slot_configure(size_t index, const char *title, const char *exec
     orbit_copy_str(g_orbit_cfg[index].title, sizeof(g_orbit_cfg[index].title), title ? title : "App");
     orbit_copy_str(g_orbit_cfg[index].exec_path, sizeof(g_orbit_cfg[index].exec_path), exec_path);
     orbit_copy_str(g_orbit_cfg[index].exec_args, sizeof(g_orbit_cfg[index].exec_args), exec_args ? exec_args : "");
+    g_orbit_cfg[index].bundle_dir[0] = '\0';
     g_orbit_cfg[index].caps_restrict = 0u;
     g_orbit_cfg[index].caps_mask = 0u;
     g_orbit_cfg[index].paths_restrict = 0u;
@@ -4688,6 +4721,27 @@ int sl_app_host_slot_restrict_paths(size_t index, const peos_path_grant_t *grant
     g_orbit_cfg[index].path_count = (uint32_t)count;
     g_orbit_cfg[index].paths_restrict = 1u;
     return 1;
+}
+
+int sl_app_host_slot_set_bundle(size_t index, const char *bundle_dir) {
+    if (index >= g_orbit_slot_count || !g_orbit_cfg_init) return 0;
+    orbit_copy_str(g_orbit_cfg[index].bundle_dir, sizeof(g_orbit_cfg[index].bundle_dir), bundle_dir ? bundle_dir : "");
+    if (g_orbit[index] && !g_orbit[index]->initialized) {
+        orbit_cfg_apply_to_shell(index);
+    }
+    return 1;
+}
+
+void sl_app_host_set_language(const char *code) {
+    if (!peos_lang_code_valid(code) || strcmp(code, g_orbit_lang) == 0) return;
+    orbit_copy_str(g_orbit_lang, sizeof(g_orbit_lang), code);
+    // the running SLUI apps (those that said hello) redraw in it
+    for (size_t i = 0u; i < g_orbit_slot_count; i++) {
+        orbit_shell_t *shell = g_orbit[i];
+        if (shell && shell->initialized && shell->child_pid > 0 && shell->ui.host_hello_sent) {
+            orbit_send_host_lang(shell);
+        }
+    }
 }
 
 int sl_app_host_slot_restrict_caps(size_t index, uint64_t caps_mask) {

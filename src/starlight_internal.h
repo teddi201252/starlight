@@ -31,6 +31,8 @@ void sl_audio_play_copy_effect(void);
 int sl_init(sl_ctx_t *ctx);
 void sl_shutdown(sl_ctx_t *ctx);
 void sl_reload_display(sl_ctx_t *ctx);
+// ctx->language into effect (Technical Alpha plan, phase 4).
+void sl_apply_language(sl_ctx_t *ctx);
 void sl_reload_theme(sl_ctx_t *ctx);
 int sl_handle_input(sl_ctx_t *ctx);
 void sl_render_full(sl_ctx_t *ctx);
@@ -55,6 +57,8 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count);
 void sl_windows_create_default(sl_ctx_t *ctx);
 // The theme was reloaded: every window draws its inside again.
 void sl_windows_theme_changed(sl_ctx_t *ctx);
+// The language changed: the dock and the app manager read the apps' titles again.
+void sl_windows_language_changed(sl_ctx_t *ctx);
 void sl_windows_render_all(sl_ctx_t *ctx);
 void sl_windows_focus_at_cursor(uint32_t x, uint32_t y);
 // The opaque inside of the top window on screen, which covers whatever is
@@ -77,7 +81,10 @@ void sl_windows_toggle_maximize(sl_ctx_t *ctx);
 // A window (not minimized) covers x,y.
 int sl_windows_any_at(uint32_t x, uint32_t y);
 // Open (or bring forward) the app with this title, case aside: 0 if none.
-int sl_windows_open_app_title(sl_ctx_t *ctx, const char *title);
+// Opens the app of the bundle <id>.app ("calendario"): 0 if not installed.
+int sl_windows_open_app_id(sl_ctx_t *ctx, const char *id);
+// Its title in the chosen language, or NULL.
+const char *sl_windows_app_title(const char *id);
 int sl_windows_title_button_held(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 int sl_windows_title_button_release(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_windows_destroy_all(void);
