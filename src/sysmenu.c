@@ -1,5 +1,5 @@
 // The system menu: Informazioni su PeOS, Riavvia, Spegni (Technical Alpha
-// plan, phase 1). The menu is a raised card under the star, like the desk's
+// plan, phase 1). The menu is a raised card under the logo, like the desk's
 // context menu of the design; Riavvia and Spegni ask in a dialog over a night
 // veil on the whole screen, and so does the about panel.
 
@@ -21,7 +21,7 @@
 #define SM_ROW 44u
 #define SM_SEP 14u
 #define SM_SHADOW 24u
-#define SM_STAR_W 170u          // the star and STARLIGHT
+#define SM_LOGO_W 178u          // the logo and STARLIGHT
 #define SM_VEIL 87u             // as the apps' dialogs (SLUI VEIL)
 #define SM_BTN_H 44u
 
@@ -43,12 +43,12 @@ static struct {
 
 // ----------------------------------------------------------------- places
 
-static uint32_t sm_star_x(const sl_ctx_t *ctx) {
+static uint32_t sm_logo_x(const sl_ctx_t *ctx) {
     return ctx->fb.height < 800u ? 172u : 40u;   // as the top bar draws it
 }
 
 static uint32_t sm_menu_x(const sl_ctx_t *ctx) {
-    uint32_t x = sm_star_x(ctx);
+    uint32_t x = sm_logo_x(ctx);
     return x > 12u ? x - 12u : 0u;
 }
 
@@ -214,7 +214,7 @@ int sl_sysmenu_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
         }
         return 1;
     }
-    if (y < SL_DESK_BAR_HEIGHT && x >= sm_star_x(ctx) && x < sm_star_x(ctx) + SM_STAR_W) {
+    if (y < SL_DESK_BAR_HEIGHT && x >= sm_logo_x(ctx) && x < sm_logo_x(ctx) + SM_LOGO_W) {
         g_sm.open = (uint8_t)!g_sm.open;
         g_sm.hover = -1;
         sm_dirty_menu(ctx);
@@ -244,14 +244,14 @@ int sl_sysmenu_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
         }
         return b >= 0 ? SL_CUR_HAND : SL_CUR_ARROW;
     }
-    int over_star = y < SL_DESK_BAR_HEIGHT && x >= sm_star_x(ctx) && x < sm_star_x(ctx) + SM_STAR_W;
-    if (!g_sm.open) return over_star ? SL_CUR_HAND : -1;
+    int over_logo = y < SL_DESK_BAR_HEIGHT && x >= sm_logo_x(ctx) && x < sm_logo_x(ctx) + SM_LOGO_W;
+    if (!g_sm.open) return over_logo ? SL_CUR_HAND : -1;
     int row = sm_row_at(ctx, x, y);
     if (row != g_sm.hover) {
         g_sm.hover = (int8_t)row;
         sm_dirty_menu(ctx);
     }
-    if (row >= 0 || over_star) return SL_CUR_HAND;
+    if (row >= 0 || over_logo) return SL_CUR_HAND;
     return sm_in(x, y, sm_menu_x(ctx), SM_TOP, SM_W, sm_menu_h()) ? SL_CUR_ARROW : -1;
 }
 
