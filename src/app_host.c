@@ -2540,6 +2540,24 @@ static int orbit_spawn_process(orbit_shell_t *shell) {
     return 1;
 }
 
+// Apps that had not exited yet when they were stopped: reaped later
+// (sl_app_host_tick), or they would stay behind as zombies.
+#define ORBIT_REAP_MAX 32u
+static int64_t g_orbit_reap[ORBIT_REAP_MAX];
+static uint32_t g_orbit_reap_count = 0u;
+
+static void orbit_reap_pending(void) {
+    for (uint32_t i = 0u; i < g_orbit_reap_count;) {
+        int status = 0;
+        uint64_t w = peos_waitpid_flags((uint64_t)g_orbit_reap[i], &status, PEOS_WAIT_NOHANG);
+        if (w == (uint64_t)g_orbit_reap[i] || w == (uint64_t)-1) {
+            g_orbit_reap[i] = g_orbit_reap[--g_orbit_reap_count];
+            continue;
+        }
+        i++;
+    }
+}
+
 static void orbit_stop_process(orbit_shell_t *shell) {
     if (!shell) return;
     int64_t pid = shell->child_pid;
@@ -2556,36 +2574,20 @@ static void orbit_stop_process(orbit_shell_t *shell) {
             }
             peos_sleep(1u);
         }
+        if (!exited && g_orbit_reap_count < ORBIT_REAP_MAX) g_orbit_reap[g_orbit_reap_count++] = pid;
     }
     shell->child_pid = -1;
     if (exited) orbit_surface_destroy_shared_object(shell);
     else orbit_surface_free(shell);
+    // The next app in this slot starts clean: its command buffers freed (they
+    // were kept, one set per window ever closed) and told its size again (a
+    // reopened app got no RESIZE: the same size as the last one sent).
+    orbit_ui_storage_free(&shell->ui);
+    peos_memset(&shell->ui, 0, sizeof(shell->ui));
 }
 
 static void orbit_on_close(void *userdata) {
-    orbit_shell_t *shell = (orbit_shell_t *)userdata;
-    if (!shell) return;
-
-    int64_t pid = shell->child_pid;
-    uint8_t exited = 0u;
-    orbit_request_child_exit(shell);
-    orbit_close_fds(shell);
-
-    if (pid > 0) {
-        int status = 0;
-        for (uint32_t i = 0u; i < 20u; i++) {
-            uint64_t w = peos_waitpid_flags((uint64_t)pid, &status, PEOS_WAIT_NOHANG);
-            if (w == (uint64_t)pid) {
-                exited = 1u;
-                break;
-            }
-            peos_sleep(1u);
-        }
-    }
-
-    shell->child_pid = -1;
-    if (exited) orbit_surface_destroy_shared_object(shell);
-    else orbit_surface_free(shell);
+    orbit_stop_process((orbit_shell_t *)userdata);
 }
 
 static void orbit_mark_child_exited(orbit_shell_t *shell) {
@@ -4561,6 +4563,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
 void sl_app_host_tick(sl_ctx_t *ctx) {
     if (!ctx) return;
+    if (g_orbit_reap_count) orbit_reap_pending();
     g_orbit_double_click_ms = orbit_double_click_ms_clamp(ctx->double_click_ms);
     if (g_reload_display_requested) {
         g_reload_display_requested = 0u;

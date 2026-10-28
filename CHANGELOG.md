@@ -2,6 +2,16 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.13.0] - 2026-10-28
+- Soft UI: the redesigned desktop (pearl grey and night/neon), dock on the left, app manager, top bar, clock, calendar and widgets, night theme and accents, notifications, cursors
+- Windows: resizable, with fast surface rendering; title bar and veil for dialogs
+- SLUI SDK 1.0.6: soft controls and drawing (surface, face, ring, graph, veil), SLUI_EVENT_RESIZE, languages
+- System menu: About PeOS, Restart, Shut Down; performance card
+- Apps from /apps too (installed with appget); app titles from the bundle's language
+- Languages: English (default) and Italian, chosen in Settings and applied at once
+- Absolute pointer positions and one button change per frame (clicks in slow VMs)
+- A closed app's state is freed, and a reopened app is told its size again
+
 ## [0.12.0] - 2026-09-14
 - Enforce non-executable stacks for Starlight binaries
 - Clean up invalid source pragmas
