@@ -13,6 +13,10 @@ void sl_app_host_tick(sl_ctx_t *ctx);
 void sl_app_host_slots_clear(void);
 void sl_app_host_slots_use_default(void);
 int sl_app_host_slot_configure(size_t index, const char *title, const char *exec_path, const char *exec_args);
+/* The app's bundle folder, where its resources/<language>/ are (after slot_configure). */
+int sl_app_host_slot_set_bundle(size_t index, const char *bundle_dir);
+/* The language SLUI apps get ("@SLUI HOST LANG"); running ones are told at once. */
+void sl_app_host_set_language(const char *code);
 /* Limits the rights of the app started in this slot (call after slot_configure). */
 int sl_app_host_slot_restrict_caps(size_t index, uint64_t caps_mask);
 /* Limits the filesystem the app may touch (call after slot_configure). */

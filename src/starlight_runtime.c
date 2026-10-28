@@ -8,6 +8,9 @@
 #include "damage.h"
 #include "desktop.h"
 #include "notify.h"
+#include "i18n.h"
+#include "app_host.h"
+#include "peos/lang.h"
 #include "sysmenu.h"
 
 #include <stdio.h>
@@ -576,6 +579,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->graphics_perf_enabled = 0u;
     ctx->show_perf = 0u;
     ctx->timezone_eu_central = 1u;
+    sl_copy_text(ctx->language, sizeof(ctx->language), PEOS_LANG_FALLBACK);
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
     if (!cfg) {
@@ -669,6 +673,8 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     if (sl_parse_u32(val, &n)) {
                         ctx->clipboard_feedback_visual_enabled = n ? 1u : 0u;
                     }
+                } else if (strcmp(key, "language") == 0 && peos_lang_code_valid(val)) {
+                    sl_copy_text(ctx->language, sizeof(ctx->language), val);
                 } else if (strcmp(key, "timezone") == 0) {
                     ctx->timezone_eu_central = (strcmp(val, "UTC") != 0) ? 1u : 0u;
                 } else if (strcmp(key, "show_performance") == 0) {
@@ -858,6 +864,8 @@ int sl_init(sl_ctx_t *ctx) {
     sl_ensure_config_dirs();
     sl_load_display_config(ctx);
     sl_load_starlight_config(ctx);
+    (void)sl_i18n_set(ctx->language);   // before anything with words is built
+    sl_app_host_set_language(ctx->language);
     sl_apply_animation_config(ctx);
     sl_apply_keyboard_config(ctx);
     sl_apply_clipboard_feedback_config(ctx);
@@ -930,6 +938,20 @@ void sl_reload_display(sl_ctx_t *ctx) {
     sl_cursor_init(ctx);
     if (ctx->hw_cursor) sl_hw_cursor_sync_pos(ctx);
 
+    sl_apply_language(ctx);
+    sl_dirty_mark_full();
+}
+
+// The sentences of ctx->language, for Starlight and for the apps. When it
+// changed, everything with words in it is laid out again: the windows'
+// caches, the desktop's widgets, the dock's titles.
+void sl_apply_language(sl_ctx_t *ctx) {
+    if (!ctx) return;
+    sl_app_host_set_language(ctx->language);
+    if (!sl_i18n_set(ctx->language)) return;
+    sl_windows_language_changed(ctx);
+    sl_windows_theme_changed(ctx);
+    sl_desk_build(ctx);
     sl_dirty_mark_full();
 }
 

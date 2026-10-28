@@ -1,5 +1,6 @@
 #include "clipboard.h"
 #include "starlight_internal.h"
+#include "i18n.h"
 
 #include "render/pixels.h"
 
@@ -408,9 +409,9 @@ void sl_clipboard_render_overlay(sl_ctx_t *ctx) {
     sl_fill_rect(ctx, panel_x, panel_y, 1u, panel_h, 90u, 110u, 140u);
     sl_fill_rect(ctx, panel_x + panel_w - 1u, panel_y, 1u, panel_h, 8u, 8u, 10u);
 
-    sl_draw_text(ctx, panel_x + 12u, panel_y + 10u, "Clipboard", 230u, 236u, 245u);
+    sl_draw_text(ctx, panel_x + 12u, panel_y + 10u, sl_tr("clip.title"), 230u, 236u, 245u);
     sl_draw_text(ctx, panel_x + 12u, panel_y + 28u,
-                 "Caps+A copia, Caps+S incolla, Invio seleziona",
+                 sl_tr("clip.help"),
                  150u, 164u, 184u);
 
     list_y = panel_y + 52u;
@@ -430,6 +431,6 @@ void sl_clipboard_render_overlay(sl_ctx_t *ctx) {
     }
 
     if (g_clipboard.count == 0u) {
-        sl_draw_text(ctx, panel_x + 16u, panel_y + 70u, "Clipboard vuota", 150u, 164u, 184u);
+        sl_draw_text(ctx, panel_x + 16u, panel_y + 70u, sl_tr("clip.empty"), 150u, 164u, 184u);
     }
 }

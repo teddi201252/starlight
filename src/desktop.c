@@ -7,6 +7,7 @@
 #include "peos/net.h"
 #include "ui_sdk.h"
 #include "notify.h"
+#include "i18n.h"
 #include "peos/audio.h"
 #include "peos/calendar_file.h"
 #include "peos/notify.h"
@@ -76,10 +77,23 @@ static struct {
 static uint8_t g_poller_stack[16384] __attribute__((aligned(16)));
 static uint8_t g_poller_started;
 
-static const char *const k_days[7] = { "Domenica", "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato" };
-static const char *const k_months[12] = { "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio",
-                                          "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre" };
-static const char *const k_week[7] = { "Lu", "Ma", "Me", "Gi", "Ve", "Sa", "Do" };
+// Day and month names: date.day.<0-6, Sunday first>, date.month.<0-11>,
+// date.week.<0-6, Monday first> in the language's sentences.
+static const char *sl_desk_day(int wday) {
+    static const char *const k[7] = { "date.day.0", "date.day.1", "date.day.2", "date.day.3", "date.day.4",
+                                      "date.day.5", "date.day.6" };
+    return sl_tr(k[wday % 7]);
+}
+
+static const char *sl_desk_month(int month) {
+    static const char *const k[12] = { "date.month.0", "date.month.1", "date.month.2", "date.month.3",
+                                       "date.month.4", "date.month.5", "date.month.6", "date.month.7",
+                                       "date.month.8", "date.month.9", "date.month.10", "date.month.11" };
+    return sl_tr(k[month % 12]);
+}
+
+static const char *const k_week[7] = { "date.week.0", "date.week.1", "date.week.2", "date.week.3",
+                                       "date.week.4", "date.week.5", "date.week.6" };
 
 // ------------------------------------------------------------------ poller
 
@@ -352,7 +366,7 @@ static void sl_desk_draw_bar(sl_ctx_t *ctx, const struct tm *now) {
         (void)sl_desk_mask(ctx, &t, g_desk.volume, r, cy, ink);
     }
     if (has_ip) snprintf(ip, sizeof(ip), "%u.%u.%u.%u", addr[0], addr[1], addr[2], addr[3]);
-    else snprintf(ip, sizeof(ip), "offline");
+    else snprintf(ip, sizeof(ip), "%s", sl_tr("desk.offline"));
     r -= 22 + (int32_t)sl_text_width(g_desk.bar, ip);
     sl_text_draw(&t, g_desk.bar, r, text_base, ip, has_ip ? ink[0] : muted[0], has_ip ? ink[1] : muted[1],
                  has_ip ? ink[2] : muted[2]);
@@ -375,7 +389,7 @@ static void sl_desk_draw_clock(sl_ctx_t *ctx, const struct tm *now) {
     sl_text_draw(&t, g_desk.digits, right - (int32_t)sl_text_width(g_desk.digits, hh), base, hh, ink[0], ink[1], ink[2]);
     base += 122;
     sl_text_draw(&t, g_desk.digits, right - (int32_t)sl_text_width(g_desk.digits, mm), base, mm, ink[0], ink[1], ink[2]);
-    const char *day = k_days[now->tm_wday % 7];
+    const char *day = sl_desk_day(now->tm_wday);
     base += 68;
     if (g_desk.hot == SL_DW_CLOCK) {   // under the mouse: the day in the accent
         const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
@@ -441,7 +455,7 @@ static void sl_desk_draw_calendar(sl_ctx_t *ctx, const struct tm *now, const sl_
     sl_desk_surface(ctx, &t, &card, x0, y0, SL_DESK_CAL_W, h, 34u);
 
     static const uint8_t text[3] = { 0xE8, 0xF4, 0xFF }, head[3] = { 0x9F, 0xB4, 0xD8 };
-    const char *title = k_months[month % 12];
+    const char *title = sl_desk_month(month);
     int32_t base = y0 + 24 + 22;
     sl_text_draw(&t, g_desk.cal_title, x0 + ((int32_t)SL_DESK_CAL_W - (int32_t)sl_text_width(g_desk.cal_title, title)) / 2,
                  base, title, text[0], text[1], text[2]);
@@ -449,7 +463,7 @@ static void sl_desk_draw_calendar(sl_ctx_t *ctx, const struct tm *now, const sl_
     base += 14 + 26;
     for (int c = 0; c < 7; c++) {
         int32_t cx = gx + c * cw + cw / 2;
-        sl_text_draw(&t, g_desk.cal, cx - (int32_t)sl_text_width(g_desk.cal, k_week[c]) / 2, base, k_week[c], head[0],
+        sl_text_draw(&t, g_desk.cal, cx - (int32_t)sl_text_width(g_desk.cal, sl_tr(k_week[c])) / 2, base, sl_tr(k_week[c]), head[0],
                      head[1], head[2]);
     }
     const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
@@ -640,7 +654,7 @@ static void sl_desk_draw_volume(sl_ctx_t *ctx, int32_t volume, const sl_desk_rec
     else snprintf(val, sizeof(val), "--");
     int32_t cx = r->x + (int32_t)r->w / 2, base = iy + SL_DESK_CAP_H - 36;
     sl_desk_text_centered(&t, g_desk.w_value, cx, base, val, neon);
-    sl_desk_text_centered(&t, g_desk.w_label, cx, base - 28, "Volume", neon);
+    sl_desk_text_centered(&t, g_desk.w_label, cx, base - 28, sl_tr("desk.volume"), neon);
 }
 
 // A round end of the arc: an anti-aliased disc of radius 3.5 at cx,cy.
@@ -722,8 +736,8 @@ static void sl_desk_draw_net(sl_ctx_t *ctx, const sl_desk_widgets_feed_t *f, con
     sl_blit_mask(&t, sl_skin_data(&ctx->skin, g), g->width, g->height, g->width, x0, y0, n->r, n->g, n->b, 255u);
     char ip[20];
     if (f->has_ip) snprintf(ip, sizeof(ip), "%u.%u.%u.%u", f->ip[0], f->ip[1], f->ip[2], f->ip[3]);
-    else snprintf(ip, sizeof(ip), "offline");
-    sl_text_draw(&t, g_desk.w_small, x0 + 56, y0 + 15, "Rete \xC2\xB7 netd", head[0], head[1], head[2]);
+    else snprintf(ip, sizeof(ip), "%s", sl_tr("desk.offline"));
+    sl_text_draw(&t, g_desk.w_small, x0 + 56, y0 + 15, sl_tr("desk.network"), head[0], head[1], head[2]);
     sl_text_draw(&t, g_desk.w_value, x0 + 56, y0 + 40, ip, text[0], text[1], text[2]);
 
     // Bars: the busiest poll is full height; older ones dimmer.
@@ -892,14 +906,15 @@ static void sl_desk_calendar_reminders(sl_ctx_t *ctx, int64_t minute) {
             if (at <= g_cal_checked || at > minute) continue;
             char text[PEOS_NOTIFY_TEXT_MAX];
             if (e->remind_min == 60u) {
-                snprintf(text, sizeof(text), "Tra 1 ora: %s (%02u:%02u)", e->title,
+                snprintf(text, sizeof(text), sl_tr("cal.remind_hour"), e->title,
                          (unsigned)(e->start_min / 60u), (unsigned)(e->start_min % 60u));
             } else {
-                snprintf(text, sizeof(text), "Tra %u min: %s (%02u:%02u)", (unsigned)e->remind_min, e->title,
+                snprintf(text, sizeof(text), sl_tr("cal.remind_min"), (unsigned)e->remind_min, e->title,
                          (unsigned)(e->start_min / 60u), (unsigned)(e->start_min % 60u));
             }
             printf("[CAL] reminder: %s\n", text);
-            sl_notify_post(ctx, "Calendario", text);
+            const char *cal = sl_windows_app_title("calendario");
+            sl_notify_post(ctx, cal ? cal : "Calendario", text);
         }
     }
     g_cal_checked = minute;
@@ -916,7 +931,8 @@ void sl_desk_tick(sl_ctx_t *ctx) {
     const void *task = (focused && !focused->minimized) ? (const void *)focused->task : NULL;
 
     uint8_t bar = 0u;
-    if (task != g_desk.focus_task) {
+    // a new window on top, or its title changed (the language)
+    if (task != g_desk.focus_task || (task && strncmp(focused->title, g_desk.focus_title, sizeof(g_desk.focus_title) - 1u) != 0)) {
         g_desk.focus_task = task;
         snprintf(g_desk.focus_title, sizeof(g_desk.focus_title), "%s", task ? focused->title : "");
         bar = 1u;
@@ -965,7 +981,7 @@ typedef struct {
     void (*drag)(sl_ctx_t *ctx, int32_t x, int32_t y);
     void (*release)(sl_ctx_t *ctx);
     void (*wheel)(sl_ctx_t *ctx, int32_t delta);
-    // A click: this function, or else open the app with this title (a
+    // A click: this function, or else open the app of this bundle id (a
     // notification says so when it is not installed yet).
     void (*click)(sl_ctx_t *ctx);
     const char *app;
@@ -990,11 +1006,11 @@ static void sl_desk_volume_release(sl_ctx_t *ctx) {
 // The registry: a new widget is a row here (and its rectangle and drawing).
 static const sl_desk_widget_t k_widgets[SL_DW_COUNT] = {
     [SL_DW_CLOCK] = { "orologio", NULL, NULL, NULL, NULL, sl_desk_clock_click, NULL },
-    [SL_DW_CAL] = { "calendario", NULL, NULL, NULL, NULL, NULL, "Calendario" },
+    [SL_DW_CAL] = { "calendario", NULL, NULL, NULL, NULL, NULL, "calendario" },
     [SL_DW_VOL] = { "volume", sl_desk_volume_press, sl_desk_volume_drag, sl_desk_volume_release, sl_desk_volume_step,
                     NULL, NULL },
-    [SL_DW_CPU] = { "cpu", NULL, NULL, NULL, NULL, NULL, "Monitor" },
-    [SL_DW_NET] = { "rete", NULL, NULL, NULL, NULL, NULL, "Impostazioni" },
+    [SL_DW_CPU] = { "cpu", NULL, NULL, NULL, NULL, NULL, "monitor" },
+    [SL_DW_NET] = { "rete", NULL, NULL, NULL, NULL, NULL, "impostazioni" },
 };
 
 static const sl_desk_rect_t *sl_desk_widget_rect(int id) {
@@ -1056,7 +1072,7 @@ static void sl_desk_set_volume(sl_ctx_t *ctx, int32_t v) {
     if (v < 0) v = 0;
     if (v > 100) v = 100;
     if (audio_set_volume((uint32_t)v) != 0) {
-        sl_notify_post(ctx, "Starlight", "Volume: Starlight non ha il permesso audio");
+        sl_notify_post(ctx, "Starlight", sl_tr("desk.no_audio"));
         return;
     }
     if (v == g_desk.local_volume && peos_time_ns() < g_desk.local_volume_until) return;
@@ -1108,9 +1124,9 @@ static void sl_desk_activate(sl_ctx_t *ctx, int id) {
         return;
     }
     if (!w->app) return;
-    if (!sl_windows_open_app_title(ctx, w->app)) {
+    if (!sl_windows_open_app_id(ctx, w->app)) {
         char msg[96];
-        snprintf(msg, sizeof(msg), "%s non e' ancora installata", w->app);
+        snprintf(msg, sizeof(msg), sl_tr("desk.not_installed"), w->app);
         sl_notify_post(ctx, "Starlight", msg);
     }
 }

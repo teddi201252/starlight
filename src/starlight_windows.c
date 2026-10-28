@@ -8,6 +8,8 @@
 #include "window.h"
 #include "peos/capability_parse.h"
 #include "peos/path_scope_parse.h"
+#include "peos/lang.h"
+#include "i18n.h"
 #include "keyboard_layout.h"
 
 #include <stdarg.h>
@@ -155,6 +157,7 @@ static uint8_t g_launcher_expanded = 0u;
 static uint32_t g_launcher_extra_width = 0u;
 static sl_window_rect_snapshot_t g_launcher_last_rect;
 static uint64_t g_launcher_next_scan_ns = 0ull;
+static uint8_t g_launcher_force_scan = 0u;      // the language changed: the titles too
 static peos_stat_t g_launcher_dir_stat[SL_APP_DIR_COUNT];   // g_app_dirs as of the last catalog scan
 static uint8_t g_launcher_dir_known = 0u;    // a bit per directory
 static sl_window_anim_t g_window_anims[SL_WIN_ANIM_MAX];
@@ -430,6 +433,27 @@ static const char *sl_resource_lookup(const sl_bundle_resource_t *resources,
     return NULL;
 }
 
+// The title in the chosen language: title= of the bundle's
+// resources/<language>/String.lang, else of resources/en/, else app.ini's.
+static void sl_localize_title(const char *bundle_dir, char *title, size_t cap) {
+    const char *codes[2] = {sl_i18n_code(), PEOS_LANG_FALLBACK};
+    for (uint32_t i = 0u; i < 2u; i++) {
+        char path[320];
+        snprintf(path, sizeof(path), "%s/resources/%s/" PEOS_LANG_FILE, bundle_dir, codes[i]);
+        if (peos_is_file(path, strlen(path)) <= 0) continue;
+        peos_lang_t lang = {0};
+        if (peos_lang_load(&lang, path) == 0) {
+            const char *t = peos_lang_get(&lang, "title");
+            if (t && t[0]) {
+                sl_copy_str(title, cap, t);
+                peos_lang_free(&lang);
+                return;
+            }
+        }
+        peos_lang_free(&lang);
+    }
+}
+
 static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir, sl_app_bundle_t *out) {
     if (!manifest_path || !out) return 0;
     FILE *f = fopen(manifest_path, "r");
@@ -536,6 +560,7 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
 
     fclose(f);
     if (raw_exec[0] == '\0') return 0;
+    if (bundle_dir && bundle_dir[0]) sl_localize_title(bundle_dir, out->title, sizeof(out->title));
     if (bundle_dir && bundle_dir[0]) {
         if (!sl_resolve_exec_path(bundle_dir, raw_exec, out->exec, sizeof(out->exec))) {
             return 0;
@@ -945,23 +970,19 @@ static int sl_dock_ready(const sl_ctx_t *ctx) {
     return 1;
 }
 
-// The baked tile set of an app: by its title, as the icons are named.
-static const char *sl_dock_skin_key(const char *title) {
-    static const struct { const char *title, *key; } map[] = {
-        { "orbit", "orbit" }, { "voyager", "voyager" }, { "calcolatrice", "calcolatrice" },
-        { "curiosity", "curiosity" }, { "impostazioni", "impostazioni" }, { "installa peos", "installer" },
-        { "installer", "installer" }, { "musica", "musica" }, { "rete", "rete" },
-        { "monitor", "monitor" }, { "sistema", "sistema" }, { "calendario", "calendario" },
+// The baked tile set of an app: by its bundle (<id>.app), as the icons are
+// named; not by the title, which follows the language.
+static const char *sl_dock_skin_key(const char *bundle_path) {
+    static const struct { const char *id, *key; } map[] = {
+        { "terminale", "orbit" }, { "voyager", "voyager" }, { "calcolatrice", "calcolatrice" },
+        { "curiosity", "curiosity" }, { "impostazioni", "impostazioni" }, { "installer", "installer" },
+        { "monitor", "monitor" }, { "calendario", "calendario" },
     };
-    char low[64];
-    size_t i = 0u;
-    for (; title && title[i] && i + 1u < sizeof(low); i++) {
-        char c = title[i];
-        low[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-    }
-    low[i] = '\0';
+    const char *base = bundle_path ? strrchr(bundle_path, '/') : NULL;
+    base = base ? base + 1 : (bundle_path ? bundle_path : "");
     for (size_t k = 0u; k < sizeof(map) / sizeof(map[0]); k++) {
-        if (strcmp(low, map[k].title) == 0) return map[k].key;
+        size_t n = strlen(map[k].id);
+        if (strncmp(base, map[k].id, n) == 0 && strcmp(base + n, ".app") == 0) return map[k].key;
     }
     return NULL;
 }
@@ -1010,7 +1031,7 @@ static void sl_dock_resolve(const sl_ctx_t *ctx, sl_launcher_item_t *item) {
     static const char *night[SL_DOCK_TILE_SETS] = { "dock-n", "dock-hi-n", "dock-down", "manager-n", "manager-hi-n" };
     static const char *icon_set[SL_DOCK_TILE_SETS] = { "icon44", "icon48", "icon41", "icon66", "icon72" };
     const char *const *sets = sl_ui_runtime_night() ? night : day;
-    const char *key = sl_dock_skin_key(item->title);
+    const char *key = sl_dock_skin_key(item->bundle_path);
     item->tile_custom = 0u;
     for (int k = 0; k < SL_DOCK_TILE_SETS; k++) {
         char name[SLSK_NAME_MAX];
@@ -1046,7 +1067,7 @@ static void sl_dock_resolve(const sl_ctx_t *ctx, sl_launcher_item_t *item) {
 
 static size_t sl_dock_settings_item(void) {
     for (size_t i = 0u; i < g_launcher_count; i++) {
-        const char *key = sl_dock_skin_key(g_launcher_items[i].title);
+        const char *key = sl_dock_skin_key(g_launcher_items[i].bundle_path);
         if (key && strcmp(key, "impostazioni") == 0) return i;
     }
     return (size_t)-1;
@@ -1123,7 +1144,9 @@ typedef struct {
 static char g_mgr_query[40];
 static uint8_t g_mgr_cat = SL_CAT_ALL;
 static uint8_t g_mgr_shift = 0u, g_mgr_altgr = 0u;
-static const char *const g_mgr_cat_labels[SL_CAT_COUNT] = { "Tutte", "Sistema", "Strumenti", "Svago" };
+static const char *const g_mgr_cat_keys[SL_CAT_COUNT] = { "apps.cat.all", "apps.cat.system", "apps.cat.tools",
+                                                          "apps.cat.fun" };
+#define g_mgr_cat_labels(c) sl_tr(g_mgr_cat_keys[c])
 
 // ASCII case-insensitive "needle in hay" (accented letters must match).
 static int sl_mgr_matches(const char *hay, const char *needle) {
@@ -1236,12 +1259,14 @@ static void sl_mgr_header(const sl_dock_layout_t *L, sl_mgr_header_t *H) {
     H->y = L->gy > 8u ? L->gy - 8u : 0u;
     uint32_t seg_w = 2u * SL_MGR_SEG_PAD;
     for (int c = 0; c < SL_CAT_COUNT; c++) {
-        H->cell_w[c] = sl_text_width(g_dock.label, g_mgr_cat_labels[c]) + 2u * SL_MGR_SEG_CELL_PAD;
+        H->cell_w[c] = sl_text_width(g_dock.label, g_mgr_cat_labels(c)) + 2u * SL_MGR_SEG_CELL_PAD;
         seg_w += H->cell_w[c];
     }
     uint32_t right = L->gx + L->gw;
-    uint32_t title_w = sl_text_width(g_dock.title, "App");
-    uint32_t count_w = 14u + sl_text_width(g_dock.label, "000 nella cartella");
+    uint32_t title_w = sl_text_width(g_dock.title, sl_tr("apps.header"));
+    char widest[48];
+    snprintf(widest, sizeof(widest), sl_tr("apps.count_all"), 888u);
+    uint32_t count_w = 14u + sl_text_width(g_dock.label, widest);
     uint32_t left = L->gx + title_w + 22u;
     uint32_t room = right > left ? right - left : 0u;
     H->search_w = SL_MGR_SEARCH_W;
@@ -1480,12 +1505,12 @@ enum { SL_CTX_OPEN, SL_CTX_SHOW, SL_CTX_CLOSE, SL_CTX_PIN, SL_CTX_UNPIN, SL_CTX_
 
 static const char *sl_launcher_context_action_name(uint8_t action) {
     switch (action) {
-        case SL_CTX_OPEN: return "Apri";
-        case SL_CTX_SHOW: return "Mostra";
-        case SL_CTX_CLOSE: return "Chiudi";
-        case SL_CTX_PIN: return "Fissa nel dock";
-        case SL_CTX_UNPIN: return "Togli dal dock";
-        default: return "Informazioni";
+        case SL_CTX_OPEN: return sl_tr("apps.ctx.open");
+        case SL_CTX_SHOW: return sl_tr("apps.ctx.show");
+        case SL_CTX_CLOSE: return sl_tr("apps.ctx.close");
+        case SL_CTX_PIN: return sl_tr("apps.ctx.pin");
+        case SL_CTX_UNPIN: return sl_tr("apps.ctx.unpin");
+        default: return sl_tr("apps.ctx.info");
     }
 }
 
@@ -1579,9 +1604,9 @@ static uint32_t sl_launcher_info_build(size_t item_index) {
 
     uint32_t n = 0u;
     sl_launcher_info_append(&n, "%s", item->title);
-    if (item->bundle_path[0] != '\0') sl_launcher_info_append(&n, "Bundle: %s", item->bundle_path);
+    if (item->bundle_path[0] != '\0') sl_launcher_info_append(&n, sl_tr("apps.info.bundle"), item->bundle_path);
     if (have) {
-        sl_launcher_info_append(&n, "Programma: %s", app.exec);
+        sl_launcher_info_append(&n, sl_tr("apps.info.program"), app.exec);
         char list[112];
         size_t len = 0u;
         list[0] = '\0';
@@ -1591,7 +1616,7 @@ static uint32_t sl_launcher_info_build(size_t item_index) {
             if (w < 0 || (size_t)w >= sizeof(list) - len) break;
             len += (size_t)w;
         }
-        sl_launcher_info_append(&n, "Permessi: %s", len ? list : "nessuno");
+        sl_launcher_info_append(&n, sl_tr("apps.info.rights"), len ? list : sl_tr("apps.info.none_rights"));
         len = 0u;
         list[0] = '\0';
         for (uint32_t i = 0u; i < app.path_count && i < PEOS_PATH_MAX_GRANTS; i++) {
@@ -1601,12 +1626,12 @@ static uint32_t sl_launcher_info_build(size_t item_index) {
             if (w < 0 || (size_t)w >= sizeof(list) - len) break;
             len += (size_t)w;
         }
-        sl_launcher_info_append(&n, "Cartelle: %s", len ? list : "nessuna");
-        sl_launcher_info_append(&n, "Finestra: %ux%u", (unsigned)app.width, (unsigned)app.height);
+        sl_launcher_info_append(&n, sl_tr("apps.info.folders"), len ? list : sl_tr("apps.info.none_folders"));
+        sl_launcher_info_append(&n, sl_tr("apps.info.window"), (unsigned)app.width, (unsigned)app.height);
     }
     app_instance_t *inst = sl_app_host_instance_peek_at(item->slot);
-    sl_launcher_info_append(&n, "Stato: %s",
-                            (inst && sl_window_index_for_task(inst) != (size_t)-1) ? "aperta" : "chiusa");
+    sl_launcher_info_append(&n, sl_tr("apps.info.state"),
+                            sl_tr((inst && sl_window_index_for_task(inst) != (size_t)-1) ? "apps.info.open" : "apps.info.closed"));
     return n;
 }
 
@@ -2095,6 +2120,7 @@ int sl_windows_open_app_bundle_path(sl_ctx_t *ctx, const char *bundle_path) {
     if (!sl_app_host_slot_configure(slot, app.title, app.exec, app.args)) return 0;
     if (!sl_app_host_slot_restrict_caps(slot, app.caps_mask)) return 0;
     if (!sl_app_host_slot_restrict_paths(slot, app.paths, app.path_count)) return 0;
+    if (!sl_app_host_slot_set_bundle(slot, bundle_path)) return 0;
     if (!sl_launcher_add_item(slot, &app, bundle_path)) return 0;
     sl_dirty_mark_full();
     return sl_windows_open_launcher_item(ctx, g_launcher_count - 1u);
@@ -2153,7 +2179,8 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
         if (!sl_app_host_slot_configure(slot, entry->app.title,
                                         entry->app.exec, entry->app.args) ||
             !sl_app_host_slot_restrict_caps(slot, entry->app.caps_mask) ||
-            !sl_app_host_slot_restrict_paths(slot, entry->app.paths, entry->app.path_count)) {
+            !sl_app_host_slot_restrict_paths(slot, entry->app.paths, entry->app.path_count) ||
+            !sl_app_host_slot_set_bundle(slot, entry->bundle_path)) {
             continue;
         }
 
@@ -2196,6 +2223,16 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
     g_launcher_items = next;
     g_launcher_count = next_count;
     g_launcher_cap = count;
+    // An open window follows its app's title (the language changed).
+    uint8_t retitled = 0u;
+    for (size_t i = 0u; i < g_launcher_count; i++) {
+        if (!g_launcher_items[i].instance) continue;
+        size_t w = sl_window_index_for_task(g_launcher_items[i].instance);
+        if (w == (size_t)-1 || strcmp(g_windows[w].title, g_launcher_items[i].title) == 0) continue;
+        sl_copy_str(g_windows[w].title, sizeof(g_windows[w].title), g_launcher_items[i].title);
+        retitled = 1u;
+    }
+    if (retitled) sl_windows_theme_changed(ctx);   // the title bars are drawn again
     g_launcher_hover_index = (size_t)-1;
     g_launcher_ctx_open = 0u;
     g_launcher_ctx_item_index = (size_t)-1;
@@ -2243,12 +2280,20 @@ static uint8_t sl_launcher_dir_changed(void) {
     return changed;
 }
 
+void sl_windows_language_changed(sl_ctx_t *ctx) {
+    (void)ctx;
+    g_launcher_force_scan = 1u;
+    g_launcher_next_scan_ns = 0ull;
+}
+
 static void sl_launcher_tick_catalog(sl_ctx_t *ctx) {
     if (!ctx) return;
     uint64_t now = peos_time_ns();
     if (now < g_launcher_next_scan_ns) return;
     g_launcher_next_scan_ns = now + SL_APP_CATALOG_SCAN_INTERVAL_NS;
-    if (!sl_launcher_dir_changed()) return;
+    uint8_t changed = sl_launcher_dir_changed();
+    if (!changed && !g_launcher_force_scan) return;
+    g_launcher_force_scan = 0u;
 
     sl_scanned_app_t *entries = NULL;
     size_t count = 0u;
@@ -2452,21 +2497,29 @@ int sl_windows_any_at(uint32_t x, uint32_t y) {
     return 0;
 }
 
-int sl_windows_open_app_title(sl_ctx_t *ctx, const char *title) {
-    if (!ctx || !title) return 0;
+// The launcher item of the bundle <id>.app, in /system/apps or /apps.
+static size_t sl_launcher_find_id(const char *id) {
+    if (!id) return (size_t)-1;
+    size_t n = strlen(id);
     for (size_t i = 0; i < g_launcher_count; i++) {
-        const char *a = g_launcher_items[i].title, *b = title;
-        for (; *a && *b; a++, b++) {
-            char x = *a, y = *b;
-            if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
-            if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
-            if (x != y) break;
-        }
-        if (*a || *b) continue;
-        (void)sl_windows_open_launcher_item(ctx, i);
-        return 1;
+        const char *base = strrchr(g_launcher_items[i].bundle_path, '/');
+        base = base ? base + 1 : g_launcher_items[i].bundle_path;
+        if (strncmp(base, id, n) == 0 && strcmp(base + n, ".app") == 0) return i;
     }
-    return 0;
+    return (size_t)-1;
+}
+
+int sl_windows_open_app_id(sl_ctx_t *ctx, const char *id) {
+    if (!ctx) return 0;
+    size_t i = sl_launcher_find_id(id);
+    if (i == (size_t)-1) return 0;
+    (void)sl_windows_open_launcher_item(ctx, i);
+    return 1;
+}
+
+const char *sl_windows_app_title(const char *id) {
+    size_t i = sl_launcher_find_id(id);
+    return i == (size_t)-1 ? NULL : g_launcher_items[i].title;
 }
 
 void sl_windows_focus_at_cursor(uint32_t x, uint32_t y) {
@@ -3180,13 +3233,13 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
 
     const slsk_font_t *title = g_dock.title;
     int32_t base = (int32_t)L.gy + title->ascent;
-    int32_t end = sl_text_draw(&in, title, (int32_t)L.gx, base, "App", SL_DOCK_INK);
+    int32_t end = sl_text_draw(&in, title, (int32_t)L.gx, base, sl_tr("apps.header"), SL_DOCK_INK);
     sl_mgr_header_t H;
     sl_mgr_header(&L, &H);
     if (H.show_count) {
-        char count[40];
-        if (L.mgr_count == g_launcher_count) snprintf(count, sizeof(count), "%u nella cartella", (unsigned)g_launcher_count);
-        else snprintf(count, sizeof(count), "%u di %u", (unsigned)L.mgr_count, (unsigned)g_launcher_count);
+        char count[64];
+        if (L.mgr_count == g_launcher_count) snprintf(count, sizeof(count), sl_tr("apps.count_all"), (unsigned)g_launcher_count);
+        else snprintf(count, sizeof(count), sl_tr("apps.count_some"), (unsigned)L.mgr_count, (unsigned)g_launcher_count);
         sl_text_draw(&in, g_dock.label, end + 14, base, count, SL_DOCK_MUTED);
     }
 
@@ -3196,14 +3249,14 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
     uint32_t cell_h = SL_MGR_HDR_H - 2u * SL_MGR_SEG_PAD;
     sl_ui_ctx_surface(ctx, SL_UI_SURF_RAISED, H.seg_x, H.y, H.seg_w, SL_MGR_HDR_H, SL_MGR_HDR_H / 2u);
     for (int c = 0; c < SL_CAT_COUNT; c++) {
-        uint32_t lw = sl_text_width(lf, g_mgr_cat_labels[c]);
+        uint32_t lw = sl_text_width(lf, g_mgr_cat_labels(c));
         int32_t lx = (int32_t)(H.cell_x[c] + (H.cell_w[c] - lw) / 2u);
         int32_t lb = (int32_t)(H.y + SL_MGR_HDR_H / 2u) + (lf->ascent - lf->descent) / 2;
         if ((uint8_t)c == g_mgr_cat) {
             sl_ui_ctx_surface(ctx, SL_UI_SURF_NIGHT_FLAT, H.cell_x[c], H.y + SL_MGR_SEG_PAD, H.cell_w[c], cell_h, cell_h / 2u);
-            sl_text_draw(&in, lf, lx, lb, g_mgr_cat_labels[c], neon->r, neon->g, neon->b);
+            sl_text_draw(&in, lf, lx, lb, g_mgr_cat_labels(c), neon->r, neon->g, neon->b);
         } else {
-            sl_text_draw(&in, lf, lx, lb, g_mgr_cat_labels[c], SL_DOCK_MUTED);
+            sl_text_draw(&in, lf, lx, lb, g_mgr_cat_labels(c), SL_DOCK_MUTED);
         }
     }
 
@@ -3222,7 +3275,7 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
         if (fx1 < ft.clip_x1) ft.clip_x1 = fx1;
         int32_t caret = tx - 4;   // before the hint
         if (g_mgr_query[0]) caret = sl_text_draw(&ft, sf, tx, tb, g_mgr_query, SL_DOCK_INK);
-        else sl_text_draw(&ft, sf, tx, tb, "Cerca un'app", SL_DOCK_MUTED);
+        else sl_text_draw(&ft, sf, tx, tb, sl_tr("apps.search"), SL_DOCK_MUTED);
         if (sl_dock_expanded_fully() && caret < fx1) {
             sl_fill_rect(ctx, (uint32_t)caret + 1u, (uint32_t)(tb - sf->ascent), 2u, (uint32_t)(sf->ascent + sf->descent),
                          neon->r, neon->g, neon->b);
@@ -3248,7 +3301,7 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
     }
     if (L.mgr_count == 0u) {
         sl_text_draw(&in, g_dock.search, (int32_t)L.gx, (int32_t)L.grid_top + g_dock.search->ascent,
-                     g_mgr_query[0] ? "Nessuna app con questo nome" : "Nessuna app in questa categoria", SL_DOCK_MUTED);
+                     sl_tr(g_mgr_query[0] ? "apps.none_name" : "apps.none_cat"), SL_DOCK_MUTED);
     }
     if (saved) sl_clip_set(ctx, scx, scy, scw, sch);
     else sl_clip_clear(ctx);
