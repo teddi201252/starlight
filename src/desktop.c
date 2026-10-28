@@ -44,7 +44,7 @@ enum { SL_DW_CLOCK = 0, SL_DW_CAL, SL_DW_VOL, SL_DW_CPU, SL_DW_NET, SL_DW_COUNT 
 static struct {
     uint8_t ready;
     const slsk_font_t *bar, *bar_bold, *digits, *day, *date, *cal_title, *cal, *cal_bold;
-    const slsk_entry_t *star, *wifi, *volume, *globe;
+    const slsk_entry_t *logo, *wifi, *volume, *globe;
     const slsk_font_t *w_label, *w_value, *w_small, *mono, *mono_small;
     sl_desk_rect_t bar_r, clock_r, cal_r;
     sl_desk_rect_t vol_r, cpu_r, net_r;   // the widgets themselves (0 wide: no room)
@@ -218,7 +218,7 @@ static int sl_desk_ready(sl_ctx_t *ctx) {
     g_desk.cal_title = sl_desk_font(ctx, "mono-24");
     g_desk.cal = sl_desk_font(ctx, "mono-16");
     g_desk.cal_bold = sl_desk_font(ctx, "mono-16-bold");
-    g_desk.star = sl_skin_find(&ctx->skin, "bar-star");
+    g_desk.logo = sl_skin_find(&ctx->skin, "bar-logo");
     g_desk.wifi = sl_skin_find(&ctx->skin, "bar-wifi");
     g_desk.volume = sl_skin_find(&ctx->skin, "bar-volume");
     g_desk.globe = sl_skin_find(&ctx->skin, "globe-40");
@@ -228,7 +228,7 @@ static int sl_desk_ready(sl_ctx_t *ctx) {
     g_desk.mono = sl_desk_font(ctx, "mono-16");
     g_desk.mono_small = sl_desk_font(ctx, "mono-13");
     if (!g_desk.bar || !g_desk.bar_bold || !g_desk.digits || !g_desk.day || !g_desk.date || !g_desk.cal_title ||
-        !g_desk.cal || !g_desk.cal_bold || !g_desk.star || !g_desk.wifi || !g_desk.volume || !g_desk.globe ||
+        !g_desk.cal || !g_desk.cal_bold || !g_desk.logo || !g_desk.wifi || !g_desk.volume || !g_desk.globe ||
         !g_desk.w_label || !g_desk.w_value || !g_desk.w_small || !g_desk.mono || !g_desk.mono_small) {
         peos_puts("starlight: skin lacks the desktop widgets\n");
         return 0;
@@ -341,10 +341,10 @@ static void sl_desk_draw_bar(sl_ctx_t *ctx, const struct tm *now) {
     int32_t cy = (int32_t)SL_DESK_BAR_H / 2;
     int32_t text_base = cy + 5;
 
-    // Left: the star, STARLIGHT, the app in front. Right of the dock when
+    // Left: the PeOS logo, STARLIGHT, the app in front. Right of the dock when
     // the dock reaches up into the bar.
     int32_t x = ctx->fb.height < 800u ? (int32_t)SL_DESK_LEFT : 40;
-    x = sl_desk_mask(ctx, &t, g_desk.star, x, cy, ink) + 14;
+    x = sl_desk_mask(ctx, &t, g_desk.logo, x, cy, ink) + 14;
     x = sl_text_draw(&t, g_desk.bar_bold, x, text_base, "STARLIGHT", ink[0], ink[1], ink[2]) + 14;
     if (g_desk.focus_title[0]) sl_text_draw(&t, g_desk.bar, x, text_base, g_desk.focus_title, muted[0], muted[1], muted[2]);
 
