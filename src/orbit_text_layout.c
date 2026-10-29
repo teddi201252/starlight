@@ -34,3 +34,22 @@ size_t orbit_text_copy_row(const char *text, size_t text_len,
     out[count] = '\0';
     return count;
 }
+
+size_t orbit_text_rows_at(size_t text_len, uint32_t columns, size_t cursor) {
+    if (columns == 0u) return 0u;
+    size_t rows = orbit_text_row_count(text_len, columns, 0u);
+    size_t cursor_rows = (cursor / columns) + 1u;
+    return (cursor_rows > rows) ? cursor_rows : rows;
+}
+
+int orbit_text_put(char *buf, size_t cap, size_t *len, size_t *cursor, char c) {
+    if (!buf || !len || !cursor) return 0;
+    size_t at = *cursor;
+    if (at + 2u > cap) return 0;
+    while (*len < at) buf[(*len)++] = ' ';   // the cursor was moved past the end
+    buf[at] = c;
+    if (at == *len) (*len)++;
+    buf[*len] = '\0';
+    *cursor = at + 1u;
+    return 1;
+}

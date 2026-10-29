@@ -3,6 +3,7 @@
 #include "context_menu_renderer.h"
 #include "keyboard_layout.h"
 #include "orbit_text_layout.h"
+#include "i18n.h"
 #include "ui_sdk.h"
 #include "render/image_decode.h"
 #include "peos/orbitfb.h"
@@ -15,8 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ORBIT_MAX_LINES 256u
-#define ORBIT_LINE_CHARS 160u
+#define ORBIT_MAX_LINES 5000u          // the scrollback: older lines are dropped
+#define ORBIT_LINE_MAX_CHARS 16384u    // a longer line goes on in the next one
 #define ORBIT_DRAW_ROW_CHARS 512u
 #define ORBIT_PENDING_LINE_INITIAL_CHARS 256u
 #define ORBIT_TITLE_CHARS 64u
@@ -263,12 +264,28 @@ typedef struct {
 } orbit_surface_t;
 
 typedef struct {
-    char lines[ORBIT_MAX_LINES][ORBIT_LINE_CHARS];
+    char *text;
+    uint32_t len;
+} orbit_line_t;
+
+typedef struct {
+    orbit_line_t *lines;        // a ring of ORBIT_MAX_LINES, allocated at the first line
     size_t line_head;
     size_t line_count;
+    uint32_t rows_cols;         // rows_total counts the rows of the lines at this width
+    size_t rows_total;
+    size_t scroll_back;         // rows scrolled up from the bottom (0: follows the output)
+    uint8_t new_output;         // output came while scrolled up: the pill shows
+    uint8_t scroll_drag;        // the scrollbar thumb is held
+    uint32_t drag_grab_y;       // where in the thumb it was taken
+    uint32_t view_rows;         // the last drawing: rows shown, the bar and the pill
+    uint32_t bar_x, bar_y, bar_w, bar_h;
+    uint32_t thumb_y, thumb_h;
+    uint32_t pill_x, pill_y, pill_w, pill_h;
     char *pending_line;
     size_t pending_len;
     size_t pending_cap;
+    size_t pending_cursor;      // the column the next character goes to
     uint8_t shift_down;
     uint8_t caps_lock_on;
     uint8_t ctrl_down;
@@ -337,6 +354,7 @@ static int orbit_pending_line_reserve(orbit_shell_t *shell, size_t need_cap) {
 static void orbit_pending_line_reset(orbit_shell_t *shell) {
     if (!shell) return;
     shell->pending_len = 0u;
+    shell->pending_cursor = 0u;
     if (shell->pending_line && shell->pending_cap > 0u) {
         shell->pending_line[0] = '\0';
     }
@@ -2238,23 +2256,74 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
     return 1;
 }
 
-static void orbit_push_line(orbit_shell_t *shell, const char *line) {
-    if (!shell || !line) return;
-    size_t slot = (shell->line_head + shell->line_count) % ORBIT_MAX_LINES;
-    orbit_copy_str(shell->lines[slot], ORBIT_LINE_CHARS, line);
+static size_t orbit_line_rows(uint32_t len, uint32_t cols) {
+    return orbit_text_row_count(len, cols, 0u);
+}
 
+static void orbit_push_line_n(orbit_shell_t *shell, const char *line, size_t len) {
+    if (!shell || !line) return;
+    if (!shell->lines) {
+        shell->lines = (orbit_line_t *)calloc(ORBIT_MAX_LINES, sizeof(orbit_line_t));
+        if (!shell->lines) return;
+    }
+    while (len > 0u && line[len - 1u] == ' ') len--;   // the cursor moved past the text
+    if (len > ORBIT_LINE_MAX_CHARS) len = ORBIT_LINE_MAX_CHARS;
+    char *text = (char *)malloc(len + 1u);
+    if (!text) return;
+    peos_memcpy(text, line, len);
+    text[len] = '\0';
+
+    size_t slot = (shell->line_head + shell->line_count) % ORBIT_MAX_LINES;
     if (shell->line_count < ORBIT_MAX_LINES) {
         shell->line_count++;
-    } else {
+    } else {   // the oldest line goes
+        orbit_line_t *old = &shell->lines[shell->line_head];
+        if (shell->rows_cols) shell->rows_total -= orbit_line_rows(old->len, shell->rows_cols);
+        free(old->text);
+        old->text = NULL;
         shell->line_head = (shell->line_head + 1u) % ORBIT_MAX_LINES;
     }
+    shell->lines[slot].text = text;
+    shell->lines[slot].len = (uint32_t)len;
+    if (shell->rows_cols) {
+        size_t rows = orbit_line_rows((uint32_t)len, shell->rows_cols);
+        shell->rows_total += rows;
+        // Scrolled up, the view stays where it is.
+        if (shell->scroll_back) {
+            shell->scroll_back += rows;
+            shell->new_output = 1u;
+        }
+    }
+}
+
+static void orbit_push_line(orbit_shell_t *shell, const char *line) {
+    if (!line) return;
+    orbit_push_line_n(shell, line, peos_strlen(line));
 }
 
 static void orbit_clear_text_buffer(orbit_shell_t *shell) {
     if (!shell) return;
+    if (shell->lines) {
+        for (size_t i = 0u; i < shell->line_count; i++) {
+            orbit_line_t *l = &shell->lines[(shell->line_head + i) % ORBIT_MAX_LINES];
+            free(l->text);
+            l->text = NULL;
+            l->len = 0u;
+        }
+    }
     shell->line_head = 0u;
     shell->line_count = 0u;
+    shell->rows_total = 0u;
+    shell->scroll_back = 0u;
+    shell->new_output = 0u;
     orbit_pending_line_reset(shell);
+}
+
+static void orbit_lines_free(orbit_shell_t *shell) {
+    if (!shell) return;
+    orbit_clear_text_buffer(shell);
+    free(shell->lines);
+    shell->lines = NULL;
 }
 
 static uint32_t orbit_parse_csi_first_param(const char *buf, size_t len) {
@@ -2274,11 +2343,34 @@ static uint32_t orbit_parse_csi_first_param(const char *buf, size_t len) {
 
 static void orbit_ansi_finish(orbit_shell_t *shell, char final) {
     if (!shell) return;
-    if (final == 'J') {
-        uint32_t mode = orbit_parse_csi_first_param(shell->csi_buf, shell->csi_len);
-        if (mode == 0u || mode == 2u || mode == 3u) {
+    uint32_t n = orbit_parse_csi_first_param(shell->csi_buf, shell->csi_len);
+    switch (final) {
+    case 'J':
+        if (n == 0u || n == 2u || n == 3u) {
             orbit_clear_text_buffer(shell);
         }
+        break;
+    case 'C':   // the cursor forward n, in the line being written
+        shell->pending_cursor += n ? n : 1u;
+        if (shell->pending_cursor >= ORBIT_LINE_MAX_CHARS) shell->pending_cursor = ORBIT_LINE_MAX_CHARS - 1u;
+        break;
+    case 'D':   // back n
+        if (n == 0u) n = 1u;
+        shell->pending_cursor = (shell->pending_cursor > n) ? shell->pending_cursor - n : 0u;
+        break;
+    case 'G':   // to column n (from 1)
+        shell->pending_cursor = n ? n - 1u : 0u;
+        break;
+    case 'K':   // erase in the line: 0 to its end, 2 all of it
+        if (n == 0u && shell->pending_cursor < shell->pending_len) {
+            shell->pending_len = shell->pending_cursor;
+        } else if (n == 2u) {
+            shell->pending_len = 0u;
+        }
+        if (shell->pending_line) shell->pending_line[shell->pending_len] = '\0';
+        break;
+    default:
+        break;
     }
 }
 
@@ -2362,7 +2454,10 @@ static void orbit_reset_buffer(orbit_shell_t *shell) {
 static void orbit_feed_char(orbit_shell_t *shell, char c) {
     if (!shell) return;
     if (orbit_feed_ansi(shell, c)) return;
-    if (c == '\r') return;
+    if (c == '\r') {
+        shell->pending_cursor = 0u;
+        return;
+    }
 
     if (c == '\f') {
         orbit_clear_text_buffer(shell);
@@ -2375,18 +2470,15 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
         if (!orbit_fb_handle_line(shell, line)) {
             shell->surface.active = 0u;
             if (!orbit_ui_handle_line(shell, line)) {
-                orbit_push_line(shell, line);
+                orbit_push_line_n(shell, line, shell->pending_len);
             }
         }
         orbit_pending_line_reset(shell);
         return;
     }
 
-    if (c == '\b') {
-        if (shell->pending_len > 0u) {
-            shell->pending_len--;
-            if (shell->pending_line) shell->pending_line[shell->pending_len] = '\0';
-        }
+    if (c == '\b') {   // the cursor back one: "\b \b" erases
+        if (shell->pending_cursor > 0u) shell->pending_cursor--;
         return;
     }
 
@@ -2394,16 +2486,20 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
     if (shell->surface.active && shell->pending_len == 0u && c != '@') {
         shell->surface.active = 0u;
     }
-    if (!orbit_pending_line_reserve(shell, shell->pending_len + 2u)) {
+    if (shell->pending_cursor >= ORBIT_LINE_MAX_CHARS) {   // too long: it goes on in a new line
+        orbit_push_line_n(shell, shell->pending_line ? shell->pending_line : "", shell->pending_len);
+        orbit_pending_line_reset(shell);
+    }
+    size_t end = (shell->pending_cursor > shell->pending_len) ? shell->pending_cursor : shell->pending_len;
+    if (!orbit_pending_line_reserve(shell, end + 2u)) {
         if (shell->pending_line && shell->pending_len > 0u) {
-            shell->pending_line[shell->pending_len] = '\0';
-            orbit_push_line(shell, shell->pending_line);
+            orbit_push_line_n(shell, shell->pending_line, shell->pending_len);
         }
         orbit_pending_line_reset(shell);
         return;
     }
-    shell->pending_line[shell->pending_len++] = c;
-    shell->pending_line[shell->pending_len] = '\0';
+    (void)orbit_text_put(shell->pending_line, shell->pending_cap, &shell->pending_len,
+                         &shell->pending_cursor, c);
 }
 
 static void orbit_feed_text(orbit_shell_t *shell, const char *text, size_t len) {
@@ -2588,6 +2684,7 @@ static void orbit_stop_process(orbit_shell_t *shell) {
 
 static void orbit_on_close(void *userdata) {
     orbit_stop_process((orbit_shell_t *)userdata);
+    orbit_lines_free((orbit_shell_t *)userdata);   // the scrollback goes with the window
 }
 
 static void orbit_mark_child_exited(orbit_shell_t *shell) {
@@ -2656,6 +2753,71 @@ static void orbit_send_input(orbit_shell_t *shell, const char *buf, size_t len) 
     }
 }
 
+// The plain terminal: not a SLUI app, not a surface of pixels.
+static uint8_t orbit_is_text_terminal(const orbit_shell_t *shell) {
+    return (!(shell->ui.enabled && shell->ui.committed) &&
+            !shell->surface.active && !shell->surface.receiving) ? 1u : 0u;
+}
+
+static size_t orbit_scroll_max(const orbit_shell_t *shell) {
+    size_t total = shell->rows_total;
+    if (shell->rows_cols && (shell->pending_len || shell->pending_cursor)) {
+        total += orbit_text_rows_at(shell->pending_len, shell->rows_cols, shell->pending_cursor);
+    }
+    return (total > shell->view_rows) ? total - shell->view_rows : 0u;
+}
+
+// dir 1 up, -1 down; pages: half a view each, else three rows.
+static void orbit_scroll_by(orbit_shell_t *shell, int32_t steps, uint8_t pages) {
+    if (!shell || steps == 0) return;
+    size_t unit = pages ? ((shell->view_rows > 2u) ? shell->view_rows / 2u : 1u) : 3u;
+    size_t max = orbit_scroll_max(shell);
+    if (steps > 0) {
+        size_t add = unit * (size_t)steps;
+        shell->scroll_back = (shell->scroll_back + add > max) ? max : shell->scroll_back + add;
+    } else {
+        size_t sub = unit * (size_t)(-steps);
+        shell->scroll_back = (shell->scroll_back > sub) ? shell->scroll_back - sub : 0u;
+    }
+    if (shell->scroll_back == 0u) shell->new_output = 0u;
+}
+
+static void orbit_scroll_to_thumb(orbit_shell_t *shell, uint32_t mouse_y) {
+    size_t max = orbit_scroll_max(shell);
+    if (max == 0u || shell->bar_h <= shell->thumb_h) return;
+    uint32_t span = shell->bar_h - shell->thumb_h;
+    int64_t top = (int64_t)mouse_y - (int64_t)shell->drag_grab_y - (int64_t)shell->bar_y;
+    if (top < 0) top = 0;
+    if (top > (int64_t)span) top = span;
+    // The top of the thumb is the first row shown: span is the oldest.
+    size_t first = (size_t)(((uint64_t)top * max + span / 2u) / span);
+    shell->scroll_back = max - first;
+    if (shell->scroll_back == 0u) shell->new_output = 0u;
+}
+
+// The wheel, the scrollbar and the "new output" pill.
+static void orbit_terminal_mouse(sl_ctx_t *ctx, orbit_shell_t *shell, const sl_input_frame_t *frame) {
+    if (!ctx || !shell || !frame) return;
+    if (frame->mouse_wheel_y != 0) orbit_scroll_by(shell, frame->mouse_wheel_y, 0u);
+    uint32_t mx = ctx->cursor_x, my = ctx->cursor_y;
+    if (frame->mouse_left_pressed) {
+        if (shell->pill_w && mx >= shell->pill_x && mx < shell->pill_x + shell->pill_w &&
+            my >= shell->pill_y && my < shell->pill_y + shell->pill_h) {
+            shell->scroll_back = 0u;
+            shell->new_output = 0u;
+        } else if (shell->bar_w && mx + 6u >= shell->bar_x && mx < shell->bar_x + shell->bar_w + 6u &&
+                   my >= shell->bar_y && my < shell->bar_y + shell->bar_h) {
+            shell->scroll_drag = 1u;
+            uint8_t on_thumb = (my >= shell->thumb_y && my < shell->thumb_y + shell->thumb_h) ? 1u : 0u;
+            shell->drag_grab_y = on_thumb ? my - shell->thumb_y : shell->thumb_h / 2u;
+            orbit_scroll_to_thumb(shell, my);
+        }
+    } else if (shell->scroll_drag && (frame->mouse_buttons & 0x01u)) {
+        orbit_scroll_to_thumb(shell, my);
+    }
+    if (!(frame->mouse_buttons & 0x01u)) shell->scroll_drag = 0u;
+}
+
 static uint16_t orbit_norm_keycode(uint16_t code) {
     if ((code & 0xFF00u) == 0xE000u) {
         return (uint16_t)(code & 0x00FFu);
@@ -2669,7 +2831,6 @@ static uint8_t orbit_clip_intersect(uint32_t ax, uint32_t ay, uint32_t aw, uint3
 
 static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
                            const peos_input_event_t *event, void *userdata) {
-    (void)ctx;
 
     orbit_shell_t *shell = (orbit_shell_t *)userdata;
     if (!shell) return;
@@ -2685,6 +2846,7 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         shell->ui.mouse_wheel_y = frame->mouse_wheel_y;
         shell->ui.clipboard_cmds = frame->clipboard_cmds;
         shell->caps_lock_on = frame->caps_lock_on;
+        if (!event && orbit_is_text_terminal(shell)) orbit_terminal_mouse(ctx, shell, frame);
     }
 
     if (!event) return;
@@ -2738,6 +2900,34 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
 
     if (!event->pressed) return;
 
+    // Shift+PgUp/PgDn scroll the output; any other key brings it back down.
+    uint16_t raw = event->code;
+    if (shell->shift_down && (raw == 0xE049u || raw == 0xE051u)) {
+        orbit_scroll_by(shell, raw == 0xE049u ? 1 : -1, 1u);
+        return;
+    }
+    shell->scroll_back = 0u;
+    shell->new_output = 0u;
+
+    // The navigation keys reach the program as the usual ANSI sequences.
+    const char *seq = NULL;
+    switch (raw) {
+    case PEOS_KEY_UP:    seq = "\x1b[A"; break;
+    case PEOS_KEY_DOWN:  seq = "\x1b[B"; break;
+    case PEOS_KEY_RIGHT: seq = shell->ctrl_down ? "\x1b[1;5C" : "\x1b[C"; break;
+    case PEOS_KEY_LEFT:  seq = shell->ctrl_down ? "\x1b[1;5D" : "\x1b[D"; break;
+    case PEOS_KEY_HOME:  seq = "\x1b[H"; break;
+    case PEOS_KEY_END:   seq = "\x1b[F"; break;
+    case 0xE053u:        seq = "\x1b[3~"; break;   // Delete
+    case 0xE049u:        seq = "\x1b[5~"; break;   // PgUp
+    case 0xE051u:        seq = "\x1b[6~"; break;   // PgDn
+    default: break;
+    }
+    if (seq) {
+        if (shell->child_pid > 0) orbit_send_input(shell, seq, peos_strlen(seq));
+        return;
+    }
+
     if (code == PEOS_KEY_ENTER) {
         if (shell->child_pid <= 0) {
             if (!orbit_spawn_process(shell)) {
@@ -2760,6 +2950,13 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
                                                    shell->altgr_down,
                                                    input, sizeof(input));
     if (input_len == 0u) return;
+    // Ctrl+letter is the control character, as on any terminal (Ctrl+R
+    // searches Orbit's history, Ctrl+C drops the line).
+    if (shell->ctrl_down && input_len == 1u) {
+        char c = input[0];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c >= 'a' && c <= 'z') input[0] = (char)(c - 'a' + 1);
+    }
 
     orbit_send_input(shell, input, input_len);
 }
@@ -3647,9 +3844,14 @@ int sl_app_host_cache_update_rect(const sl_window_t *win, const void *userdata,
 }
 
 static const char *orbit_get_line(const orbit_shell_t *shell, size_t logical_index) {
-    if (!shell || logical_index >= shell->line_count) return "";
-    size_t slot = (shell->line_head + logical_index) % ORBIT_MAX_LINES;
-    return shell->lines[slot];
+    if (!shell || !shell->lines || logical_index >= shell->line_count) return "";
+    const char *t = shell->lines[(shell->line_head + logical_index) % ORBIT_MAX_LINES].text;
+    return t ? t : "";
+}
+
+static uint32_t orbit_get_line_len(const orbit_shell_t *shell, size_t logical_index) {
+    if (!shell || !shell->lines || logical_index >= shell->line_count) return 0u;
+    return shell->lines[(shell->line_head + logical_index) % ORBIT_MAX_LINES].len;
 }
 
 static inline uint8_t orbit_lerp_u8(uint8_t a, uint8_t b, uint32_t t255) {
@@ -4492,56 +4694,116 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     uint32_t history_rows = rows;
     if (cols >= ORBIT_DRAW_ROW_CHARS) cols = ORBIT_DRAW_ROW_CHARS - 1u;
 
-    size_t virtual_total = 0u;
-    for (size_t i = 0u; i < shell->line_count; i++) {
-        const char *line = orbit_get_line(shell, i);
-        virtual_total += orbit_text_row_count(peos_strlen(line), cols, 0u);
+    // The rows of the stored lines at this width: counted again only when
+    // the width changes, then kept as lines come and go.
+    if (shell->rows_cols != cols) {
+        shell->rows_cols = cols;
+        shell->rows_total = 0u;
+        for (size_t i = 0u; i < shell->line_count; i++) {
+            shell->rows_total += orbit_line_rows(orbit_get_line_len(shell, i), cols);
+        }
     }
-    uint8_t has_pending = (shell->pending_len > 0u) ? 1u : 0u;
-    if (has_pending) {
-        virtual_total += orbit_text_row_count(shell->pending_len, cols, 1u);
+    shell->view_rows = history_rows;
+    uint8_t has_pending = (shell->pending_len > 0u || shell->pending_cursor > 0u) ? 1u : 0u;
+    size_t pending_rows = has_pending ? orbit_text_rows_at(shell->pending_len, cols, shell->pending_cursor) : 0u;
+    size_t virtual_total = shell->rows_total + pending_rows;
+    size_t max_back = (virtual_total > history_rows) ? virtual_total - history_rows : 0u;
+    if (shell->scroll_back > max_back) shell->scroll_back = max_back;
+    if (shell->scroll_back == 0u) shell->new_output = 0u;
+    size_t start = max_back - shell->scroll_back;   // the first row shown
+
+    // The line holding row `start`, found from the end: only what is shown
+    // (and what is scrolled past) is walked.
+    size_t logical_total = shell->line_count + (has_pending ? 1u : 0u);
+    size_t first = 0u, first_row = 0u;
+    {
+        size_t acc = virtual_total;
+        for (size_t i = logical_total; i > 0u; i--) {
+            uint8_t pending = (has_pending && i - 1u == shell->line_count) ? 1u : 0u;
+            acc -= pending ? pending_rows : orbit_line_rows(orbit_get_line_len(shell, i - 1u), cols);
+            if (acc <= start) {
+                first = i - 1u;
+                first_row = acc;
+                break;
+            }
+        }
     }
 
-    size_t start = (virtual_total > history_rows) ? (virtual_total - history_rows) : 0u;
-    size_t virtual_row = 0u;
+    size_t virtual_row = first_row;
     uint32_t draw_row = 0u;
     uint64_t blink = (peos_time_ns() / 500000000ull) & 1ull;
+    const sl_ui_color_t *neon = sl_ui_runtime_color(SL_UI_COLOR_NEON);
 
-    size_t logical_total = shell->line_count + (has_pending ? 1u : 0u);
-    for (size_t i = 0u; i < logical_total && draw_row < history_rows; i++) {
+    for (size_t i = first; i < logical_total && draw_row < history_rows; i++) {
         uint8_t pending = (i == shell->line_count) ? 1u : 0u;
         const char *line = pending
                                ? (shell->pending_line ? shell->pending_line : "")
                                : orbit_get_line(shell, i);
-        size_t line_len = pending ? shell->pending_len : peos_strlen(line);
-        size_t line_rows = orbit_text_row_count(line_len, cols, pending);
-        size_t cursor_row = pending ? (line_len / cols) : SIZE_MAX;
+        size_t line_len = pending ? shell->pending_len : orbit_get_line_len(shell, i);
+        size_t line_rows = pending ? pending_rows : orbit_line_rows((uint32_t)line_len, cols);
+        size_t cursor_row = pending ? (shell->pending_cursor / cols) : SIZE_MAX;
 
         for (size_t segment = 0u; segment < line_rows; segment++, virtual_row++) {
             if (virtual_row < start) continue;
             char row_buf[ORBIT_DRAW_ROW_CHARS];
-            uint8_t show_cursor = (pending && segment == cursor_row &&
-                                   win->focused && blink) ? 1u : 0u;
-            (void)orbit_text_copy_row(line, line_len, cols, segment,
-                                      show_cursor, row_buf, sizeof(row_buf));
+            (void)orbit_text_copy_row(line, line_len, cols, segment, 0u, row_buf, sizeof(row_buf));
+            uint32_t ry = text_y + (draw_row * cell_h);
             if (mono) {
                 // Night terminal: pale blue text, the prompt in the accent.
-                const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
-                uint32_t ry = text_y + (draw_row * cell_h);
                 size_t plen = (segment == 0u && strncmp(row_buf, "orbit>", 6) == 0) ? 6u : 0u;
                 if (plen) {
                     char head[8];
                     memcpy(head, row_buf, plen);
                     head[plen] = '\0';
-                    sl_ui_ctx_mono_text(ctx, text_x, ry, head, n->r, n->g, n->b);
+                    sl_ui_ctx_mono_text(ctx, text_x, ry, head, neon->r, neon->g, neon->b);
                 }
                 sl_ui_ctx_mono_text(ctx, text_x + (uint32_t)plen * cell_w, ry, row_buf + plen, 0xC9u, 0xE8u, 0xFFu);
             } else {
-                sl_draw_text(ctx, text_x, text_y + (draw_row * cell_h),
-                             row_buf, 200u, 230u, 200u);
+                sl_draw_text(ctx, text_x, ry, row_buf, 200u, 230u, 200u);
+            }
+            if (pending && segment == cursor_row && win->focused && blink) {   // a bar where the cursor is
+                uint32_t cx = text_x + (uint32_t)(shell->pending_cursor % cols) * cell_w;
+                if (mono) sl_fill_rect(ctx, cx, ry + 1u, 2u, cell_h - 2u, neon->r, neon->g, neon->b);
+                else sl_fill_rect(ctx, cx, ry + cell_h - 2u, cell_w, 2u, 200u, 230u, 200u);
             }
             draw_row++;
             if (draw_row >= history_rows) break;
+        }
+    }
+
+    // A thin bar at the right edge when there is more than the view.
+    shell->bar_w = 0u;
+    shell->pill_w = 0u;
+    if (max_back > 0u) {
+        uint32_t bw = 4u;
+        uint32_t bx = body_x + body_w - (mono ? 7u : 3u) - bw;
+        uint32_t by = text_y;
+        uint32_t bh = history_rows * cell_h;
+        uint64_t th64 = ((uint64_t)bh * history_rows) / virtual_total;
+        uint32_t th = (th64 < 24u) ? 24u : (uint32_t)th64;
+        if (th > bh) th = bh;
+        uint32_t ty = by + (uint32_t)(((uint64_t)(bh - th) * start) / max_back);
+        sl_fill_rect_a(ctx, bx, by, bw, bh, 0xC9u, 0xE8u, 0xFFu, 28u);
+        sl_fill_rect_a(ctx, bx, ty, bw, th, neon->r, neon->g, neon->b, (uint8_t)(shell->scroll_drag ? 255u : 190u));
+        shell->bar_x = bx; shell->bar_y = by; shell->bar_w = bw; shell->bar_h = bh;
+        shell->thumb_y = ty; shell->thumb_h = th;
+    }
+    // Scrolled up while output came: a pill takes back to the bottom.
+    if (shell->scroll_back > 0u && shell->new_output) {
+        const char *label = sl_tr("orbit.new_output");
+        uint32_t lw = (uint32_t)peos_strlen(label) * cell_w;
+        uint32_t pw = lw + 2u * cell_w, ph = cell_h + 10u;
+        if (pw < body_w && ph < body_h) {
+            uint32_t px = body_x + (body_w - pw) / 2u;
+            uint32_t py = body_y + body_h - ph - (mono ? 14u : 4u);
+            if (mono) {
+                sl_ui_ctx_surface(ctx, SL_UI_SURF_NEON_DOT, px, py, pw, ph, ph / 2u);
+                sl_ui_ctx_mono_text(ctx, px + cell_w, py + 5u, label, 0x0Bu, 0x10u, 0x20u);
+            } else {
+                sl_fill_rect(ctx, px, py, pw, ph, 200u, 230u, 200u);
+                sl_draw_text(ctx, px + cell_w, py + 5u, label, 12u, 12u, 12u);
+            }
+            shell->pill_x = px; shell->pill_y = py; shell->pill_w = pw; shell->pill_h = ph;
         }
     }
 
@@ -4781,6 +5043,7 @@ void sl_app_host_reset(void) {
         if (!shell) continue;
         orbit_stop_process(shell);
         orbit_ui_storage_free(&shell->ui);
+        orbit_lines_free(shell);
         orbit_pending_line_free(shell);
         orbit_surface_free(shell);
         peos_memset(shell, 0, sizeof(*shell));
@@ -4814,6 +5077,7 @@ app_instance_t *sl_app_host_instance_at(size_t index) {
     if (!shell || !app) return NULL;
     if (!shell->initialized) {
         orbit_ui_storage_free(&shell->ui);
+        orbit_lines_free(shell);
         orbit_pending_line_free(shell);
         orbit_surface_free(shell);
         peos_memset(shell, 0, sizeof(*shell));
