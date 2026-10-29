@@ -16,6 +16,10 @@ void sl_blend_coverage_row(sl_ctx_t *ctx, int32_t dst_x, int32_t dst_y,
                            uint8_t r, uint8_t g, uint8_t b);
 void sl_blit_rgba(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y,
                   const uint8_t *src_rgba, uint32_t src_w, uint32_t src_h, uint32_t src_stride);
+// Opaque XRGB8888 pixels (an app's surface, release 0.11.0 phase 3), at 1:1:
+// in a 32-bit framebuffer a copy of each row.
+void sl_blit_xrgb(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y,
+                  const uint8_t *src, uint32_t src_w, uint32_t src_h, uint32_t src_stride);
 void sl_blit_rgba_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_t dst_w, uint32_t dst_h,
                           const uint8_t *src_rgba, uint32_t src_w, uint32_t src_h, uint32_t src_stride);
 void sl_blit_image_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_t dst_w, uint32_t dst_h,
