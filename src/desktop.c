@@ -920,8 +920,38 @@ static void sl_desk_calendar_reminders(sl_ctx_t *ctx, int64_t minute) {
     g_cal_checked = minute;
 }
 
+// The first start (release 0.11.0, phase 2): one notification, "Nuovo su
+// PeOS? Apri Consigli", a few seconds after the desktop shows, and nothing
+// else. consigli.cfg says it was sent (the app keeps there the topics seen);
+// if it cannot be written nothing is sent, not to say it at every start.
+static uint64_t g_tips_since;
+static uint8_t g_tips_done;
+
+static void sl_desk_tips_hello(sl_ctx_t *ctx) {
+    if (g_tips_done) return;
+    uint64_t now = peos_time_ns() / 1000000000ull;
+    if (!g_tips_since) g_tips_since = now ? now : 1u;
+    if (now < g_tips_since + 3u) return;
+    g_tips_done = 1u;
+    const char *app = sl_windows_app_title("consigli");
+    if (!app) return;   // not installed
+    FILE *f = fopen(SL_RESOURCE_TIPS_FILE, "r");
+    if (f) {
+        fclose(f);
+        return;
+    }
+    f = fopen(SL_RESOURCE_TIPS_FILE, "w");
+    if (!f) return;
+    (void)fputs("# Consigli: the topics already seen.\nseen=\n", f);
+    fclose(f);
+    char text[PEOS_NOTIFY_TEXT_MAX];
+    snprintf(text, sizeof(text), sl_tr("tips.hello"), app);
+    sl_notify_post(ctx, app, text);
+}
+
 void sl_desk_tick(sl_ctx_t *ctx) {
     if (!ctx || !ctx->desk_frame || g_desk.ready != 1u) return;
+    sl_desk_tips_hello(ctx);
     int64_t minute = sl_desk_local_seconds(ctx) / 60;
     uint8_t ip[4], has_ip;
     int32_t volume;
