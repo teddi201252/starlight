@@ -2,6 +2,10 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.13.1] - 2026-10-29
+- New startup sound, Alba: a vibraphone climbing to E major add9 over a warm pad, synthesised from scratch (tools/startup-sound/alba.py)
+- The PeOS sun replaces the star in the top bar
+
 ## [0.13.0] - 2026-10-28
 - Soft UI: the redesigned desktop (pearl grey and night/neon), dock on the left, app manager, top bar, clock, calendar and widgets, night theme and accents, notifications, cursors
 - Windows: resizable, with fast surface rendering; title bar and veil for dialogs
