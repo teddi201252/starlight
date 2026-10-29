@@ -423,6 +423,29 @@ void sl_blit_rgba(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y,
     }
 }
 
+void sl_blit_xrgb(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y,
+                  const uint8_t *src, uint32_t src_w, uint32_t src_h, uint32_t src_stride) {
+    if (!ctx || !ctx->frame || !src || src_w == 0u || src_h == 0u) return;
+    if ((ctx->bytespp != 3u && ctx->bytespp != 4u) || src_stride < src_w * 4u) return;
+    uint32_t x = dst_x, y = dst_y, w = src_w, h = src_h;
+    if (!sl_clip_rect_to_ctx(ctx, &x, &y, &w, &h)) return;
+    const uint8_t *s0 = src + (size_t)(y - dst_y) * src_stride + (size_t)(x - dst_x) * 4u;
+    for (uint32_t row = 0; row < h; row++) {
+        const uint32_t *s = (const uint32_t *)(const void *)(s0 + (size_t)row * src_stride);
+        uint8_t *d = ctx->frame + (size_t)(y + row) * ctx->row_stride + (size_t)x * ctx->bytespp;
+        if (ctx->bytespp == 4u) {
+            uint32_t *d32 = (uint32_t *)(void *)d;
+            for (uint32_t i = 0; i < w; i++) d32[i] = s[i] | 0xFF000000u;   // B G R, then opaque
+        } else {
+            for (uint32_t i = 0; i < w; i++, d += 3) {
+                d[0] = (uint8_t)s[i];
+                d[1] = (uint8_t)(s[i] >> 8);
+                d[2] = (uint8_t)(s[i] >> 16);
+            }
+        }
+    }
+}
+
 void sl_blit_rgba_stretch(sl_ctx_t *ctx, uint32_t dst_x, uint32_t dst_y, uint32_t dst_w, uint32_t dst_h,
                           const uint8_t *src_rgba, uint32_t src_w, uint32_t src_h, uint32_t src_stride) {
     if (!ctx || !ctx->frame || !src_rgba) return;

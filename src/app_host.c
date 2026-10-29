@@ -137,6 +137,7 @@ typedef enum {
     ORBIT_UI_CMD_RING = 27,      // RING x y size thick permille tr tg tb fr fg fb
     ORBIT_UI_CMD_GRAPH = 28,     // GRAPH x y w h lr lg lb fr fg fb fa v1 v2 ...
     ORBIT_UI_CMD_VEIL = 29,      // VEIL alpha: night over the whole window, title bar included
+    ORBIT_UI_CMD_PIXELS = 30,    // PIXELS x y w h sx sy: the app's surface from sx,sy, at x,y
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -263,6 +264,18 @@ typedef struct {
     size_t pending_off;
 } orbit_surface_t;
 
+// An SLUI app's own pixels beside its controls (release 0.11.0, phase 3:
+// the browser's page). "@SLUI HOST SURFACE w h" asks for it: Starlight makes
+// shared memory of XRGB8888 rows, lets the app map it and answers "@SLUI
+// HOST SURFACE id len w h pitch". PIXELS in a frame shows a part of it;
+// "@SLUI HOST PIXELS_DAMAGE x y w h" says it changed, between frames.
+typedef struct {
+    uint64_t shm_id;
+    uint8_t *base;
+    size_t len;
+    uint32_t w, h, pitch;
+} orbit_pixels_t;
+
 typedef struct {
     char *text;
     uint32_t len;
@@ -294,6 +307,7 @@ typedef struct {
     uint8_t super_down;
     uint8_t initialized;
     int64_t child_pid;
+    orbit_pixels_t pixels;
     uint8_t ended;              // the app was ended from outside: close its window
     uint8_t veil_changed;       // a VEIL came or went: all of the window to the screen (next tick)
     int64_t child_stdin_fd;
@@ -410,8 +424,16 @@ static void orbit_surface_free(orbit_shell_t *shell) {
     orbit_surface_reset(shell);
 }
 
+static void orbit_pixels_free(orbit_shell_t *shell) {
+    orbit_pixels_t *px = &shell->pixels;
+    if (px->base && px->len) (void)peos_munmap((uint64_t)(uintptr_t)px->base, (uint64_t)px->len);
+    if (px->shm_id) (void)peos_shm_destroy(px->shm_id);
+    peos_memset(px, 0, sizeof(*px));
+}
+
 static void orbit_surface_destroy_shared_object(orbit_shell_t *shell) {
     if (!shell) return;
+    orbit_pixels_free(shell);
     uint64_t id = shell->surface.shared_id;
     orbit_surface_free(shell);
     if (id != 0u) {
@@ -772,6 +794,45 @@ static int orbit_surface_reserve(orbit_shell_t *shell, size_t need) {
     shell->surface.pixels_cap = need;
     shell->surface.pixels_owned = 1u;
     return 1;
+}
+
+// "@SLUI HOST SURFACE w h": shared memory for w x h XRGB8888 pixels, mapped
+// here and by the app alone; the same one again if it is big enough. The
+// answer "@SLUI HOST SURFACE id len w h pitch", or "... 0 0 0 0 0" (no room).
+#define ORBIT_PIXELS_MAX_BYTES (64u << 20)
+
+static void orbit_pixels_request(orbit_shell_t *shell, uint32_t w, uint32_t h) {
+    orbit_pixels_t *px = &shell->pixels;
+    uint64_t need = (uint64_t)w * h * 4u;
+    char msg[128];
+    if (w == 0u || h == 0u || w > 8192u || h > 8192u || need > ORBIT_PIXELS_MAX_BYTES || shell->child_pid <= 0) {
+        orbit_pixels_free(shell);
+        snprintf(msg, sizeof(msg), "@SLUI HOST SURFACE 0 0 0 0 0\n");
+    } else {
+        if (!px->base || px->len < need) {
+            orbit_pixels_free(shell);
+            int64_t id = peos_shm_create(need);
+            peos_shm_map_t map;
+            if (id > 0 && peos_shm_map((uint64_t)id, &map) == 0 && map.addr && map.len >= need &&
+                peos_shm_allow((uint64_t)id, (uint64_t)shell->child_pid) == 0) {
+                px->shm_id = (uint64_t)id;
+                px->base = (uint8_t *)(uintptr_t)map.addr;
+                px->len = (size_t)map.len;
+            } else if (id > 0) {
+                (void)peos_shm_destroy((uint64_t)id);
+            }
+        }
+        if (px->base) {
+            px->w = w;
+            px->h = h;
+            px->pitch = w * 4u;
+            snprintf(msg, sizeof(msg), "@SLUI HOST SURFACE %llu %llu %u %u %u\n", (unsigned long long)px->shm_id,
+                     (unsigned long long)px->len, (unsigned)w, (unsigned)h, (unsigned)px->pitch);
+        } else {
+            snprintf(msg, sizeof(msg), "@SLUI HOST SURFACE 0 0 0 0 0\n");
+        }
+    }
+    if (shell->child_stdin_fd >= 0) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, peos_strlen(msg));
 }
 
 static int orbit_fb_handle_line(orbit_shell_t *shell, const char *line) {
@@ -1607,6 +1668,18 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             g_reload_theme_requested = 1u;
             return 1;
         }
+        if (orbit_token_is(host_tok, host_len, "SURFACE")) {
+            uint32_t w = 0u, h = 0u;
+            if (!orbit_parse_u32(&p, &w) || !orbit_parse_u32(&p, &h)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "surface_invalid_args");
+                return 1;
+            }
+            orbit_pixels_request(shell, w, h);
+            return 1;
+        }
+        if (orbit_token_is(host_tok, host_len, "PIXELS_DAMAGE")) {
+            return 1;   // read: the window is redrawn (orbit_poll_output saw a line)
+        }
         if (orbit_token_is(host_tok, host_len, "OPEN_APP")) {
             char tmp[sizeof(g_open_app_bundle_path)];
             p = orbit_skip_spaces(p);
@@ -1862,6 +1935,19 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         if (!cmd) return 1;
         if (!orbit_parse_u32(&p, &cmd->value) || cmd->value > 255u) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "veil_invalid_args");
+            cmd->type = ORBIT_UI_CMD_NONE;
+        }
+        return 1;
+    }
+
+    // PIXELS x y w h sx sy: the app's surface (orbit_pixels_t)
+    if (orbit_token_is(cmd_tok, cmd_len, "PIXELS")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_PIXELS);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->x) || !orbit_parse_u32(&p, &cmd->y) ||
+            !orbit_parse_u32(&p, &cmd->w) || !orbit_parse_u32(&p, &cmd->h) ||
+            !orbit_parse_u32(&p, &cmd->min_v) || !orbit_parse_u32(&p, &cmd->max_v)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "pixels_invalid_args");
             cmd->type = ORBIT_UI_CMD_NONE;
         }
         return 1;
@@ -2675,6 +2761,7 @@ static void orbit_stop_process(orbit_shell_t *shell) {
     shell->child_pid = -1;
     if (exited) orbit_surface_destroy_shared_object(shell);
     else orbit_surface_free(shell);
+    orbit_pixels_free(shell);
     // The next app in this slot starts clean: its command buffers freed (they
     // were kept, one set per window ever closed) and told its size again (a
     // reopened app got no RESIZE: the same size as the last one sent).
@@ -3691,6 +3778,7 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_RING:
         case ORBIT_UI_CMD_GRAPH:
         case ORBIT_UI_CMD_VEIL:
+        case ORBIT_UI_CMD_PIXELS:
         case ORBIT_UI_CMD_RECT:
         case ORBIT_UI_CMD_RECTA:
         case ORBIT_UI_CMD_RECT_THEME:
@@ -4348,6 +4436,14 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 }
                 if (cmd->type == ORBIT_UI_CMD_LABEL) sl_ui_label_rgb(&shell->ui.ui, lx, y, cmd->text, cmd->r, cmd->g, cmd->b);
                 else sl_ui_label(&shell->ui.ui, lx, y, cmd->text, (sl_ui_color_token_t)cmd->value);
+            } else if (cmd->type == ORBIT_UI_CMD_PIXELS) {
+                const orbit_pixels_t *px = &shell->pixels;
+                uint32_t sx = cmd->min_v, sy = cmd->max_v;
+                if (px->base && sx < px->w && sy < px->h) {
+                    uint32_t pw = cmd->w < px->w - sx ? cmd->w : px->w - sx;
+                    uint32_t ph = cmd->h < px->h - sy ? cmd->h : px->h - sy;
+                    sl_blit_xrgb(ctx, x, y, px->base + (size_t)sy * px->pitch + (size_t)sx * 4u, pw, ph, px->pitch);
+                }
             } else if (cmd->type == ORBIT_UI_CMD_VEIL) {
                 // Here only over the cached inside; the frame around it is
                 // veiled by the window when it is repainted (veil_alpha).
