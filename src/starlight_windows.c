@@ -984,6 +984,7 @@ static const char *sl_dock_skin_key(const char *bundle_path) {
         { "terminale", "orbit" }, { "voyager", "voyager" }, { "calcolatrice", "calcolatrice" },
         { "curiosity", "curiosity" }, { "impostazioni", "impostazioni" }, { "installer", "installer" },
         { "monitor", "monitor" }, { "calendario", "calendario" }, { "consigli", "consigli" },
+        { "pegasus", "pegasus" },
     };
     const char *base = bundle_path ? strrchr(bundle_path, '/') : NULL;
     base = base ? base + 1 : (bundle_path ? bundle_path : "");
