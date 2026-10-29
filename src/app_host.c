@@ -274,6 +274,15 @@ typedef struct {
     uint8_t *base;
     size_t len;
     uint32_t w, h, pitch;
+    // Where the last frame showed them on the screen, for the mouse
+    // (SLUI SDK 1.0.8: "@SLUI EVENT POINTER kind x y buttons mods wheel").
+    int32_t view_x, view_y;
+    uint32_t view_w, view_h;
+    uint8_t shown;          // a PIXELS command in the last frame
+    uint8_t captured;       // pressed inside: followed until let go
+    uint8_t focused;        // pressed inside last: typing goes to them ("CHAR")
+    int32_t last_x, last_y;
+    uint32_t last_buttons;
 } orbit_pixels_t;
 
 typedef struct {
@@ -1501,6 +1510,26 @@ static uint32_t orbit_mod_mask(const orbit_shell_t *shell) {
     return mods;
 }
 
+// POINTER kind x y buttons mods wheel: the mouse over the app's pixels.
+static void orbit_send_ui_event_pointer(orbit_shell_t *shell, uint32_t kind, int32_t x, int32_t y,
+                                        uint32_t buttons, uint32_t mods, int32_t wheel) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[96];
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    int n = snprintf(msg, sizeof(msg), "@SLUI EVENT POINTER %u %d %d %u %u %d\n",
+                     (unsigned)kind, (int)x, (int)y, (unsigned)buttons, (unsigned)mods, (int)wheel);
+    if (n > 0) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
+}
+
+// CHAR cp: a character typed while the pixels have the keyboard.
+static void orbit_send_ui_event_char(orbit_shell_t *shell, uint32_t cp) {
+    if (!shell || shell->child_stdin_fd < 0 || cp == 0u) return;
+    char msg[48];
+    int n = snprintf(msg, sizeof(msg), "@SLUI EVENT CHAR %u\n", (unsigned)cp);
+    if (n > 0) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
+}
+
 static void orbit_send_ui_event_key(orbit_shell_t *shell, const char *kind, uint16_t code, uint32_t mods) {
     if (!shell || shell->child_stdin_fd < 0 || !kind || !kind[0]) return;
     char msg[96];
@@ -2556,6 +2585,9 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
         if (!orbit_fb_handle_line(shell, line)) {
             shell->surface.active = 0u;
             if (!orbit_ui_handle_line(shell, line)) {
+                // An SLUI app's own output (not the protocol) is hidden behind
+                // its controls: the system log has it, for whoever debugs it.
+                if (shell->ui.enabled && line[0]) printf("[%s] %s\n", shell->title, line);
                 orbit_push_line_n(shell, line, shell->pending_len);
             }
         }
@@ -2905,6 +2937,47 @@ static void orbit_terminal_mouse(sl_ctx_t *ctx, orbit_shell_t *shell, const sl_i
     if (!(frame->mouse_buttons & 0x01u)) shell->scroll_drag = 0u;
 }
 
+// The mouse over an SLUI app's pixels (the browser's page): where it is, in
+// the pixels' own coordinates, presses and releases (a press inside is
+// followed until it is let go) and the wheel.
+static void orbit_pixels_mouse(sl_ctx_t *ctx, orbit_shell_t *shell, const sl_input_frame_t *frame) {
+    orbit_pixels_t *px = &shell->pixels;
+    if (!ctx || !px->base || !px->shown || px->view_w == 0u || px->view_h == 0u) return;
+    int32_t mx = (int32_t)ctx->cursor_x - px->view_x, my = (int32_t)ctx->cursor_y - px->view_y;
+    uint8_t inside = (mx >= 0 && my >= 0 && (uint32_t)mx < px->view_w && (uint32_t)my < px->view_h) ? 1u : 0u;
+    uint32_t buttons = frame->mouse_buttons & 0x07u;
+    uint32_t mods = orbit_mod_mask(shell);
+    uint8_t pressed = (frame->mouse_left_pressed || frame->mouse_right_pressed) ? 1u : 0u;
+    uint8_t released = (frame->mouse_left_released || frame->mouse_right_released) ? 1u : 0u;
+    if (pressed) {
+        if (inside && !px->captured) {
+            px->captured = 1u;
+            px->focused = 1u;
+        } else if (!inside) {
+            px->focused = 0u;   // a press elsewhere takes the keyboard away
+        }
+    }
+    if (!inside && !px->captured) return;
+    if (pressed && px->captured) {
+        orbit_send_ui_event_pointer(shell, 2u, mx, my, buttons | (frame->mouse_left_pressed ? 1u : 2u), mods, 0);   // SLUI_POINTER_DOWN
+        if (released) {   // both in one frame (a quick click in a slow VM)
+            orbit_send_ui_event_pointer(shell, 3u, mx, my, buttons, mods, 0);
+            if (!buttons) px->captured = 0u;
+        }
+    } else if (released && px->captured) {
+        orbit_send_ui_event_pointer(shell, 3u, mx, my, buttons, mods, 0);   // SLUI_POINTER_UP
+        if (!buttons) px->captured = 0u;
+    } else if (mx != px->last_x || my != px->last_y || buttons != px->last_buttons) {
+        orbit_send_ui_event_pointer(shell, 1u, mx, my, buttons, mods, 0);   // SLUI_POINTER_MOVE
+    }
+    if (frame->mouse_wheel_y != 0 && inside) {
+        orbit_send_ui_event_pointer(shell, 4u, mx, my, buttons, mods, frame->mouse_wheel_y);
+    }
+    px->last_x = mx;
+    px->last_y = my;
+    px->last_buttons = buttons;
+}
+
 static uint16_t orbit_norm_keycode(uint16_t code) {
     if ((code & 0xFF00u) == 0xE000u) {
         return (uint16_t)(code & 0x00FFu);
@@ -2934,6 +3007,7 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         shell->ui.clipboard_cmds = frame->clipboard_cmds;
         shell->caps_lock_on = frame->caps_lock_on;
         if (!event && orbit_is_text_terminal(shell)) orbit_terminal_mouse(ctx, shell, frame);
+        if (!event && shell->ui.enabled && shell->ui.committed) orbit_pixels_mouse(ctx, shell, frame);
     }
 
     if (!event) return;
@@ -2966,6 +3040,23 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         }
         if (shell->ui.key_event_count < 16u) {
             shell->ui.key_events[shell->ui.key_event_count++] = *event;
+        }
+        // Typing on the pixels (no control has the keyboard): the characters.
+        if (event->pressed && shell->pixels.focused && shell->pixels.base &&
+            shell->ui.ui.focused_id == 0u && !shell->ctrl_down && !shell->alt_down) {
+            char text[8];
+            size_t n = sl_keyboard_translate_event(event, shell->shift_down, shell->caps_lock_on,
+                                                   shell->altgr_down, text, sizeof(text));
+            for (size_t i = 0u; i < n;) {
+                uint8_t c = (uint8_t)text[i];
+                uint32_t cp = c, len = 1u;
+                if (c >= 0xF0u && i + 3u < n) { cp = c & 0x07u; len = 4u; }
+                else if (c >= 0xE0u && i + 2u < n) { cp = c & 0x0Fu; len = 3u; }
+                else if (c >= 0xC0u && i + 1u < n) { cp = c & 0x1Fu; len = 2u; }
+                for (uint32_t k = 1u; k < len; k++) cp = (cp << 6) | ((uint8_t)text[i + k] & 0x3Fu);
+                if (cp >= 0x20u && cp != 0x7Fu) orbit_send_ui_event_char(shell, cp);
+                i += len;
+            }
         }
         return;
     }
@@ -3422,6 +3513,9 @@ static void orbit_ui_scroll_focus_into_view(orbit_shell_t *shell, size_t focus_i
 
 static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
     if (!shell || !shell->ui.enabled || !shell->ui.committed || !shell->ui.cmds || shell->ui.cmd_count == 0u) return;
+    // The app's pixels have the keyboard (a page: Tab, Enter and the space
+    // are its own): no moving between the controls until one is clicked.
+    if (shell->pixels.focused && shell->ui.ui.focused_id == 0u) return;
     uint32_t modal_select_id = shell->ui.ui.select_open_id;
 
     size_t focus_idx = 0u;
@@ -4371,6 +4465,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
         uint32_t modal_select_id = shell->ui.ui.select_open_id;
         uint8_t context_modal_open = (shell->ui.context_open_id != 0u) ? 1u : 0u;
+        shell->pixels.shown = 0u;
         for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
             orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
             uint32_t x = body_x + cmd->x;
@@ -4437,8 +4532,13 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 if (cmd->type == ORBIT_UI_CMD_LABEL) sl_ui_label_rgb(&shell->ui.ui, lx, y, cmd->text, cmd->r, cmd->g, cmd->b);
                 else sl_ui_label(&shell->ui.ui, lx, y, cmd->text, (sl_ui_color_token_t)cmd->value);
             } else if (cmd->type == ORBIT_UI_CMD_PIXELS) {
-                const orbit_pixels_t *px = &shell->pixels;
+                orbit_pixels_t *px = &shell->pixels;
                 uint32_t sx = cmd->min_v, sy = cmd->max_v;
+                px->view_x = (int32_t)x;
+                px->view_y = (int32_t)y;
+                px->view_w = cmd->w;
+                px->view_h = cmd->h;
+                px->shown = 1u;
                 if (px->base && sx < px->w && sy < px->h) {
                     uint32_t pw = cmd->w < px->w - sx ? cmd->w : px->w - sx;
                     uint32_t ph = cmd->h < px->h - sy ? cmd->h : px->h - sy;
