@@ -5,6 +5,7 @@
 #include "orbit_text_layout.h"
 #include "i18n.h"
 #include "ui_sdk.h"
+#include "clipboard.h"
 #include "render/image_decode.h"
 #include "peos/orbitfb.h"
 #include "peos/capability.h"
@@ -283,6 +284,7 @@ typedef struct {
     uint8_t focused;        // pressed inside last: typing goes to them ("CHAR")
     int32_t last_x, last_y;
     uint32_t last_buttons;
+    uint8_t cursor;         // the pointer over them (SLUI SDK 1.0.9 "HOST CURSOR"): 0 arrow, 1 hand, 2 text
 } orbit_pixels_t;
 
 typedef struct {
@@ -308,6 +310,8 @@ typedef struct {
     size_t pending_len;
     size_t pending_cap;
     size_t pending_cursor;      // the column the next character goes to
+    char *clip;                 // text the app copies, as it comes ("HOST CLIPBOARD_PART")
+    uint32_t clip_len, clip_cap;
     uint8_t shift_down;
     uint8_t caps_lock_on;
     uint8_t ctrl_down;
@@ -391,6 +395,55 @@ static void orbit_pending_line_free(orbit_shell_t *shell) {
     }
     shell->pending_cap = 0u;
     shell->pending_len = 0u;
+    free(shell->clip);   // a copy that never ended
+    shell->clip = NULL;
+    shell->clip_len = shell->clip_cap = 0u;
+}
+
+// ------------------------------------------------------------ the clipboard
+//
+// SLUI SDK 1.0.9: an app copies with "@SLUI HOST CLIPBOARD_PART <text>"
+// lines (a line is at most ORBIT_LINE_MAX_CHARS) and one "CLIPBOARD_COPY
+// <text>" that ends it; "CLIPBOARD_GET" asks for the clipboard's text, which
+// comes back as "@SLUI EVENT CLIPBOARD <text>". Text is escaped as in
+// TEXT_AREA (\\ \n \r \t).
+
+#define ORBIT_CLIP_MAX 65535u   // the clipboard's own limit
+
+static void orbit_clip_append(orbit_shell_t *shell, const char *src) {
+    for (size_t i = 0u; src && src[i] && shell->clip_len < ORBIT_CLIP_MAX; i++) {
+        char c = src[i];
+        if (c == '\\' && src[i + 1]) {
+            char n = src[++i];
+            c = n == 'n' ? '\n' : n == 'r' ? '\r' : n == 't' ? '\t' : n;
+        }
+        if (shell->clip_len + 2u > shell->clip_cap) {
+            uint32_t cap = shell->clip_cap ? shell->clip_cap * 2u : 1024u;
+            char *nb = (char *)realloc(shell->clip, cap);
+            if (!nb) return;
+            shell->clip = nb;
+            shell->clip_cap = cap;
+        }
+        shell->clip[shell->clip_len++] = c;
+    }
+    if (shell->clip) shell->clip[shell->clip_len] = '\0';
+}
+
+static void orbit_send_ui_event_clipboard(orbit_shell_t *shell) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    uint32_t len = 0u;
+    const char *text = sl_clipboard_current_text(&len);
+    const char *prefix = "@SLUI EVENT CLIPBOARD ";
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, prefix, peos_strlen(prefix));
+    for (uint32_t i = 0u; text && i < len; i++) {
+        char c = text[i];
+        if (c == '\\') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\\\", 2u);
+        else if (c == '\n') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\n", 2u);
+        else if (c == '\r') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\r", 2u);
+        else if (c == '\t') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\t", 2u);
+        else if (c) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, &c, 1u);
+    }
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\n", 1u);
 }
 
 static void orbit_surface_reset(orbit_shell_t *shell) {
@@ -1708,6 +1761,33 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         }
         if (orbit_token_is(host_tok, host_len, "PIXELS_DAMAGE")) {
             return 1;   // read: the window is redrawn (orbit_poll_output saw a line)
+        }
+        if (orbit_token_is(host_tok, host_len, "CURSOR")) {   // the pointer over the app's pixels
+            uint32_t kind = 0u;
+            if (!orbit_parse_u32(&p, &kind)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "cursor_invalid_args");
+                return 1;
+            }
+            shell->pixels.cursor = (uint8_t)(kind <= 2u ? kind : 0u);
+            return 1;
+        }
+        if (orbit_token_is(host_tok, host_len, "CLIPBOARD_PART") || orbit_token_is(host_tok, host_len, "CLIPBOARD_COPY")) {
+            if (p && *p == ' ') p++;   // one space after the word; the text may begin with more
+            orbit_clip_append(shell, p);
+            if (orbit_token_is(host_tok, host_len, "CLIPBOARD_COPY")) {
+                (void)sl_clipboard_set_text(shell->clip ? shell->clip : "", shell->clip_len);
+                sl_ctx_t *ctx = shell->ui.ui.ctx;
+                if (ctx && shell->clip_len) {   // the copy's feedback, where the pointer is
+                    sl_clipboard_notify_copy(ctx, shell->clip, shell->clip_len, (int32_t)ctx->cursor_x,
+                                             (int32_t)ctx->cursor_y, (int32_t)ctx->cursor_x, (int32_t)ctx->cursor_y);
+                }
+                shell->clip_len = 0u;
+            }
+            return 1;
+        }
+        if (orbit_token_is(host_tok, host_len, "CLIPBOARD_GET")) {
+            orbit_send_ui_event_clipboard(shell);
+            return 1;
         }
         if (orbit_token_is(host_tok, host_len, "OPEN_APP")) {
             char tmp[sizeof(g_open_app_bundle_path)];
@@ -3867,12 +3947,15 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_FONT_SIZE:
         case ORBIT_UI_CMD_CONTEXT_MENU:
         case ORBIT_UI_CMD_SCROLL_V:
+        case ORBIT_UI_CMD_PIXELS: {   // the app's own pixels: the pointer it asked for
+            static const int k_kinds[3] = { SL_CUR_ARROW, SL_CUR_HAND, SL_CUR_TEXT };
+            return k_kinds[shell->pixels.cursor <= 2u ? shell->pixels.cursor : 0u];
+        }
         case ORBIT_UI_CMD_SURF:
         case ORBIT_UI_CMD_FACE:
         case ORBIT_UI_CMD_RING:
         case ORBIT_UI_CMD_GRAPH:
         case ORBIT_UI_CMD_VEIL:
-        case ORBIT_UI_CMD_PIXELS:
         case ORBIT_UI_CMD_RECT:
         case ORBIT_UI_CMD_RECTA:
         case ORBIT_UI_CMD_RECT_THEME:
