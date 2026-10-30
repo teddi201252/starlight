@@ -1575,6 +1575,16 @@ static void orbit_send_ui_event_pointer(orbit_shell_t *shell, uint32_t kind, int
     if (n > 0) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
 }
 
+// CLIPCMD copy|paste: Caps+A or Caps+S while the pixels have the keyboard
+// (SLUI SDK 1.0.10). What there is to copy, and where to paste, is the app's:
+// it answers with HOST CLIPBOARD_COPY, or asks with HOST CLIPBOARD_GET.
+static void orbit_send_ui_event_clipcmd(orbit_shell_t *shell, const char *what) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[48];
+    int n = snprintf(msg, sizeof(msg), "@SLUI EVENT CLIPCMD %s\n", what);
+    if (n > 0) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
+}
+
 // CHAR cp: a character typed while the pixels have the keyboard.
 static void orbit_send_ui_event_char(orbit_shell_t *shell, uint32_t cp) {
     if (!shell || shell->child_stdin_fd < 0 || cp == 0u) return;
@@ -3085,6 +3095,12 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         shell->ui.mouse_wheel_x = frame->mouse_wheel_x;
         shell->ui.mouse_wheel_y = frame->mouse_wheel_y;
         shell->ui.clipboard_cmds = frame->clipboard_cmds;
+        // Caps+A and Caps+S on the pixels (no control has the keyboard): the app's.
+        if (shell->pixels.focused && shell->pixels.base && shell->ui.ui.focused_id == 0u) {
+            if (shell->ui.clipboard_cmds & SL_CLIP_CMD_COPY) orbit_send_ui_event_clipcmd(shell, "copy");
+            if (shell->ui.clipboard_cmds & SL_CLIP_CMD_PASTE) orbit_send_ui_event_clipcmd(shell, "paste");
+            shell->ui.clipboard_cmds &= ~(uint32_t)(SL_CLIP_CMD_COPY | SL_CLIP_CMD_PASTE);
+        }
         shell->caps_lock_on = frame->caps_lock_on;
         if (!event && orbit_is_text_terminal(shell)) orbit_terminal_mouse(ctx, shell, frame);
         if (!event && shell->ui.enabled && shell->ui.committed) orbit_pixels_mouse(ctx, shell, frame);
