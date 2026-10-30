@@ -124,7 +124,14 @@ void sl_window_dirty_all(const sl_ctx_t *ctx, const sl_window_t *win) {
     sl_dirty_add_signed(ctx, r.x, r.y, r.w, r.h);
 }
 
-void sl_window_dirty_body(const sl_ctx_t *ctx, const sl_window_t *win) {
+void sl_window_dirty_inside(const sl_ctx_t *ctx, const sl_window_t *win) {
+    if (!ctx || !win) return;
+    sl_win_rect_t r = sl_window_inner_rect(win);
+    sl_dirty_add_signed(ctx, r.x, r.y, r.w, r.h);
+}
+
+void sl_window_dirty_body(const sl_ctx_t *ctx, sl_window_t *win) {
+    if (win) win->content_pending = 1u;   // the body changed: drawn again
     uint32_t x, y, w, h;
     sl_window_body_rect(win, &x, &y, &w, &h);
     if (w && h) sl_dirty_add(ctx, x, y, w, h);
@@ -362,6 +369,7 @@ void sl_window_mark_activity(sl_window_t *win, uint64_t now_ns) {
     if (now_ns == 0ull) now_ns = peos_time_ns();
     win->last_activity_ns = now_ns;
     win->next_render_ns = 0ull;
+    win->content_pending = 1u;
 }
 
 int sl_window_init(sl_window_t *win, sl_ctx_t *ctx, app_instance_t* task, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
@@ -456,12 +464,14 @@ static void sl_window_blend_underlay(sl_window_t *win, int64_t x0, int64_t y0, u
     }
 }
 
-int sl_window_render(sl_window_t *win) {
-    if (!win || !win->ctx || win->minimized) return 0;
-    sl_ctx_t *ctx = win->ctx;
-    (void)sl_window_frame_ready(ctx);
+int sl_window_prepare_render(sl_window_t *win, uint64_t now) {
+    if (!win) return 0;
+    win->render_due = 0u;
+    if (!win->ctx || win->minimized) return 0;
+    sl_win_rect_t in = sl_window_inner_rect(win);
+    uint8_t resized = win->client_width != in.w || win->client_height != in.h;
+    if (!(win->content_pending || win->force_redraw || !win->cache_valid || resized)) return 0;   // nothing new
 
-    uint64_t now = peos_time_ns();
     uint16_t base_fps = win->focused ? win->fps_focused : win->fps_unfocused;
     uint16_t target_fps = base_fps;
     uint64_t idle_ns = (now > win->last_activity_ns) ? (now - win->last_activity_ns) : 0ull;
@@ -474,15 +484,25 @@ int sl_window_render(sl_window_t *win) {
         if (decayed < min_idle) decayed = min_idle;
         target_fps = decayed;
     }
+    win->target_fps = target_fps;
     uint8_t due = !(target_fps > 0u && win->cache_valid && !win->force_redraw && win->next_render_ns > now);
-    {
-        sl_win_rect_t in = sl_window_inner_rect(win);
-        if (win->client_width != in.w || win->client_height != in.h) due = 1u;   // resized: the cache is stale
-        // Being dragged: the content has not changed, only its place. The
-        // periodic redraw waits for the drop, unless something asked for it.
-        else if (win->dragging && win->cache_valid && !win->force_redraw) due = 0u;
-    }
+    if (resized) due = 1u;   // the cache is stale
+    // Being dragged: the content has not changed, only its place. The
+    // redraw waits for the drop, unless something asked for it.
+    else if (win->dragging && win->cache_valid && !win->force_redraw) due = 0u;
+    win->render_due = due;
+    return due;
+}
 
+int sl_window_render(sl_window_t *win) {
+    if (!win || !win->ctx || win->minimized) return 0;
+    sl_ctx_t *ctx = win->ctx;
+    (void)sl_window_frame_ready(ctx);
+
+    uint64_t now = peos_time_ns();
+    uint16_t target_fps = win->target_fps;
+    uint8_t due = win->render_due;
+    win->render_due = 0u;
     uint8_t fading = win->anim_opacity < 255u;
     int64_t ux0 = 0, uy0 = 0;
     uint32_t uw = 0u, uh = 0u;
@@ -513,6 +533,7 @@ int sl_window_render(sl_window_t *win) {
         }
         sl_perf_add_cache(peos_time_ns() - c0);
         win->force_redraw = 0u;
+        win->content_pending = 0u;
         uint64_t interval = target_fps > 0u ? 1000000000ull / (uint64_t)target_fps : 0ull;
         win->next_render_ns = now + (interval ? interval : 1ull);
     }

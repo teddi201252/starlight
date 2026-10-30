@@ -206,6 +206,63 @@ uint32_t sl_dirty_request_count(void) {
     return g_dirty_requests;
 }
 
+uint64_t sl_dirty_check(sl_ctx_t *ctx, void (*compose)(sl_ctx_t *ctx)) {
+    static uint8_t *whole;
+    static size_t whole_bytes;
+    static uint64_t frames, bad_frames;
+    static uint64_t last_log_ns;
+    if (!ctx || !ctx->frame || !compose) return 0u;
+    size_t bytes = ctx->row_stride * ctx->fb.height;
+    if (!whole || whole_bytes != bytes) {
+        free(whole);
+        whole = (uint8_t *)malloc(bytes);
+        whole_bytes = whole ? bytes : 0u;
+        if (!whole) return 0u;
+    }
+    static sl_rect_t saved_rects[SL_DIRTY_MAX_RECTS];
+    size_t saved_count = g_dirty.count;
+    uint8_t saved_full = g_dirty.full;
+    memcpy(saved_rects, g_dirty.rects, saved_count * sizeof(sl_rect_t));
+    g_dirty.full = 1u;   // not sl_dirty_mark_full: this is no activity
+    g_dirty.count = 0u;
+    uint8_t *frame = ctx->frame;
+    ctx->frame = whole;
+    compose(ctx);
+    ctx->frame = frame;
+    memcpy(g_dirty.rects, saved_rects, saved_count * sizeof(sl_rect_t));
+    g_dirty.count = saved_count;
+    g_dirty.full = saved_full;
+
+    uint64_t differ = 0u;
+    uint32_t x0 = UINT32_MAX, y0 = UINT32_MAX, x1 = 0u, y1 = 0u;
+    size_t row_bytes = (size_t)ctx->fb.width * ctx->bytespp;
+    for (uint32_t y = 0u; y < ctx->fb.height; y++) {
+        const uint8_t *a = frame + (size_t)y * ctx->row_stride, *b = whole + (size_t)y * ctx->row_stride;
+        if (memcmp(a, b, row_bytes) == 0) continue;
+        for (uint32_t x = 0u; x < ctx->fb.width; x++) {
+            const uint8_t *pa = a + (size_t)x * ctx->bytespp, *pb = b + (size_t)x * ctx->bytespp;
+            if (pa[0] == pb[0] && pa[1] == pb[1] && pa[2] == pb[2]) continue;   // the 4th byte is padding
+            differ++;
+            if (x < x0) x0 = x;
+            if (y < y0) y0 = y;
+            if (x + 1u > x1) x1 = x + 1u;
+            if (y + 1u > y1) y1 = y + 1u;
+        }
+    }
+    frames++;
+    if (differ) bad_frames++;
+    uint64_t now = peos_time_ns();
+    if (differ && now - last_log_ns > 500000000ull) {   // at most two lines a second
+        last_log_ns = now;
+        printf("starlight: damage check: %u px differ in %u,%u %ux%u (%u of %u frames)\n", (unsigned)differ,
+               (unsigned)x0, (unsigned)y0, (unsigned)(x1 - x0), (unsigned)(y1 - y0),
+               (unsigned)bad_frames, (unsigned)frames);
+    } else if (!differ && (frames % 600u) == 0u) {
+        printf("starlight: damage check: %u of %u frames differ\n", (unsigned)bad_frames, (unsigned)frames);
+    }
+    return differ;
+}
+
 void sl_dirty_mark_full(void) {
     g_dirty_requests++;
     g_dirty.full = 1u;
@@ -1056,18 +1113,24 @@ int sl_handle_input(sl_ctx_t *ctx) {
         (input.mouse_updated || input.mouse_left_pressed || input.mouse_left_released ||
          input.mouse_moved || clipboard_cmds_pending)) {
         focused->task->on_input(ctx, &input, NULL, focused->task->userdata);
-        sl_windows_mark_focused_activity();
+        // The app is drawn again only when this changed something in it: a
+        // move that changes no hover is not a reason to (the app, if it
+        // reacts, sends a frame, and that marks it).
         if (input.mouse_left_pressed || input.mouse_left_released ||
             input.mouse_right_pressed || input.mouse_right_released) {
+            sl_windows_mark_focused_activity();
             sl_window_dirty_body(ctx, focused);
         } else {
             uint32_t dx = 0u, dy = 0u, dw = 0u, dh = 0u;
             if (sl_app_host_input_dirty_rect(focused, &input, focused->task->userdata, &dx, &dy, &dw, &dh)) {
+                sl_windows_mark_focused_activity();
                 sl_dirty_add(ctx, dx, dy, dw, dh);
             } else if (clipboard_cmds_pending) {
+                sl_windows_mark_focused_activity();
                 sl_window_dirty_body(ctx, focused);
             } else if (input.mouse_wheel_x != 0 || input.mouse_wheel_y != 0 ||
                        (input.mouse_moved && (input.mouse_buttons & 0x01u))) {
+                sl_windows_mark_focused_activity();
                 sl_window_dirty_body(ctx, focused);
             }
         }

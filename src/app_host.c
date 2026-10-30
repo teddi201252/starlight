@@ -323,6 +323,7 @@ typedef struct {
     orbit_pixels_t pixels;
     uint8_t ended;              // the app was ended from outside: close its window
     uint8_t veil_changed;       // a VEIL came or went: all of the window to the screen (next tick)
+    uint8_t body_changed;       // a select or menu opened or closed while drawing: the body again (next tick)
     int64_t child_stdin_fd;
     int64_t child_stdout_fd;
     uint64_t next_poll_ns;
@@ -4951,8 +4952,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         }
         if (select_open_before != shell->ui.ui.select_open_id ||
             context_open_before != shell->ui.context_open_id) {
-            // Ensure all controls refresh visual state immediately when dropdown opens/closes.
-            sl_window_dirty_body(ctx, win);
+            // All controls show their state again (next tick: no damage while composing).
+            shell->body_changed = 1u;
         }
 
         if (!shell->ui.mouse_down) shell->ui.active_panel_id = 0u;
@@ -5140,6 +5141,10 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
         if (!shell) continue;
         if (!shell->initialized) continue;
         shell->ui.double_click_ms = g_orbit_double_click_ms;
+        if (shell->body_changed) {
+            shell->body_changed = 0u;
+            sl_windows_mark_app_dirty(ctx, shell);
+        }
         if (shell->next_poll_ns > now) continue;
         uint8_t changed = orbit_poll_output(shell);
         shell->next_poll_ns = now + orbit_poll_interval_ns(shell, changed);

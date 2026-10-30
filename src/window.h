@@ -82,6 +82,12 @@ struct sl_window {
     uint32_t anim_underlay_height;
     uint8_t cache_valid;
     uint8_t force_redraw;
+    // The app's content changed (it sent a frame, the mouse or the keys
+    // changed it, a caret blinks): the inside is drawn again. Nothing else
+    // draws it again: the cursor passing over, a window above moving.
+    uint8_t content_pending;
+    uint8_t render_due;         // decided before the frame is composed (sl_window_prepare_render)
+    uint16_t target_fps;        // its frame rate now (focused, active, idle)
     uint8_t anim_opacity;
     uint16_t fps_focused;
     uint16_t fps_unfocused;
@@ -92,6 +98,10 @@ struct sl_window {
 
 int sl_window_init(sl_window_t *win, sl_ctx_t *ctx, app_instance_t* task, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 void sl_window_shutdown(sl_window_t *win);
+// Before the frame is composed: whether the inside is drawn again this
+// frame. If so, the caller puts the inside in the damage, so that what lies
+// over it (other windows, the dock, a veil) is composed again over it.
+int sl_window_prepare_render(sl_window_t *win, uint64_t now);
 int sl_window_render(sl_window_t *win);
 
 // The app's area, where its on_render draws.
@@ -101,7 +111,9 @@ sl_win_rect_t sl_window_outer_rect(const sl_window_t *win);
 // Mark the window dirty: all of it (moved, focus changed) or the body only
 // (the app redrew).
 void sl_window_dirty_all(const sl_ctx_t *ctx, const sl_window_t *win);
-void sl_window_dirty_body(const sl_ctx_t *ctx, const sl_window_t *win);
+void sl_window_dirty_body(const sl_ctx_t *ctx, sl_window_t *win);
+// The inside (title bar and body) in the damage.
+void sl_window_dirty_inside(const sl_ctx_t *ctx, const sl_window_t *win);
 // Night at alpha over the window's rounded shape, within the ctx clip.
 void sl_window_draw_veil(sl_ctx_t *ctx, const sl_window_t *win, uint8_t alpha);
 // Which title bar button is at (x, y), or SL_WIN_BTN_NONE.
