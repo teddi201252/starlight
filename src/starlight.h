@@ -48,6 +48,7 @@ typedef struct {
     uint8_t clipboard_feedback_audio_enabled;
     uint8_t clipboard_feedback_visual_enabled;
     uint8_t graphics_perf_enabled;
+    uint8_t check_damage;          // --check-damage: each frame checked against one composed whole
     uint8_t timezone_eu_central;   // timezone=Europe/Rome (CET/CEST), else UTC
     char language[16];             // language= ("en", "it"): /system/lang/<language>/
 

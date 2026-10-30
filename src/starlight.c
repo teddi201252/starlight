@@ -55,13 +55,20 @@ static void sl_perf_card_draw_rect(uint32_t dx, uint32_t dy, uint32_t dw, uint32
     sl_clip_clear(ctx);
 }
 
-static void sl_fps_tick(sl_ctx_t *ctx, uint64_t frame_start_ns) {
+// The frame's work, counted once it is done (no drawing, no damage here).
+static void sl_fps_account(sl_ctx_t *ctx, uint64_t frame_start_ns) {
     if (!ctx) return;
     ctx->fps_frames++;
-    uint64_t now = peos_time_ns();
-    uint64_t work = now - frame_start_ns;
+    uint64_t work = peos_time_ns() - frame_start_ns;
     ctx->perf_work_ns += work;
     if (work > ctx->perf_work_max_ns) ctx->perf_work_max_ns = work;
+}
+
+// Before the frame is composed: new numbers once a second, or the card
+// turned on or off, put its place in the damage.
+static void sl_fps_tick(sl_ctx_t *ctx) {
+    if (!ctx) return;
+    uint64_t now = peos_time_ns();
     uint64_t dt = now - ctx->fps_last_ns;
     if (dt >= 1000000000ull) {
         ctx->fps_value = (uint32_t)(((uint64_t)ctx->fps_frames * 1000000000ull) / dt);
@@ -88,6 +95,17 @@ static void sl_perf_card_render(sl_ctx_t *ctx) {
                                    sl_perf_card_draw_rect, ctx);
 }
 
+// Every layer, from the bottom up, each drawing only in the damage.
+static void sl_compose(sl_ctx_t *ctx) {
+    sl_render_dirty_background(ctx);
+    sl_windows_render_all(ctx);
+    sl_launcher_render(ctx);
+    sl_notify_render(ctx);
+    sl_sysmenu_render(ctx);
+    sl_clipboard_render_overlay(ctx);
+    sl_perf_card_render(ctx);
+}
+
 // Entry point of the Starlight desktop loop.
 int main(int argc, char **argv) {
     sl_ctx_t ctx;
@@ -98,6 +116,7 @@ int main(int argc, char **argv) {
     // `starlight --perf` turns the [GFXPERF] log on without touching settings.cfg.
     for (int i = 1; i < argc; i++) {
         if (argv[i] && strcmp(argv[i], "--perf") == 0) ctx.graphics_perf_enabled = 1u;
+        if (argv[i] && strcmp(argv[i], "--check-damage") == 0) ctx.check_damage = 1u;
     }
     sl_perf_init(ctx.graphics_perf_enabled);
     {
@@ -197,6 +216,12 @@ int main(int argc, char **argv) {
             sl_perf_add_desk(peos_time_ns() - d0);
         }
         sl_notify_tick(&ctx);
+        sl_fps_tick(&ctx);
+
+        // The damage is complete here: from now on, nothing adds to it until
+        // the cursor (which restores what it covers next frame). Every layer
+        // draws only in it, so the frame stays whole outside it.
+        int windows_waiting = sl_windows_prepare_render(&ctx);
 
         uint64_t composite_start_ns = peos_time_ns();
         sl_render_dirty_background(&ctx);
@@ -214,10 +239,11 @@ int main(int argc, char **argv) {
         sl_notify_render(&ctx);
         sl_sysmenu_render(&ctx);
         sl_clipboard_render_overlay(&ctx);
-        sl_fps_tick(&ctx, frame_start_ns);
         sl_perf_card_render(&ctx);
+        if (ctx.check_damage) (void)sl_dirty_check(&ctx, sl_compose);
+        sl_fps_account(&ctx, frame_start_ns);
 
-        int frame_active = (sl_dirty_request_count() != dirty_mark) ||
+        int frame_active = (sl_dirty_request_count() != dirty_mark) || windows_waiting ||
                            ctx.cursor_x != old_x || ctx.cursor_y != old_y;
         if (!ctx.hw_cursor) {
             sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);

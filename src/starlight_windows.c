@@ -2828,6 +2828,23 @@ int sl_windows_top_opaque_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y, ui
     return 0;
 }
 
+int sl_windows_prepare_render(sl_ctx_t *ctx) {
+    if (!ctx || !g_windows || g_window_count == 0u) return 0;
+    uint64_t now = peos_time_ns();
+    int waiting = 0;
+    for (size_t i = 0; i < g_window_count; i++) {
+        sl_window_t *win = &g_windows[i];
+        if (win->minimized) continue;
+        if (sl_window_prepare_render(win, now)) {
+            // Its inside is written whole: all that lies over it is composed again there.
+            sl_window_dirty_inside(ctx, win);
+        } else if (win->content_pending) {
+            waiting = 1;   // held back by its frame rate: a frame soon
+        }
+    }
+    return waiting;
+}
+
 void sl_windows_render_all(sl_ctx_t *ctx) {
     if (!ctx || !g_windows || g_window_count == 0u) return;
     for (size_t i = 0; i < g_window_count; i++) {
