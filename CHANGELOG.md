@@ -2,6 +2,12 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.14.0] - 2026-10-30
+- Pixels of an app's own beside its SLUI controls (SLUI SDK 1.0.7), with the mouse and typed text on them (1.0.8), the pointer's shape and the clipboard (1.0.9), Caps+A and Caps+S (1.0.10)
+- Lines an SLUI app writes outside the protocol go to the system log
+- Orbit: a cursor in the line and 5000 lines of scrollback
+- Consigli: the first start's notification; Pegasus in the dock
+
 ## [0.13.1] - 2026-10-29
 - New startup sound, Alba: a vibraphone climbing to E major add9 over a warm pad, synthesised from scratch (tools/startup-sound/alba.py)
 - The PeOS sun replaces the star in the top bar
