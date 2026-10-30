@@ -109,6 +109,15 @@ void sl_launcher_handle_release(sl_ctx_t *ctx);
 void sl_launcher_mark_dirty(sl_ctx_t *ctx);
 
 void sl_dirty_reset(void);
+// Before the frame is composed: the windows that draw their inside again
+// put it in the damage. -> 1 if a window waits for its frame rate.
+int sl_windows_prepare_render(sl_ctx_t *ctx);
+// --check-damage (development builds and make test-starlight-damage): the
+// frame composed again, whole, into a second buffer by compose, and compared
+// with the one composed only in the damage. Pixels that differ are counted
+// and logged ("starlight: damage check: ..."): something drew outside the
+// damage, or left the frame stale. -> how many pixels differ.
+uint64_t sl_dirty_check(sl_ctx_t *ctx, void (*compose)(sl_ctx_t *ctx));
 void sl_dirty_mark_full(void);
 void sl_dirty_add(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 uint32_t sl_dirty_request_count(void);
