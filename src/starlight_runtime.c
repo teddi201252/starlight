@@ -1265,7 +1265,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
         int64_t new_x = (int64_t)ctx->cursor_x - (int64_t)g_drag_grab_offset_x;
         int64_t new_y = (int64_t)ctx->cursor_y - (int64_t)g_drag_grab_offset_y;
         if (new_x < (int64_t)reserved_left) new_x = (int64_t)reserved_left;
-        if (new_y < 0) new_y = 0;
+        if (new_y < (int64_t)sl_windows_top(ctx)) new_y = sl_windows_top(ctx);   // under the top bar
 
         sl_window_move(g_drag_window, (uint32_t)new_x, (uint32_t)new_y);
         if (g_drag_window->x != old_x || g_drag_window->y != old_y) {
