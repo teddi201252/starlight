@@ -32,7 +32,16 @@
 #define SL_DESK_CPU_S 112u
 #define SL_DESK_NET_W 340u
 #define SL_DESK_NET_H 170u
-#define SL_DESK_SHADOW 30               // what a widget's shadow reaches past it
+#define SL_DESK_SHADOW 30               // the room a widget needs past it to be shown
+// What the shadows reach past a widget: under the mouse the light one goes
+// 12 + 37 px up and left, the dark one as far down and right (see
+// sl_desk_raised_style; reach = 3 box radii + 1, render/surface.c).
+#define SL_DESK_SHADOW_REACH 50
+// Around the calendar's card: its shadows (sl_desk_night_card_style) reach
+// 20 px up and left, 36 down and right under the mouse.
+#define SL_DESK_CAL_PAD 20
+#define SL_DESK_CAL_PAD_BR 40
+#define SL_DESK_CAL_CARD_MAX_H 306u      // six weeks (sl_desk_draw_calendar)
 #define SL_DESK_NET_BARS 7u
 
 typedef struct { int32_t x, y; uint32_t w, h; } sl_desk_rect_t;
@@ -291,16 +300,20 @@ static void sl_desk_layout(sl_ctx_t *ctx) {
     // The calendar under the clock as in the design, or beside it if the
     // screen is not tall enough (6 weeks at most: 330 x 320 with its shadow).
     uint32_t cal_h = 340u;
-    if (H >= 484u + cal_h) g_desk.cal_r = (sl_desk_rect_t){ (int32_t)SL_DESK_LEFT - 20, 464, SL_DESK_CAL_W + 40u, cal_h };
-    else g_desk.cal_r = (sl_desk_rect_t){ (int32_t)(SL_DESK_LEFT + SL_DESK_CLOCK_W + SL_DESK_CAL_GAP) - 20, 52,
-                                          SL_DESK_CAL_W + 40u, cal_h };
-    if (W < (uint32_t)g_desk.cal_r.x + g_desk.cal_r.w) g_desk.cal_r.w = 0u;   // no room: no calendar
+    uint32_t cal_area_w = SL_DESK_CAL_PAD + SL_DESK_CAL_W + SL_DESK_CAL_PAD_BR;
+    uint32_t cal_area_h = SL_DESK_CAL_PAD + SL_DESK_CAL_CARD_MAX_H + SL_DESK_CAL_PAD_BR;
+    if (H >= 484u + cal_h) g_desk.cal_r = (sl_desk_rect_t){ (int32_t)(SL_DESK_LEFT - SL_DESK_CAL_PAD), 464, cal_area_w, cal_area_h };
+    else g_desk.cal_r = (sl_desk_rect_t){ (int32_t)(SL_DESK_LEFT + SL_DESK_CLOCK_W + SL_DESK_CAL_GAP - SL_DESK_CAL_PAD), 52,
+                                          cal_area_w, cal_area_h };
+    // The calendar card's right edge, with the room it always had past it.
+    int32_t cal_right = g_desk.cal_r.x + (int32_t)(SL_DESK_CAL_PAD + SL_DESK_CAL_W + 20u);
+    if (W < (uint32_t)cal_right) g_desk.cal_r.w = 0u;   // no room: no calendar
     // The widgets as in the design (a column 60 px right of the clock, the
     // network card right of the calendar), or, with the calendar beside the
     // clock, the column right of the calendar and the card under it.
     uint8_t tall = H >= 484u + cal_h;
     int32_t col = tall ? (int32_t)(SL_DESK_LEFT + SL_DESK_CLOCK_W + 60u)
-                       : g_desk.cal_r.x + (int32_t)g_desk.cal_r.w + 10;
+                       : cal_right + 10;
     g_desk.vol_r = (sl_desk_rect_t){ col, 84, SL_DESK_VOL_W, SL_DESK_VOL_H };
     g_desk.cpu_r = (sl_desk_rect_t){ col, 394, SL_DESK_CPU_S, SL_DESK_CPU_S };
     g_desk.net_r = tall ? (sl_desk_rect_t){ (int32_t)(SL_DESK_LEFT + SL_DESK_CAL_W + 198u), 600, SL_DESK_NET_W, SL_DESK_NET_H }
@@ -448,7 +461,7 @@ static void sl_desk_draw_calendar(sl_ctx_t *ctx, const struct tm *now, const sl_
     int days = sl_desk_days_in(month, year);
     int weeks = (lead + days + 6) / 7;
 
-    int32_t x0 = g_desk.cal_r.x + 20, y0 = g_desk.cal_r.y + 20;
+    int32_t x0 = g_desk.cal_r.x + SL_DESK_CAL_PAD, y0 = g_desk.cal_r.y + SL_DESK_CAL_PAD;
     uint32_t row = 32u, h = 24u + 30u + 14u + (uint32_t)(weeks + 1) * row - 12u + 26u;
     g_desk.cal_card = (sl_desk_rect_t){ x0, y0, SL_DESK_CAL_W, h };
     sl_surf_style_t card = sl_desk_night_card_style(SL_DW_CAL);
@@ -487,9 +500,30 @@ static void sl_desk_draw_calendar(sl_ctx_t *ctx, const struct tm *now, const sl_
 // ------------------------------------------------------------------ widgets
 
 // A widget's area with its shadow: what is cleared and redrawn.
+static sl_desk_rect_t sl_desk_widget_area_reach(const sl_desk_rect_t *r, uint32_t reach) {
+    sl_desk_rect_t a = { r->x - (int32_t)reach, r->y - (int32_t)reach, r->w + 2u * reach, r->h + 2u * reach };
+    // The top bar is not the widgets': its text stays. One row apart from it,
+    // or the damage of both (the volume's number is in the bar) would merge
+    // into one band as wide as the screen.
+    int32_t top = (int32_t)SL_DESK_BAR_H + 1;
+    if (a.y < top) {
+        a.h -= (uint32_t)(top - a.y);
+        a.y = top;
+    }
+    return a;
+}
+
+// Whatever the widget's state: a state that changes, or a neighbour's shadow.
 static sl_desk_rect_t sl_desk_widget_area(const sl_desk_rect_t *r) {
-    return (sl_desk_rect_t){ r->x - SL_DESK_SHADOW, r->y - SL_DESK_SHADOW, r->w + 2u * SL_DESK_SHADOW,
-                             r->h + 2u * SL_DESK_SHADOW };
+    return sl_desk_widget_area_reach(r, SL_DESK_SHADOW_REACH);
+}
+
+// The reach of widget id's shadows as it is now (sl_desk_raised_style,
+// sl_desk_night_style): only its value changed, so that is where its old
+// shadow was too. Pressed (a volume being dragged) it is nearly flat.
+static sl_desk_rect_t sl_desk_widget_area_now(const sl_desk_rect_t *r, int id) {
+    uint32_t reach = g_desk.pressed == id ? 14u : g_desk.hot == id ? SL_DESK_SHADOW_REACH : 38u;
+    return sl_desk_widget_area_reach(r, reach);
 }
 
 // The theme's raised (day pearl, night navy) or night surface.
@@ -803,9 +837,9 @@ static void sl_desk_draw_widgets(sl_ctx_t *ctx, const struct tm *now, uint8_t fo
     g_desk.shown_cpu = f.cpu;
     g_desk.shown_net = f.net_version;
     sl_desk_rect_t a;
-    if (vol && g_desk.vol_r.w) { a = sl_desk_widget_area(&g_desk.vol_r); sl_desk_paint(ctx, &a, now, &f); }
-    if (cpu && g_desk.cpu_r.w) { a = sl_desk_widget_area(&g_desk.cpu_r); sl_desk_paint(ctx, &a, now, &f); }
-    if (net && g_desk.net_r.w) { a = sl_desk_widget_area(&g_desk.net_r); sl_desk_paint(ctx, &a, now, &f); }
+    if (vol && g_desk.vol_r.w) { a = sl_desk_widget_area_now(&g_desk.vol_r, SL_DW_VOL); sl_desk_paint(ctx, &a, now, &f); }
+    if (cpu && g_desk.cpu_r.w) { a = sl_desk_widget_area_now(&g_desk.cpu_r, SL_DW_CPU); sl_desk_paint(ctx, &a, now, &f); }
+    if (net && g_desk.net_r.w) { a = sl_desk_widget_area_now(&g_desk.net_r, SL_DW_NET); sl_desk_paint(ctx, &a, now, &f); }
 }
 
 // The calendar's region, with whatever widgets reach into it.

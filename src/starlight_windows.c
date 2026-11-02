@@ -1408,7 +1408,8 @@ static void sl_dock_dirty_item(const sl_ctx_t *ctx, size_t item) {
             if (L.mgr_item[i] != item) continue;
             uint32_t tx, ty;
             sl_mgr_tile_rect(&L, i, &tx, &ty);
-            sl_dirty_add_i64(ctx, (int64_t)tx - 40, (int64_t)ty - 40, SL_MGR_HI + 80, SL_MGR_HI + 80);
+            // tile-hi's shadow: 12 + 34 px down and right, 10 + 31 up and left
+            sl_dirty_add_i64(ctx, (int64_t)tx - 48, (int64_t)ty - 48, SL_MGR_HI + 96, SL_MGR_HI + 96);
         }
     }
 }

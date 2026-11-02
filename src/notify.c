@@ -38,7 +38,7 @@
 #define SL_NOTIFY_ICON 46u
 #define SL_NOTIFY_GAP 18u
 #define SL_NOTIFY_MIN_W 480u
-#define SL_NOTIFY_SHADOW 24u
+#define SL_NOTIFY_SHADOW 28u   // the card's shadow (k_night_card): 22 px + 6 down and right
 // The centre: a night panel under the bar, the newest first.
 #define SL_CENTER_W 480u
 #define SL_CENTER_HEAD 70u
