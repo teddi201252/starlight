@@ -12,6 +12,7 @@ void sl_perf_add_composite(uint64_t elapsed_ns);
 // inside into its cache.
 void sl_perf_add_app(uint64_t elapsed_ns);
 void sl_perf_add_cache(uint64_t elapsed_ns);
+void sl_perf_count_window(uint8_t part);
 // Parts of the frame for the slowest one's breakdown: the windows, the dock
 // and the desktop layer's own redraws (clock, widgets).
 void sl_perf_add_windows(uint64_t elapsed_ns);
