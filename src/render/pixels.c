@@ -208,6 +208,17 @@ static int sl_clip_rect_to_ctx(const sl_ctx_t *ctx,
 
 void sl_clip_set(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (!ctx) return;
+    if (ctx->clip_limit) {   // a window drawn again in part: nothing outside the limit
+        uint64_t x0 = x > ctx->limit_x ? x : ctx->limit_x, y0 = y > ctx->limit_y ? y : ctx->limit_y;
+        uint64_t x1 = (uint64_t)x + w, y1 = (uint64_t)y + h;
+        uint64_t lx1 = (uint64_t)ctx->limit_x + ctx->limit_w, ly1 = (uint64_t)ctx->limit_y + ctx->limit_h;
+        if (x1 > lx1) x1 = lx1;
+        if (y1 > ly1) y1 = ly1;
+        x = (uint32_t)x0;
+        y = (uint32_t)y0;
+        w = x1 > x0 ? (uint32_t)(x1 - x0) : 0u;
+        h = y1 > y0 ? (uint32_t)(y1 - y0) : 0u;
+    }
     ctx->clip_enabled = 1u;
     ctx->clip_x = x;
     ctx->clip_y = y;
@@ -215,8 +226,29 @@ void sl_clip_set(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h) 
     ctx->clip_h = h;
 }
 
+void sl_clip_limit(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (!ctx) return;
+    ctx->clip_limit = 0u;
+    sl_clip_set(ctx, x, y, w, h);
+    ctx->clip_limit = 1u;
+    ctx->limit_x = x;
+    ctx->limit_y = y;
+    ctx->limit_w = w;
+    ctx->limit_h = h;
+}
+
+void sl_clip_unlimit(sl_ctx_t *ctx) {
+    if (!ctx) return;
+    ctx->clip_limit = 0u;
+    sl_clip_clear(ctx);
+}
+
 void sl_clip_clear(sl_ctx_t *ctx) {
     if (!ctx) return;
+    if (ctx->clip_limit) {   // back to the limit, not to the whole screen
+        sl_clip_set(ctx, ctx->limit_x, ctx->limit_y, ctx->limit_w, ctx->limit_h);
+        return;
+    }
     ctx->clip_enabled = 0u;
     ctx->clip_x = 0u;
     ctx->clip_y = 0u;

@@ -25,6 +25,7 @@ typedef struct {
     uint64_t rects;
     uint64_t frames;
     uint64_t full_frames;
+    uint64_t win_whole, win_part;   // window insides drawn whole, and in part (the app's pixels)
     uint64_t samples[SL_PERF_SAMPLE_CAP];
     uint64_t work_samples[SL_PERF_SAMPLE_CAP];
     size_t sample_count;
@@ -108,6 +109,12 @@ void sl_perf_add_cache(uint64_t elapsed_ns) {
     if (g_perf.enabled) g_perf.cache_ns += elapsed_ns;
 }
 
+void sl_perf_count_window(uint8_t part) {
+    if (!g_perf.enabled) return;
+    if (part) g_perf.win_part++;
+    else g_perf.win_whole++;
+}
+
 void sl_perf_add_composite(uint64_t elapsed_ns) {
     if (g_perf.enabled) g_perf.composite_ns += elapsed_ns;
 }
@@ -167,7 +174,7 @@ void sl_perf_frame_end(uint64_t now_ns) {
            "rects=%llu pixels=%llu bytes=%llu full=%llu app_us=%llu cache_us=%llu "
            "slow_us=%llu slow_render_us=%llu slow_bg_us=%llu slow_app_us=%llu slow_cache_us=%llu "
            "slow_copy_us=%llu slow_flush_us=%llu slow_pixels=%llu "
-           "slow_windows_us=%llu slow_dock_us=%llu slow_desk_us=%llu\n",
+           "slow_windows_us=%llu slow_dock_us=%llu slow_desk_us=%llu win_whole=%llu win_part=%llu\n",
            (unsigned long long)g_perf.frames,
            (unsigned long long)(p50 / 1000u),
            (unsigned long long)(p95 / 1000u),
@@ -193,6 +200,8 @@ void sl_perf_frame_end(uint64_t now_ns) {
            (unsigned long long)g_perf.slow_pixels,
            (unsigned long long)(g_perf.slow_part[6] / 1000u),
            (unsigned long long)(g_perf.slow_part[7] / 1000u),
-           (unsigned long long)(g_perf.slow_part[8] / 1000u));
+           (unsigned long long)(g_perf.slow_part[8] / 1000u),
+           (unsigned long long)g_perf.win_whole,
+           (unsigned long long)g_perf.win_part);
     sl_perf_reset_window(now_ns);
 }

@@ -86,7 +86,11 @@ struct sl_window {
     // changed it, a caret blinks): the inside is drawn again. Nothing else
     // draws it again: the cursor passing over, a window above moving.
     uint8_t content_pending;
-    uint8_t render_due;         // decided before the frame is composed (sl_window_prepare_render)
+    uint8_t render_due;         // decided before the frame is composed (sl_window_prepare_render); 2: in part
+    // Only the app's own pixels changed ("HOST PIXELS_DAMAGE"): the inside is
+    // drawn again only where they did (part_*, on the screen).
+    uint8_t pixels_pending;
+    uint32_t part_x, part_y, part_w, part_h;
     uint8_t cache_clipped;      // the cache holds only what was on screen
     uint16_t target_fps;        // its frame rate now (focused, active, idle)
     uint8_t anim_opacity;

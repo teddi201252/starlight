@@ -1,4 +1,5 @@
 #include "starlight_internal.h"
+#include "app_host.h"
 #include "perf_stats.h"
 #include "desktop.h"
 #include "notify.h"
@@ -234,7 +235,10 @@ int main(int argc, char **argv) {
             if (app_prompt_blink_now != app_prompt_blink_prev) {
                 app_prompt_blink_prev = app_prompt_blink_now;
                 sl_window_t *focused = sl_window_get_focused();
-                if (focused) sl_window_dirty_body(&ctx, focused);   // the prompt blinks in the body
+                // The prompt, or a field's caret, blinks in the body.
+                if (focused && (!focused->task || !focused->task->userdata || sl_app_host_has_caret(focused->task->userdata))) {
+                    sl_window_dirty_body(&ctx, focused);
+                }
             }
         }
 

@@ -35,3 +35,13 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
 int sl_app_host_ready(const void *userdata);
 int sl_app_host_cache_update_rect(const sl_window_t *win, const void *userdata,
                                   uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
+/* Where the app's own pixels changed since it was last asked ("HOST
+ * PIXELS_DAMAGE"), on the screen and inside the body; 0: nowhere. */
+/* The pointer is the app's own pixels' (held there, or over them): what it
+ * does there the app draws, and says where (PIXELS_DAMAGE). */
+/* Something in the app blinks at the caret's pace: the terminal's prompt, a
+ * focused text field. */
+int sl_app_host_has_caret(const void *userdata);
+int sl_app_host_pixels_have_pointer(const sl_ctx_t *ctx, const void *userdata);
+int sl_app_host_pixels_rect(const sl_window_t *win, const void *userdata,
+                            uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);

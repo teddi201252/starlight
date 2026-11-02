@@ -285,6 +285,11 @@ typedef struct {
     int32_t last_x, last_y;
     uint32_t last_buttons;
     uint8_t cursor;         // the pointer over them (SLUI SDK 1.0.9 "HOST CURSOR"): 0 arrow, 1 hand, 2 text
+    // "HOST PIXELS_DAMAGE x y w h" since the window last asked: in the body, x0 y0 x1 y1.
+    uint8_t damaged;
+    uint32_t dmg[4];
+    uint8_t quiet_line;     // the line just read draws nothing (or only this damage)
+    uint8_t other_line;     // a line that was not quiet, since the last poll: the whole window again
 } orbit_pixels_t;
 
 typedef struct {
@@ -1770,8 +1775,27 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             orbit_pixels_request(shell, w, h);
             return 1;
         }
-        if (orbit_token_is(host_tok, host_len, "PIXELS_DAMAGE")) {
-            return 1;   // read: the window is redrawn (orbit_poll_output saw a line)
+        if (orbit_token_is(host_tok, host_len, "PIXELS_DAMAGE")) {   // only there, if nothing else came
+            uint32_t v[4];
+            orbit_pixels_t *px = &shell->pixels;
+            if (!orbit_parse_u32(&p, &v[0]) || !orbit_parse_u32(&p, &v[1]) || !orbit_parse_u32(&p, &v[2]) ||
+                !orbit_parse_u32(&p, &v[3])) {
+                return 1;   // where is not known: all of it (not quiet)
+            }
+            px->quiet_line = 1u;
+            if (v[2] == 0u || v[3] == 0u) return 1;
+            uint32_t x1 = v[0] + v[2] < v[0] ? UINT32_MAX : v[0] + v[2];
+            uint32_t y1 = v[1] + v[3] < v[1] ? UINT32_MAX : v[1] + v[3];
+            if (!px->damaged) {
+                px->dmg[0] = v[0], px->dmg[1] = v[1], px->dmg[2] = x1, px->dmg[3] = y1;
+                px->damaged = 1u;
+            } else {
+                if (v[0] < px->dmg[0]) px->dmg[0] = v[0];
+                if (v[1] < px->dmg[1]) px->dmg[1] = v[1];
+                if (x1 > px->dmg[2]) px->dmg[2] = x1;
+                if (y1 > px->dmg[3]) px->dmg[3] = y1;
+            }
+            return 1;
         }
         if (orbit_token_is(host_tok, host_len, "CURSOR")) {   // the pointer over the app's pixels
             uint32_t kind = 0u;
@@ -1780,10 +1804,12 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
                 return 1;
             }
             shell->pixels.cursor = (uint8_t)(kind <= 2u ? kind : 0u);
+            shell->pixels.quiet_line = 1u;   // the pointer, not the window
             return 1;
         }
         if (orbit_token_is(host_tok, host_len, "CLIPBOARD_PART") || orbit_token_is(host_tok, host_len, "CLIPBOARD_COPY")) {
             if (p && *p == ' ') p++;   // one space after the word; the text may begin with more
+            shell->pixels.quiet_line = 1u;
             orbit_clip_append(shell, p);
             if (orbit_token_is(host_tok, host_len, "CLIPBOARD_COPY")) {
                 (void)sl_clipboard_set_text(shell->clip ? shell->clip : "", shell->clip_len);
@@ -1797,6 +1823,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             return 1;
         }
         if (orbit_token_is(host_tok, host_len, "CLIPBOARD_GET")) {
+            shell->pixels.quiet_line = 1u;
             orbit_send_ui_event_clipboard(shell);
             return 1;
         }
@@ -2673,6 +2700,7 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
     if (c == '\n') {
         const char *line = (shell->pending_line) ? shell->pending_line : "";
         if (shell->pending_line) shell->pending_line[shell->pending_len] = '\0';
+        shell->pixels.quiet_line = 0u;
         if (!orbit_fb_handle_line(shell, line)) {
             shell->surface.active = 0u;
             if (!orbit_ui_handle_line(shell, line)) {
@@ -2682,6 +2710,7 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
                 orbit_push_line_n(shell, line, shell->pending_len);
             }
         }
+        if (!shell->pixels.quiet_line) shell->pixels.other_line = 1u;
         orbit_pending_line_reset(shell);
         return;
     }
@@ -2911,6 +2940,7 @@ static uint8_t orbit_poll_output(orbit_shell_t *shell) {
     if (!shell || shell->child_stdout_fd < 0) return 0u;
 
     uint8_t changed = 0u;
+    shell->pixels.other_line = 0u;
 
     char buf[4096];
     for (uint32_t i = 0u; i < ORBIT_MAX_POLL_READS; i++) {
@@ -2934,6 +2964,7 @@ static uint8_t orbit_poll_output(orbit_shell_t *shell) {
         if (w == (uint64_t)shell->child_pid) {
             uint8_t app = shell->ui.enabled;   // an app with its own window, not the terminal
             orbit_mark_child_exited(shell);
+            shell->pixels.other_line = 1u;   // drawn whole: it is gone
             // Ended from outside (SYS_PROC_KILL: 137): its window goes too.
             if (app && status == 137) shell->ended = 1u;
             changed = 1u;
@@ -4125,6 +4156,41 @@ int sl_app_host_cache_update_rect(const sl_window_t *win, const void *userdata,
     return orbit_ui_body_rect(win, x, y, w, h) ? 1 : 0;
 }
 
+int sl_app_host_has_caret(const void *userdata) {
+    const orbit_shell_t *shell = (const orbit_shell_t *)userdata;
+    if (!shell || !shell->initialized) return 0;
+    return !shell->ui.enabled || shell->ui.ui.focused_id != 0u;
+}
+
+int sl_app_host_pixels_have_pointer(const sl_ctx_t *ctx, const void *userdata) {
+    if (!ctx || !userdata) return 0;
+    const orbit_shell_t *shell = (const orbit_shell_t *)userdata;
+    const orbit_pixels_t *px = &shell->pixels;
+    if (!shell->initialized || !px->base || !px->shown) return 0;
+    if (px->captured) return 1;
+    int64_t mx = (int64_t)ctx->cursor_x - px->view_x, my = (int64_t)ctx->cursor_y - px->view_y;
+    return mx >= 0 && my >= 0 && mx < (int64_t)px->view_w && my < (int64_t)px->view_h;
+}
+
+int sl_app_host_pixels_rect(const sl_window_t *win, const void *userdata,
+                            uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!win || !userdata || !x || !y || !w || !h) return 0;
+    orbit_shell_t *shell = (orbit_shell_t *)userdata;
+    orbit_pixels_t *px = &shell->pixels;
+    if (!px->damaged) return 0;
+    px->damaged = 0u;
+    uint32_t bx, by, bw, bh;
+    if (!shell->initialized || !orbit_ui_body_rect(win, &bx, &by, &bw, &bh)) return 0;
+    uint32_t x0 = px->dmg[0] < bw ? px->dmg[0] : bw, y0 = px->dmg[1] < bh ? px->dmg[1] : bh;
+    uint32_t x1 = px->dmg[2] < bw ? px->dmg[2] : bw, y1 = px->dmg[3] < bh ? px->dmg[3] : bh;
+    if (x1 <= x0 || y1 <= y0) return 0;
+    *x = bx + x0;
+    *y = by + y0;
+    *w = x1 - x0;
+    *h = y1 - y0;
+    return 1;
+}
+
 static const char *orbit_get_line(const orbit_shell_t *shell, size_t logical_index) {
     if (!shell || !shell->lines || logical_index >= shell->line_count) return "";
     const char *t = shell->lines[(shell->line_head + logical_index) % ORBIT_MAX_LINES].text;
@@ -5153,7 +5219,10 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
         uint8_t changed = orbit_poll_output(shell);
         shell->next_poll_ns = now + orbit_poll_interval_ns(shell, changed);
 
-        if (changed) {
+        if (changed && !shell->pixels.other_line && shell->ui.enabled) {   // only quiet lines
+            if (shell->pixels.damaged) sl_windows_mark_app_pixels(ctx, shell);   // the window in part
+        } else if (changed) {
+            shell->pixels.damaged = 0u;   // drawn whole
             sl_windows_mark_app_dirty(ctx, shell);
         }
         if (shell->veil_changed) {   // the title bar and the frame changed too, not just the body

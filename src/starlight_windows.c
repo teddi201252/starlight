@@ -2710,6 +2710,17 @@ void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata) {
     }
 }
 
+void sl_windows_mark_app_pixels(const sl_ctx_t *ctx, const void *userdata) {
+    if (!ctx || !userdata || !g_windows) return;
+    uint64_t now = peos_time_ns();
+    for (size_t i = 0; i < g_window_count; i++) {
+        if (!g_windows[i].task || g_windows[i].task->userdata != userdata) continue;
+        g_windows[i].pixels_pending = 1u;   // where: asked when it is drawn (sl_window_prepare_render)
+        g_windows[i].last_activity_ns = now;
+        g_windows[i].next_render_ns = 0ull;
+    }
+}
+
 void sl_windows_mark_app_dirty_all(const sl_ctx_t *ctx, const void *userdata) {
     for (size_t i = 0; ctx && userdata && g_windows && i < g_window_count; i++) {
         if (!g_windows[i].task || g_windows[i].task->userdata != userdata) continue;
@@ -2840,10 +2851,13 @@ int sl_windows_prepare_render(sl_ctx_t *ctx) {
     for (size_t i = 0; i < g_window_count; i++) {
         sl_window_t *win = &g_windows[i];
         if (win->minimized) continue;
-        if (sl_window_prepare_render(win, now)) {
+        int due = sl_window_prepare_render(win, now);
+        if (due == 2) {   // in part: only there
+            sl_dirty_add(ctx, win->part_x, win->part_y, win->part_w, win->part_h);
+        } else if (due) {
             // Its inside is written whole: all that lies over it is composed again there.
             sl_window_dirty_inside(ctx, win);
-        } else if (win->content_pending) {
+        } else if (win->content_pending || win->pixels_pending) {
             waiting = 1;   // held back by its frame rate: a frame soon
         }
     }
