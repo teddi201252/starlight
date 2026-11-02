@@ -542,6 +542,9 @@ int sl_window_render(sl_window_t *win) {
             win->cache_valid = (uint8_t)sl_window_cache_copy(win, rx, ry, rw, rh, 1);
         } else {
             win->cache_valid = (uint8_t)sl_window_cache_copy(win, in.x, in.y, in.w, in.h, 1);
+            // Only what is on screen was kept: moved, the rest is drawn anew.
+            win->cache_clipped = in.x < 0 || in.y < 0 || (int64_t)in.x + in.w > (int64_t)ctx->fb.width ||
+                                 (int64_t)in.y + in.h > (int64_t)ctx->fb.height;
         }
         sl_perf_add_cache(peos_time_ns() - c0);
         win->force_redraw = 0u;

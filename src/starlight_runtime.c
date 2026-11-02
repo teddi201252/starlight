@@ -61,13 +61,20 @@ static struct {
     uint8_t full;
 } g_dirty = {0};
 
-static sl_window_t *g_drag_window = NULL;
+// The window being dragged, by its app: g_windows moves when a window opens,
+// closes or comes to the front, a pointer into it would not follow.
+static const app_instance_t *g_drag_task = NULL;
 static uint8_t g_drag_active = 0u;
 
+static sl_window_t *sl_drag_window(void) {
+    return g_drag_active ? sl_windows_find_task(g_drag_task) : NULL;
+}
+
 static void sl_drag_stop(void) {
-    if (g_drag_window) g_drag_window->dragging = 0u;
+    sl_window_t *win = sl_drag_window();
+    if (win) win->dragging = 0u;
     g_drag_active = 0u;
-    g_drag_window = NULL;
+    g_drag_task = NULL;
 }
 static int32_t g_drag_grab_offset_x = 0;
 static int32_t g_drag_grab_offset_y = 0;
@@ -1243,9 +1250,9 @@ int sl_handle_input(sl_ctx_t *ctx) {
                 last_title_ns = now;
                 last_title_task = focused->task;
             }
-            if (inside_x && inside_topbar) {
+            if (inside_x && inside_topbar && focused->task) {
                 g_drag_active = 1u;
-                g_drag_window = focused;
+                g_drag_task = focused->task;
                 focused->dragging = 1u;
                 g_drag_grab_offset_x = (int32_t)(ctx->cursor_x - focused->x);
                 g_drag_grab_offset_y = (int32_t)(ctx->cursor_y - focused->y);
@@ -1254,28 +1261,33 @@ int sl_handle_input(sl_ctx_t *ctx) {
     }
 
     if (input.mouse_left_released) {
-        if (g_drag_active && g_drag_window) sl_windows_remember(g_drag_window);   // opens there next time
+        sl_window_t *dragged = sl_drag_window();
+        if (dragged) sl_windows_remember(dragged);   // opens there next time
         sl_drag_stop();
     }
 
-    if (input.mouse_moved && (input.mouse_buttons & 0x01u) && g_drag_active && g_drag_window) {
-        uint32_t old_x = g_drag_window->x;
-        uint32_t old_y = g_drag_window->y;
+    sl_window_t *drag_win = sl_drag_window();
+    if (g_drag_active && !drag_win) sl_drag_stop();   // closed while dragged
+    if (input.mouse_moved && (input.mouse_buttons & 0x01u) && drag_win) {
+        uint32_t old_x = drag_win->x;
+        uint32_t old_y = drag_win->y;
 
         int64_t new_x = (int64_t)ctx->cursor_x - (int64_t)g_drag_grab_offset_x;
         int64_t new_y = (int64_t)ctx->cursor_y - (int64_t)g_drag_grab_offset_y;
         if (new_x < (int64_t)reserved_left) new_x = (int64_t)reserved_left;
         if (new_y < (int64_t)sl_windows_top(ctx)) new_y = sl_windows_top(ctx);   // under the top bar
 
-        sl_window_move(g_drag_window, (uint32_t)new_x, (uint32_t)new_y);
-        if (g_drag_window->x != old_x || g_drag_window->y != old_y) {
+        sl_window_move(drag_win, (uint32_t)new_x, (uint32_t)new_y);
+        if (drag_win->x != old_x || drag_win->y != old_y) {
+            // Part of it was off screen when cached: what comes back is drawn.
+            if (drag_win->cache_clipped) drag_win->force_redraw = 1u;
             // Moving does not change what the app shows: its cached inside is
             // copied to the new place, the app is not asked to redraw.
             // Where it was and where it is, shadows included.
             sl_window_dirty_all(ctx, &(sl_window_t){ .x = old_x, .y = old_y,
-                                                     .width = g_drag_window->width,
-                                                     .height = g_drag_window->height });
-            sl_window_dirty_all(ctx, g_drag_window);
+                                                     .width = drag_win->width,
+                                                     .height = drag_win->height });
+            sl_window_dirty_all(ctx, drag_win);
         }
     }
     return 0;
