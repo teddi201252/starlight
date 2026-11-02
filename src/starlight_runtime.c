@@ -72,6 +72,16 @@ static void sl_drag_stop(void) {
 static int32_t g_drag_grab_offset_x = 0;
 static int32_t g_drag_grab_offset_y = 0;
 
+static uint64_t g_frame_ns;
+
+void sl_frame_time_set(uint64_t ns) {
+    g_frame_ns = ns;
+}
+
+uint64_t sl_frame_time_ns(void) {
+    return g_frame_ns ? g_frame_ns : peos_time_ns();
+}
+
 void sl_dirty_reset(void) {
     g_dirty.count = 0;
     g_dirty.full = 0u;
