@@ -376,7 +376,7 @@ void sl_clipboard_render_overlay(sl_ctx_t *ctx) {
     if (!ctx) return;
 
     if (g_feedback.active && g_feedback.visual_enabled) {
-        uint64_t now_ns = peos_time_ns();
+        uint64_t now_ns = sl_frame_time_ns();
         float progress = (float)(now_ns - g_feedback.start_ns) / (float)((uint64_t)g_feedback.duration_ms * 1000000ull);
         uint32_t fx = 0u, fy = 0u, fw = 0u, fh = 0u;
         uint8_t alpha = 0u;

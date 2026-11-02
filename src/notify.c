@@ -429,7 +429,7 @@ void sl_notify_render(sl_ctx_t *ctx) {
         return;
     }
     if (!g_note.showing || !g_note.card_w) return;
-    g_note.drawn_off = sl_note_offset(ctx, peos_time_ns());
+    g_note.drawn_off = sl_note_offset(ctx, sl_frame_time_ns());
     uint32_t x = g_note.card_x > SL_NOTIFY_SHADOW ? g_note.card_x - SL_NOTIFY_SHADOW : 0u;
     sl_dirty_for_each_intersection(x, SL_NOTIFY_TOP - 20u, ctx->fb.width - x, SL_NOTIFY_H + 2u * SL_NOTIFY_SHADOW,
                                    sl_note_draw_rect, ctx);

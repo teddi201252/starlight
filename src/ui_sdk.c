@@ -2,6 +2,7 @@
 
 #include "keyboard_layout.h"
 #include "render/surface.h"
+#include "starlight_internal.h"   // sl_frame_time_ns
 
 #include <string.h>
 
@@ -1523,7 +1524,7 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t vis_chars = (w > 12u) ? ((w - 12u) / fw) : 0u;
     if (vis_chars > 0u) {
         uint8_t caret_visible = (enabled && focused &&
-                                 ((peos_time_ns() / 500000000ull) & 1ull)) ? 1u : 0u;
+                                 ((sl_frame_time_ns() / 500000000ull) & 1ull)) ? 1u : 0u;
         uint32_t input_caret_pos = (ui->text_caret_id == id) ? ui->text_caret_pos : len;
         if (ui->text_input_scroll_col > len) ui->text_input_scroll_col = len;
         if (ui->text_input_scroll_col > 0u && sl_ui_utf8_is_cont(text[ui->text_input_scroll_col])) {
@@ -2006,7 +2007,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t caret_col = 0u;
     uint32_t caret_line = sl_ui_text_line_col_at(text, area_caret_pos, &caret_col);
     uint8_t caret_visible = (enabled && focused &&
-                             (((peos_time_ns() / 500000000ull) & 1ull) != 0ull)) ? 1u : 0u;
+                             (((sl_frame_time_ns() / 500000000ull) & 1ull) != 0ull)) ? 1u : 0u;
     if (caret_line < ui->text_area_scroll_line) ui->text_area_scroll_line = caret_line;
     if (caret_line >= ui->text_area_scroll_line + vis_lines) {
         ui->text_area_scroll_line = caret_line - vis_lines + 1u;

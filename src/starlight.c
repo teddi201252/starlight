@@ -165,6 +165,7 @@ int main(int argc, char **argv) {
 
     for (;;) {
         uint64_t frame_start_ns = peos_time_ns();
+        sl_frame_time_set(frame_start_ns);
         sl_perf_frame_begin(frame_start_ns);
         if (!ctx.hw_cursor) {
             if (ctx.cursor_saved_valid) {

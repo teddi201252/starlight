@@ -109,6 +109,11 @@ void sl_launcher_handle_release(sl_ctx_t *ctx);
 void sl_launcher_mark_dirty(sl_ctx_t *ctx);
 
 void sl_dirty_reset(void);
+// The time of the frame being made, set once at its start: what is drawn
+// by the time (a caret that blinks, a card that slides) is the same in every
+// layer and in a composition done again (--check-damage).
+void sl_frame_time_set(uint64_t ns);
+uint64_t sl_frame_time_ns(void);
 // Before the frame is composed: the windows that draw their inside again
 // put it in the damage. -> 1 if a window waits for its frame rate.
 int sl_windows_prepare_render(sl_ctx_t *ctx);

@@ -5027,7 +5027,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
     size_t virtual_row = first_row;
     uint32_t draw_row = 0u;
-    uint64_t blink = (peos_time_ns() / 500000000ull) & 1ull;
+    uint64_t blink = (sl_frame_time_ns() / 500000000ull) & 1ull;
     const sl_ui_color_t *neon = sl_ui_runtime_color(SL_UI_COLOR_NEON);
 
     for (size_t i = first; i < logical_total && draw_row < history_rows; i++) {
