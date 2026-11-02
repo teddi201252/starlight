@@ -482,7 +482,8 @@ int sl_window_prepare_render(sl_window_t *win, uint64_t now) {
     if (!win->ctx || win->minimized) return 0;
     sl_win_rect_t in = sl_window_inner_rect(win);
     uint8_t resized = win->client_width != in.w || win->client_height != in.h;
-    if (!(win->content_pending || win->force_redraw || !win->cache_valid || resized)) return 0;   // nothing new
+    uint8_t whole = win->content_pending || win->force_redraw || !win->cache_valid || resized;
+    if (!whole && !win->pixels_pending) return 0;   // nothing new
 
     uint16_t base_fps = win->focused ? win->fps_focused : win->fps_unfocused;
     uint16_t target_fps = base_fps;
@@ -502,6 +503,14 @@ int sl_window_prepare_render(sl_window_t *win, uint64_t now) {
     // Being dragged: the content has not changed, only its place. The
     // redraw waits for the drop, unless something asked for it.
     else if (win->dragging && win->cache_valid && !win->force_redraw) due = 0u;
+    if (due && !whole) {   // only the app's pixels: where they changed, if that is still on the window
+        win->pixels_pending = 0u;
+        uint8_t where = win->task && win->task->userdata &&
+                        sl_app_host_pixels_rect(win, win->task->userdata, &win->part_x, &win->part_y, &win->part_w, &win->part_h);
+        if (!where) return 0;
+        if (win->anim_opacity < 255u) win->content_pending = 1u;   // fading: blended whole, drawn whole
+        else due = 2u;
+    }
     win->render_due = due;
     return due;
 }
@@ -528,12 +537,24 @@ int sl_window_render(sl_window_t *win) {
                                        sl_window_ring_rect, win);
     }
 
-    if (!due) {
+    if (due != 1u) {
         sl_win_rect_t in = sl_window_inner_rect(win);
         sl_dirty_for_each_intersection((uint32_t)in.x, (uint32_t)in.y, in.w, in.h, sl_window_blit_cache_rect, win);
-    } else {
+    }
+    if (due == 2u) {   // over the cache, the inside again where the app's pixels changed
+        sl_clip_limit(ctx, win->part_x, win->part_y, win->part_w, win->part_h);
+        sl_window_draw_inside(win);
+        sl_perf_count_window(1u);
+        sl_clip_unlimit(ctx);
+        uint64_t c0 = peos_time_ns();
+        (void)sl_window_cache_copy(win, win->part_x, win->part_y, win->part_w, win->part_h, 1);
+        sl_perf_add_cache(peos_time_ns() - c0);
+        uint64_t interval = target_fps > 0u ? 1000000000ull / (uint64_t)target_fps : 0ull;
+        win->next_render_ns = now + (interval ? interval : 1ull);
+    } else if (due) {
         uint8_t cache_was_valid = win->cache_valid;
         sl_window_draw_inside(win);
+        sl_perf_count_window(0u);
         uint64_t c0 = peos_time_ns();
         sl_win_rect_t in = sl_window_inner_rect(win);
         uint32_t rx = 0u, ry = 0u, rw = 0u, rh = 0u;
@@ -549,6 +570,7 @@ int sl_window_render(sl_window_t *win) {
         sl_perf_add_cache(peos_time_ns() - c0);
         win->force_redraw = 0u;
         win->content_pending = 0u;
+        win->pixels_pending = 0u;   // drawn too
         uint64_t interval = target_fps > 0u ? 1000000000ull / (uint64_t)target_fps : 0ull;
         win->next_render_ns = now + (interval ? interval : 1ull);
     }

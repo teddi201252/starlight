@@ -33,6 +33,8 @@ typedef struct {
     uint32_t clip_y;
     uint32_t clip_w;
     uint32_t clip_h;
+    uint8_t clip_limit;       // sl_clip_limit: clips stay inside limit_*
+    uint32_t limit_x, limit_y, limit_w, limit_h;
     char cursor_path[160];
     char background_path[160];
     char font_manifest_path[160];

@@ -1145,8 +1145,9 @@ int sl_handle_input(sl_ctx_t *ctx) {
             } else if (clipboard_cmds_pending) {
                 sl_windows_mark_focused_activity();
                 sl_window_dirty_body(ctx, focused);
-            } else if (input.mouse_wheel_x != 0 || input.mouse_wheel_y != 0 ||
-                       (input.mouse_moved && (input.mouse_buttons & 0x01u))) {
+            } else if ((input.mouse_wheel_x != 0 || input.mouse_wheel_y != 0 ||
+                        (input.mouse_moved && (input.mouse_buttons & 0x01u))) &&
+                       !sl_app_host_pixels_have_pointer(ctx, focused->task->userdata)) {   // the app's pixels: it says where
                 sl_windows_mark_focused_activity();
                 sl_window_dirty_body(ctx, focused);
             }
