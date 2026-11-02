@@ -87,6 +87,7 @@ struct sl_window {
     // draws it again: the cursor passing over, a window above moving.
     uint8_t content_pending;
     uint8_t render_due;         // decided before the frame is composed (sl_window_prepare_render)
+    uint8_t cache_clipped;      // the cache holds only what was on screen
     uint16_t target_fps;        // its frame rate now (focused, active, idle)
     uint8_t anim_opacity;
     uint16_t fps_focused;

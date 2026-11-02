@@ -2899,6 +2899,11 @@ void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y) {
     win->y = new_y;
 }
 
+sl_window_t *sl_windows_find_task(const app_instance_t *task) {
+    size_t i = sl_window_index_for_task(task);
+    return i == (size_t)-1 ? NULL : &g_windows[i];
+}
+
 sl_window_t* sl_window_get_focused(void) {
     if (!g_windows || g_window_count == 0u || g_focused_window >= g_window_count) return NULL;
     return &g_windows[g_focused_window];

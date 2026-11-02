@@ -92,6 +92,8 @@ void sl_windows_mark_focused_activity(void);
 int sl_windows_open_app_bundle_path(sl_ctx_t *ctx, const char *bundle_path);
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y);
 sl_window_t* sl_window_get_focused(void);
+// The window of an app, wherever it is in the stack now, or NULL.
+sl_window_t *sl_windows_find_task(const app_instance_t *task);
 void sl_launcher_render(sl_ctx_t *ctx);
 // The label of the hovered dock tile, over everything but a dialog's veil.
 void sl_dock_label_render(sl_ctx_t *ctx);
