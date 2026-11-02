@@ -11,6 +11,7 @@
 #include "peos/lang.h"
 #include "i18n.h"
 #include "keyboard_layout.h"
+#include "desktop.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -1378,7 +1379,7 @@ static uint32_t sl_dock_pill_width(const sl_launcher_item_t *item) {
 
 // The pill with the app's name, right of the fin, level with its tile.
 static int sl_dock_pill_rect(const sl_dock_layout_t *L, size_t item, uint32_t *x, uint32_t *y, uint32_t *w) {
-    if (item >= g_launcher_count || g_launcher_extra_width != 0u || g_dock.ready != 1u) return 0;
+    if (item >= g_launcher_count || g_dock.ready != 1u) return 0;
     for (size_t k = 0u; k < L->count; k++) {
         if (L->item[k] != item) continue;
         *x = L->px + L->pw + SL_FIN_W + 10u;
@@ -1986,10 +1987,11 @@ static void sl_launcher_pick_window_rect(const sl_ctx_t *ctx, const sl_launcher_
     if (!ctx || !out_x || !out_y || !out_w || !out_h) return;
 
     uint32_t reserved_left = sl_launcher_reserved_left(ctx);
+    uint32_t top = sl_windows_top(ctx);
     uint32_t max_w = (ctx->fb.width > reserved_left + 8u)
                    ? (ctx->fb.width - reserved_left - 8u)
                    : ctx->fb.width;
-    uint32_t max_h = (ctx->fb.height > 8u) ? (ctx->fb.height - 8u) : ctx->fb.height;
+    uint32_t max_h = (ctx->fb.height > top + 8u) ? (ctx->fb.height - top - 8u) : ctx->fb.height;
 
     uint32_t def_w = (ctx->fb.width > reserved_left + 560u)
                    ? 540u
@@ -2009,7 +2011,7 @@ static void sl_launcher_pick_window_rect(const sl_ctx_t *ctx, const sl_launcher_
 
     uint32_t cascade = (uint32_t)(g_window_count % 6u);
     uint32_t x = reserved_left + 16u + cascade * 22u;
-    uint32_t y = 24u + cascade * 18u;
+    uint32_t y = top + cascade * 18u;
 
     if (x + w > ctx->fb.width) {
         x = (ctx->fb.width > w) ? (ctx->fb.width - w) : 0u;
@@ -2018,10 +2020,11 @@ static void sl_launcher_pick_window_rect(const sl_ctx_t *ctx, const sl_launcher_
     if (y + h > ctx->fb.height) {
         y = (ctx->fb.height > h) ? (ctx->fb.height - h) : 0u;
     }
+    if (y < top) y = top;   // never under the top bar
 
     // Where it was last time, if that still fits the screen and its limits.
     int g = item ? sl_geom_find(item->bundle_path) : -1;
-    if (g >= 0 && g_geom[g].x >= reserved_left && g_geom[g].x + g_geom[g].w <= ctx->fb.width &&
+    if (g >= 0 && g_geom[g].x >= reserved_left && g_geom[g].x + g_geom[g].w <= ctx->fb.width && g_geom[g].y >= top &&
         g_geom[g].y + g_geom[g].h <= ctx->fb.height && (item->fixed_size ? (g_geom[g].w == w && g_geom[g].h == h)
                                                                            : (g_geom[g].w >= 120u && g_geom[g].h >= 120u))) {
         x = g_geom[g].x;
@@ -2456,7 +2459,8 @@ void sl_windows_resize_move(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     sl_window_t *w = &g_windows[idx];
     int64_t left = sl_launcher_reserved_left(ctx);
     int64_t max_w = w->max_w ? w->max_w : (int64_t)ctx->fb.width - left;
-    int64_t max_h = w->max_h ? w->max_h : (int64_t)ctx->fb.height;
+    int64_t top = sl_windows_top(ctx);
+    int64_t max_h = w->max_h ? w->max_h : (int64_t)ctx->fb.height - top;
     int64_t min_w = w->min_w ? w->min_w : 200, min_h = w->min_h ? w->min_h : 150;
     if (max_w < min_w) max_w = min_w;
     if (max_h < min_h) max_h = min_h;
@@ -2464,7 +2468,7 @@ void sl_windows_resize_move(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     sl_resize_axis(g_resize.x, g_resize.w, (int64_t)x - g_resize.mx, (g_resize.edges & SL_EDGE_L) != 0u,
                    (g_resize.edges & SL_EDGE_R) != 0u, min_w, max_w, left, ctx->fb.width, &nx, &nw);
     sl_resize_axis(g_resize.y, g_resize.h, (int64_t)y - g_resize.my, (g_resize.edges & SL_EDGE_T) != 0u,
-                   (g_resize.edges & SL_EDGE_B) != 0u, min_h, max_h, 0, ctx->fb.height, &ny, &nh);
+                   (g_resize.edges & SL_EDGE_B) != 0u, min_h, max_h, top, ctx->fb.height, &ny, &nh);
     if (nx == w->x && ny == w->y && nw == w->width && nh == w->height) return;
     sl_window_dirty_all(ctx, w);   // where it was, shadow included
     w->x = (uint32_t)nx;
@@ -2627,16 +2631,16 @@ static int sl_windows_title_button_act(sl_ctx_t *ctx, size_t idx, int b) {
     // again to go back.
     if (!win->maximized) {
         uint32_t left = sl_launcher_reserved_left(ctx) + 24u;
-        uint32_t m = 24u;
-        if (ctx->fb.width <= left + m + 200u || ctx->fb.height <= 2u * m + 150u) return 1;
+        uint32_t m = 24u, top = sl_windows_top(ctx);
+        if (ctx->fb.width <= left + m + 200u || ctx->fb.height <= top + m + 150u) return 1;
         win->restore_x = win->x;
         win->restore_y = win->y;
         win->restore_w = win->width;
         win->restore_h = win->height;
         win->x = left;
-        win->y = m;
+        win->y = top;
         win->width = ctx->fb.width - left - m;
-        win->height = ctx->fb.height - 2u * m;
+        win->height = ctx->fb.height - top - m;
         win->maximized = 1u;
     } else {
         win->x = win->restore_x;
@@ -3220,15 +3224,6 @@ static void sl_dock_draw(sl_ctx_t *ctx) {
             sl_fin_rect(&L, &fx, &fy);
             sl_dock_draw_fin(ctx, &t, fx, fy, g_dock.chev_open);
         }
-        uint32_t px, py, pw;
-        if (g_launcher_hover_index != (size_t)-1 && sl_dock_pill_rect(&L, g_launcher_hover_index, &px, &py, &pw)) {
-            char label[26];
-            sl_launcher_compact_label(g_launcher_items[g_launcher_hover_index].title, label, sizeof(label));
-            sl_draw_skin(ctx, g_dock.pill, (int32_t)px, (int32_t)py, pw, SL_PILL_H);
-            const slsk_font_t *f = g_dock.label;
-            sl_text_draw(&t, f, (int32_t)(px + SL_PILL_PAD), (int32_t)(py + SL_PILL_H / 2u) + (f->ascent - f->descent) / 2,
-                         label, SL_DOCK_INK);
-        }
         return;
     }
 
@@ -3363,6 +3358,45 @@ void sl_launcher_render(sl_ctx_t *ctx) {
     if (g_launcher_ctx_open && g_launcher_ctx_x + g_launcher_ctx_w + 4u > right) right = g_launcher_ctx_x + g_launcher_ctx_w + 4u;
     if (right > ctx->fb.width) right = ctx->fb.width;
     sl_dirty_for_each_intersection(0u, 0u, right, ctx->fb.height, sl_dock_draw_rect, ctx);
+}
+
+// The label of the hovered dock tile, a layer of its own (see sl_compose):
+// over the app manager, the notifications and the other windows.
+typedef struct {
+    sl_ctx_t *ctx;
+    uint32_t x, y, w;
+    const char *label;
+} sl_dock_label_t;
+
+static void sl_dock_label_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, void *userdata) {
+    const sl_dock_label_t *d = (const sl_dock_label_t *)userdata;
+    sl_ctx_t *ctx = d->ctx;
+    sl_clip_set(ctx, x, y, w, h);
+    sl_target_t t = sl_target_from_ctx(ctx);
+    sl_draw_skin(ctx, g_dock.pill, (int32_t)d->x, (int32_t)d->y, d->w, SL_PILL_H);
+    const slsk_font_t *f = g_dock.label;
+    sl_text_draw(&t, f, (int32_t)(d->x + SL_PILL_PAD), (int32_t)(d->y + SL_PILL_H / 2u) + (f->ascent - f->descent) / 2,
+                 d->label, SL_DOCK_INK);
+    sl_clip_clear(ctx);
+}
+
+void sl_dock_label_render(sl_ctx_t *ctx) {
+    if (!ctx || !sl_dock_ready(ctx) || g_launcher_hover_index == (size_t)-1 || g_dock_hover_in_mgr) return;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    char label[26];
+    sl_dock_label_t d = { ctx, 0u, 0u, 0u, label };
+    if (!sl_dock_pill_rect(&L, g_launcher_hover_index, &d.x, &d.y, &d.w)) return;
+    sl_launcher_compact_label(g_launcher_items[g_launcher_hover_index].title, label, sizeof(label));
+    const slsk_entry_t *e = g_dock.pill;
+    uint32_t x0 = d.x > e->pad_l ? d.x - e->pad_l : 0u, y0 = d.y > e->pad_t ? d.y - e->pad_t : 0u;
+    sl_dirty_for_each_intersection(x0, y0, d.x + d.w + e->pad_r - x0, d.y + SL_PILL_H + e->pad_b - y0,
+                                   sl_dock_label_draw_rect, &d);
+}
+
+uint32_t sl_windows_top(const sl_ctx_t *ctx) {
+    (void)ctx;
+    return SL_DESK_BAR_HEIGHT - SL_WIN_OPAQUE_INSET;
 }
 
 void sl_windows_close_task(sl_ctx_t *ctx, const app_instance_t *task) {
