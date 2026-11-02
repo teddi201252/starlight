@@ -4370,6 +4370,10 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     uint32_t body_x, body_y, body_w, body_h;
     sl_window_body_rect(win, &body_x, &body_y, &body_w, &body_h);
     if (body_w == 0u || body_h == 0u) return;
+    // Where the app may paint: the opaque window under the title bar, so the
+    // shadow of a control near the edge of the body is drawn whole.
+    uint32_t paint_x, paint_y, paint_w, paint_h;
+    sl_window_paint_rect(win, &paint_x, &paint_y, &paint_w, &paint_h);
 
     // The title is the window frame's: the app draws its body only. The
     // terminal is always night (Soft UI plan, phase 7); SLUI apps paint
@@ -4561,7 +4565,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         uint32_t clip_w[8];
         uint32_t clip_h[8];
         uint8_t clip_depth = 0u;
-        sl_clip_set(ctx, body_x, body_y, body_w, body_h);
+        sl_clip_set(ctx, paint_x, paint_y, paint_w, paint_h);
 
         uint32_t modal_select_id = shell->ui.ui.select_open_id;
         uint8_t context_modal_open = (shell->ui.context_open_id != 0u) ? 1u : 0u;
@@ -4592,7 +4596,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             if (cmd->type == ORBIT_UI_CMD_CLIP_PUSH) {
                 if (clip_depth < 8u) {
                     uint32_t nx = x, ny = y, nw = cmd->w, nh = cmd->h;
-                    uint32_t bx = body_x, by = body_y, bw = body_w, bh = body_h;
+                    uint32_t bx = paint_x, by = paint_y, bw = paint_w, bh = paint_h;
                     if (clip_depth > 0u) {
                         bx = clip_x[clip_depth - 1u];
                         by = clip_y[clip_depth - 1u];
@@ -4617,7 +4621,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     sl_clip_set(ctx, clip_x[clip_depth - 1u], clip_y[clip_depth - 1u],
                                 clip_w[clip_depth - 1u], clip_h[clip_depth - 1u]);
                 } else {
-                    sl_clip_set(ctx, body_x, body_y, body_w, body_h);
+                    sl_clip_set(ctx, paint_x, paint_y, paint_w, paint_h);
                 }
                 continue;
             } else if (cmd->type == ORBIT_UI_CMD_FONT_SIZE) {
@@ -4656,7 +4660,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     sl_clip_set(ctx, clip_x[clip_depth - 1u], clip_y[clip_depth - 1u],
                                 clip_w[clip_depth - 1u], clip_h[clip_depth - 1u]);
                 } else {
-                    sl_clip_set(ctx, body_x, body_y, body_w, body_h);
+                    sl_clip_set(ctx, paint_x, paint_y, paint_w, paint_h);
                 }
             } else if (cmd->type == ORBIT_UI_CMD_SURF) {
                 sl_ui_soft_surface(&shell->ui.ui, cmd->value, x, y, cmd->w, cmd->h, cmd->min_v);
@@ -4893,7 +4897,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             }
         }
 
-        sl_clip_set(ctx, body_x, body_y, body_w, body_h);
+        sl_clip_set(ctx, paint_x, paint_y, paint_w, paint_h);
         sl_ui_draw_overlays(&shell->ui.ui);
         if (shell->ui.context_open_id != 0u && shell->ui.context_popup_w > 0u && shell->ui.context_popup_h > 0u) {
             size_t zone_idx = 0u;

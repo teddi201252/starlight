@@ -59,6 +59,18 @@ static int sl_window_frame_ready(sl_ctx_t *ctx) {
 
 // ------------------------------------------------------------------ geometry
 
+// The body and the pearl around it, up to the title bar: the clip of an app,
+// its controls' shadows included. It stays inside the opaque window.
+void sl_window_paint_rect(const sl_window_t *win, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    uint32_t top = SL_WIN_PAD_TOP + SL_WIN_BAR_H;
+    *x = *y = *w = *h = 0u;
+    if (!win || win->width <= 2u * SL_WIN_OPAQUE_INSET || win->height <= top + SL_WIN_OPAQUE_INSET) return;
+    *x = win->x + SL_WIN_OPAQUE_INSET;
+    *y = win->y + top;
+    *w = win->width - 2u * SL_WIN_OPAQUE_INSET;
+    *h = win->height - top - SL_WIN_OPAQUE_INSET;
+}
+
 void sl_window_body_rect(const sl_window_t *win, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
     uint32_t bx = 0u, by = 0u, bw = 0u, bh = 0u;
     if (win && win->width > 2u * SL_WIN_PAD_X && win->height > SL_WIN_BODY_TOP + SL_WIN_PAD_BOTTOM) {

@@ -105,6 +105,7 @@ int sl_window_prepare_render(sl_window_t *win, uint64_t now);
 int sl_window_render(sl_window_t *win);
 
 // The app's area, where its on_render draws.
+void sl_window_paint_rect(const sl_window_t *win, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 void sl_window_body_rect(const sl_window_t *win, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 // Everything the window touches on screen, shadow included.
 sl_win_rect_t sl_window_outer_rect(const sl_window_t *win);
