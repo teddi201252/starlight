@@ -93,6 +93,10 @@ int sl_windows_open_app_bundle_path(sl_ctx_t *ctx, const char *bundle_path);
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y);
 sl_window_t* sl_window_get_focused(void);
 void sl_launcher_render(sl_ctx_t *ctx);
+// The label of the hovered dock tile, over everything but a dialog's veil.
+void sl_dock_label_render(sl_ctx_t *ctx);
+// The highest y of a window: its card starts under the top bar.
+uint32_t sl_windows_top(const sl_ctx_t *ctx);
 int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 // The app manager is open: keys type in its search field.
 uint8_t sl_launcher_manager_open(void);

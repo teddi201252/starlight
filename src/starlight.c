@@ -95,15 +95,42 @@ static void sl_perf_card_render(sl_ctx_t *ctx) {
                                    sl_perf_card_draw_rect, ctx);
 }
 
-// Every layer, from the bottom up, each drawing only in the damage.
+// The layers, from the bottom up, each drawing only in the damage; the
+// cursor goes on top of them all (release 0.12.0 plan, phase 2). Windows
+// never reach under the top bar, so it stays over them from the bottom.
+typedef struct {
+    void (*render)(sl_ctx_t *ctx);
+    void (*account)(uint64_t elapsed_ns);   // where its time goes, or NULL
+} sl_layer_t;
+
+static const sl_layer_t k_layers[] = {
+    { sl_render_dirty_background, sl_perf_add_composite },   // wallpaper, widgets, top bar
+    { sl_windows_render_all, sl_perf_add_windows },
+    { sl_launcher_render, sl_perf_add_dock },                // dock and app manager
+    { sl_notify_render, NULL },
+    { sl_dock_label_render, sl_perf_add_dock },              // the hovered tile's name
+    { sl_sysmenu_render, NULL },                             // sun menu, veil and dialogs
+    { sl_clipboard_render_overlay, NULL },
+    { sl_perf_card_render, NULL },
+};
+
+// Composes every layer; timed, the time of each is counted. Returns when the
+// background was done (the rest is "render" in the numbers).
+static uint64_t sl_compose_layers(sl_ctx_t *ctx, int timed) {
+    uint64_t t = timed ? peos_time_ns() : 0ull, after_bg = t;
+    for (size_t i = 0u; i < sizeof(k_layers) / sizeof(k_layers[0]); i++) {
+        k_layers[i].render(ctx);
+        if (!timed) continue;
+        uint64_t now = peos_time_ns();
+        if (k_layers[i].account) k_layers[i].account(now - t);
+        if (i == 0u) after_bg = now;
+        t = now;
+    }
+    return after_bg;
+}
+
 static void sl_compose(sl_ctx_t *ctx) {
-    sl_render_dirty_background(ctx);
-    sl_windows_render_all(ctx);
-    sl_launcher_render(ctx);
-    sl_notify_render(ctx);
-    sl_sysmenu_render(ctx);
-    sl_clipboard_render_overlay(ctx);
-    sl_perf_card_render(ctx);
+    (void)sl_compose_layers(ctx, 0);
 }
 
 // Entry point of the Starlight desktop loop.
@@ -224,23 +251,7 @@ int main(int argc, char **argv) {
         // draws only in it, so the frame stays whole outside it.
         int windows_waiting = sl_windows_prepare_render(&ctx);
 
-        uint64_t composite_start_ns = peos_time_ns();
-        sl_render_dirty_background(&ctx);
-        sl_perf_add_composite(peos_time_ns() - composite_start_ns);
-
-        uint64_t render_start_ns = peos_time_ns();
-        {
-            uint64_t w0 = peos_time_ns();
-            sl_windows_render_all(&ctx);
-            uint64_t w1 = peos_time_ns();
-            sl_launcher_render(&ctx);
-            sl_perf_add_windows(w1 - w0);
-            sl_perf_add_dock(peos_time_ns() - w1);
-        }
-        sl_notify_render(&ctx);
-        sl_sysmenu_render(&ctx);
-        sl_clipboard_render_overlay(&ctx);
-        sl_perf_card_render(&ctx);
+        uint64_t render_start_ns = sl_compose_layers(&ctx, 1);
         if (ctx.check_damage) (void)sl_dirty_check(&ctx, sl_compose);
         sl_fps_account(&ctx, frame_start_ns);
 
