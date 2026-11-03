@@ -23,6 +23,10 @@ int sl_app_host_slot_restrict_caps(size_t index, uint64_t caps_mask);
 int sl_app_host_slot_restrict_paths(size_t index, const peos_path_grant_t *grants, size_t count);
 size_t sl_app_host_next_slot_index(void);
 size_t sl_app_host_slot_count_enabled(void);
+/* What this input changes in the focused app: 1, the rect to add to the
+ * damage (the window is drawn again whole); 2, only the hover moved, added
+ * to what the window redraws in part (then sl_windows_mark_app_pixels);
+ * 0, nothing. */
 int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t *frame,
                                  const void *userdata,
                                  uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
