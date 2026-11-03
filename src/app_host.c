@@ -285,9 +285,11 @@ typedef struct {
     int32_t last_x, last_y;
     uint32_t last_buttons;
     uint8_t cursor;         // the pointer over them (SLUI SDK 1.0.9 "HOST CURSOR"): 0 arrow, 1 hand, 2 text
-    // "HOST PIXELS_DAMAGE x y w h" since the window last asked: in the body, x0 y0 x1 y1.
+    // What changed in the body since the window last asked, x0 y0 x1 y1 from
+    // its corner: "HOST PIXELS_DAMAGE x y w h", the commands a frame changed,
+    // the field being typed in. It may reach past the body (a shadow).
     uint8_t damaged;
-    uint32_t dmg[4];
+    int32_t dmg[4];
     uint8_t quiet_line;     // the line just read draws nothing (or only this damage)
     uint8_t other_line;     // a line that was not quiet, since the last poll: the whole window again
 } orbit_pixels_t;
@@ -1133,6 +1135,7 @@ static orbit_ui_cmd_t *orbit_ui_next_cmd(orbit_shell_t *shell, uint8_t type) {
     }
     orbit_ui_cmd_t *cmd = &shell->ui.staged_cmds[shell->ui.staged_count++];
     peos_memset(cmd, 0, sizeof(*cmd));
+    shell->pixels.quiet_line = 1u;   // staged: what changes is told at COMMIT
     cmd->type = type;
     cmd->enabled = 1u;
     return cmd;
@@ -1653,6 +1656,120 @@ static void orbit_copy_unescaped(char *dst, size_t cap, const char *src) {
     dst[di] = '\0';
 }
 
+static void orbit_damage_add(orbit_pixels_t *px, int64_t x0, int64_t y0, int64_t x1, int64_t y1) {
+    if (x1 <= x0 || y1 <= y0) return;
+    int64_t v[4] = { x0, y0, x1, y1 };
+    int32_t c[4];
+    for (int i = 0; i < 4; i++) c[i] = v[i] < INT32_MIN ? INT32_MIN : v[i] > INT32_MAX ? INT32_MAX : (int32_t)v[i];
+    if (!px->damaged) {
+        for (int i = 0; i < 4; i++) px->dmg[i] = c[i];
+        px->damaged = 1u;
+        return;
+    }
+    if (c[0] < px->dmg[0]) px->dmg[0] = c[0];
+    if (c[1] < px->dmg[1]) px->dmg[1] = c[1];
+    if (c[2] > px->dmg[2]) px->dmg[2] = c[2];
+    if (c[3] > px->dmg[3]) px->dmg[3] = c[3];
+}
+
+// Two commands that draw the same.
+static uint8_t orbit_ui_cmd_same(const orbit_ui_cmd_t *a, const orbit_ui_cmd_t *b) {
+    if (a->type != b->type || a->id != b->id || a->x != b->x || a->y != b->y || a->w != b->w || a->h != b->h ||
+        a->min_v != b->min_v || a->max_v != b->max_v || a->value != b->value ||
+        a->r != b->r || a->g != b->g || a->b != b->b || a->a != b->a ||
+        a->enabled != b->enabled || a->primary != b->primary || a->align != b->align ||
+        memcmp(a->grad, b->grad, sizeof(a->grad)) != 0) {
+        return 0u;
+    }
+    return strcmp(a->text ? a->text : "", b->text ? b->text : "") == 0;
+}
+
+// Where a command draws, from the body's corner, its shadow included. 0 if
+// that is not its own box: it changes how the ones after it draw (a clip, a
+// font, the veil) or draws a popup.
+static uint8_t orbit_ui_cmd_reach(sl_ui_ctx_t *ui, const orbit_ui_cmd_t *cmd, int64_t r[4]) {
+    int64_t x = cmd->x, y = cmd->y;
+    const int64_t m = SL_UI_SHADOW_REACH;
+    switch (cmd->type) {
+    case ORBIT_UI_CMD_LABEL:
+    case ORBIT_UI_CMD_LABEL_THEME: {   // as drawn in sl_app_host_render
+        uint32_t w = 0u, h = 0u;
+        int32_t top = 0;
+        sl_ui_label_box(ui, cmd->text ? cmd->text : "", &w, &top, &h);
+        if (cmd->align) {
+            uint32_t tw = cmd->align == 1u ? w / 2u : w;
+            x = (uint32_t)x > tw ? x - tw : 0;
+        }
+        r[0] = x - 2, r[1] = y + top - 2, r[2] = x + w + 2, r[3] = y + top + h + 2;
+        return 1u;
+    }
+    case ORBIT_UI_CMD_SEPARATOR:   // a line under y, w long
+        r[0] = x - m, r[1] = y - m, r[2] = x + cmd->w + m, r[3] = y + 4 + m;
+        return 1u;
+    case ORBIT_UI_CMD_NONE:
+    case ORBIT_UI_CMD_CLIP_PUSH:
+    case ORBIT_UI_CMD_CLIP_POP:
+    case ORBIT_UI_CMD_FONT_SIZE:
+    case ORBIT_UI_CMD_FACE:
+    case ORBIT_UI_CMD_VEIL:
+    case ORBIT_UI_CMD_CONTEXT_MENU:
+        return 0u;
+    default:
+        if (cmd->w == 0u || cmd->h == 0u) return 0u;
+        r[0] = x - m, r[1] = y - m, r[2] = x + cmd->w + m, r[3] = y + cmd->h + m;
+        return 1u;
+    }
+}
+
+// A new frame that changes only some commands, none of them one that changes
+// how the others draw: the body is drawn again only around those, old and
+// new, and the rest stays as the cache has it (in the damage, 1). 0: all of
+// it. A typed letter changes the field and a count under it, not the window.
+static uint8_t orbit_ui_frame_part(orbit_shell_t *shell) {
+    orbit_ui_state_t *ui = &shell->ui;
+    if (!ui->committed || !ui->enabled || !ui->staged_enabled || !ui->ui.ctx || shell->surface.active ||
+        ui->cmd_limit_reached || ui->staged_count != ui->cmd_count ||
+        ui->ui.select_open_id != 0u || ui->context_open_id != 0u) {
+        return 0u;
+    }
+    // Labels are measured in the font the commands before them chose.
+    const slsk_font_t *face = ui->ui.label_face;
+    uint32_t font_px = ui->ui.font_px;
+    sl_ui_set_label_face(&ui->ui, NULL);
+    sl_ui_set_font_px(&ui->ui, 0u);
+    int64_t d[4] = { 0, 0, 0, 0 };
+    uint8_t any = 0u, ok = 1u;
+    for (size_t i = 0u; ok && i < ui->cmd_count; i++) {
+        const orbit_ui_cmd_t *a = &ui->cmds[i], *b = &ui->staged_cmds[i];
+        if (orbit_ui_cmd_same(a, b)) {
+            if (b->type == ORBIT_UI_CMD_FONT_SIZE) sl_ui_set_font_px(&ui->ui, b->value);
+            else if (b->type == ORBIT_UI_CMD_FACE) sl_ui_set_label_face(&ui->ui, b->text);
+            continue;
+        }
+        int64_t r[2][4];
+        if (!orbit_ui_cmd_reach(&ui->ui, a, r[0]) || !orbit_ui_cmd_reach(&ui->ui, b, r[1])) {
+            ok = 0u;
+            break;
+        }
+        for (int k = 0; k < 2; k++) {
+            if (!any) {
+                for (int j = 0; j < 4; j++) d[j] = r[k][j];
+                any = 1u;
+                continue;
+            }
+            if (r[k][0] < d[0]) d[0] = r[k][0];
+            if (r[k][1] < d[1]) d[1] = r[k][1];
+            if (r[k][2] > d[2]) d[2] = r[k][2];
+            if (r[k][3] > d[3]) d[3] = r[k][3];
+        }
+    }
+    ui->ui.label_face = face;
+    ui->ui.font_px = font_px;
+    if (!ok) return 0u;
+    if (any) orbit_damage_add(&shell->pixels, d[0], d[1], d[2], d[3]);
+    return 1u;
+}
+
 static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
     if (!shell || !line) return 0;
     const char *p = line;
@@ -1711,11 +1828,13 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
 
     if (orbit_token_is(cmd_tok, cmd_len, "CLEAR")) {
         orbit_ui_clear(shell);
+        shell->pixels.quiet_line = 1u;   // staged: what changes is told at COMMIT
         return 1;
     }
 
     if (orbit_token_is(cmd_tok, cmd_len, "COMMIT")) {
         orbit_ui_keep_local_text(shell);
+        uint8_t part = orbit_ui_frame_part(shell);
         orbit_ui_cmd_release_array(shell->ui.cmds, shell->ui.cmd_count);
         shell->ui.enabled = shell->ui.staged_enabled;
     if (!orbit_ui_cmd_reserve(&shell->ui.cmds, &shell->ui.cmd_cap, shell->ui.staged_count)) {
@@ -1735,6 +1854,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         shell->ui.staged_count = 0u;
         shell->ui.cmd_limit_reached = 0u;
         shell->ui.committed = 1u;
+        if (part) shell->pixels.quiet_line = 1u;   // the window in part
         orbit_ui_warn_duplicate_ids(shell);
         return 1;
     }
@@ -1784,17 +1904,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             }
             px->quiet_line = 1u;
             if (v[2] == 0u || v[3] == 0u) return 1;
-            uint32_t x1 = v[0] + v[2] < v[0] ? UINT32_MAX : v[0] + v[2];
-            uint32_t y1 = v[1] + v[3] < v[1] ? UINT32_MAX : v[1] + v[3];
-            if (!px->damaged) {
-                px->dmg[0] = v[0], px->dmg[1] = v[1], px->dmg[2] = x1, px->dmg[3] = y1;
-                px->damaged = 1u;
-            } else {
-                if (v[0] < px->dmg[0]) px->dmg[0] = v[0];
-                if (v[1] < px->dmg[1]) px->dmg[1] = v[1];
-                if (x1 > px->dmg[2]) px->dmg[2] = x1;
-                if (y1 > px->dmg[3]) px->dmg[3] = y1;
-            }
+            orbit_damage_add(px, (int64_t)v[0], (int64_t)v[1], (int64_t)v[0] + v[2], (int64_t)v[1] + v[3]);
             return 1;
         }
         if (orbit_token_is(host_tok, host_len, "CURSOR")) {   // the pointer over the app's pixels
@@ -4162,6 +4272,70 @@ int sl_app_host_has_caret(const void *userdata) {
     return !shell->ui.enabled || shell->ui.ui.focused_id != 0u;
 }
 
+int sl_app_host_mark_field(void *userdata, const sl_input_frame_t *frame) {
+    orbit_shell_t *shell = NULL;
+    for (size_t i = 0u; userdata && i < g_orbit_slot_count; i++) {   // an app's, not the SDK demo's
+        if (g_orbit[i] == userdata) shell = g_orbit[i];
+    }
+    if (!shell || !shell->initialized || !shell->ui.enabled || !shell->ui.committed || shell->surface.active) return 0;
+    uint32_t id = shell->ui.ui.focused_id;
+    if (id == 0u || shell->ui.nav_focus_id != id ||
+        shell->ui.ui.select_open_id != 0u || shell->ui.context_open_id != 0u) {
+        return 0;
+    }
+    // Keys that move the focus away (Shift+Tab) or let the field go (Esc)
+    // change more than the field. Letters typed and erased, and nothing
+    // else, may change only the caret's row of a text area.
+    uint32_t typed = 0u, erased = 0u;
+    uint8_t letters = 1u;
+    for (uint8_t i = 0u; frame && i < frame->key_event_count; i++) {
+        const peos_input_event_t *ev = &frame->key_events[i];
+        uint16_t code = orbit_norm_keycode(ev->code);
+        if (ev->pressed && (code == PEOS_KEY_TAB || code == PEOS_KEY_ESC)) return 0;
+        if (!ev->pressed || code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT || sl_keyboard_event_is_altgr(ev)) {
+            continue;
+        }
+        char text[8];
+        if (code == PEOS_KEY_BACKSPACE) erased++;
+        else if (code != PEOS_KEY_ENTER && !shell->ctrl_down && !shell->alt_down && !shell->super_down &&
+                 sl_keyboard_translate_event(ev, shell->shift_down, shell->caps_lock_on, shell->altgr_down,
+                                             text, sizeof(text)) > 0u && (uint8_t)text[0] >= 0x20u) typed++;
+        else letters = 0u;
+    }
+    for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+        if (cmd->id != id) continue;
+        if (cmd->type != ORBIT_UI_CMD_TEXT_INPUT && cmd->type != ORBIT_UI_CMD_TEXT_AREA) return 0;
+        uint32_t ry = 0u, rh = 0u;
+        if (cmd->type == ORBIT_UI_CMD_TEXT_AREA && letters &&
+            sl_ui_text_area_caret_row(&shell->ui.ui, id, cmd->x, cmd->y, cmd->w, cmd->h,
+                                      cmd->text ? cmd->text : "", typed, erased, &ry, &rh)) {
+            // The row across the field, inside its inset edge.
+            orbit_damage_add(&shell->pixels, (int64_t)cmd->x + 3, (int64_t)ry - 1,
+                             (int64_t)cmd->x + cmd->w - 3, (int64_t)ry + rh + 1);
+            return 1;
+        }
+        int64_t r[4];
+        if (!orbit_ui_cmd_reach(&shell->ui.ui, cmd, r)) return 0;
+        orbit_damage_add(&shell->pixels, r[0], r[1], r[2], r[3]);
+        return 1;
+    }
+    return 0;
+}
+
+int sl_app_host_pixels_view(const void *userdata, int32_t *x, int32_t *y, uint32_t *w, uint32_t *h) {
+    const orbit_shell_t *shell = NULL;
+    for (size_t i = 0u; userdata && i < g_orbit_slot_count; i++) {
+        if (g_orbit[i] == userdata) shell = g_orbit[i];
+    }
+    if (!shell || !shell->initialized || !shell->pixels.base || !shell->pixels.shown) return 0;
+    *x = shell->pixels.view_x;
+    *y = shell->pixels.view_y;
+    *w = shell->pixels.view_w;
+    *h = shell->pixels.view_h;
+    return 1;
+}
+
 int sl_app_host_pixels_have_pointer(const sl_ctx_t *ctx, const void *userdata) {
     if (!ctx || !userdata) return 0;
     const orbit_shell_t *shell = (const orbit_shell_t *)userdata;
@@ -4181,13 +4355,21 @@ int sl_app_host_pixels_rect(const sl_window_t *win, const void *userdata,
     px->damaged = 0u;
     uint32_t bx, by, bw, bh;
     if (!shell->initialized || !orbit_ui_body_rect(win, &bx, &by, &bw, &bh)) return 0;
-    uint32_t x0 = px->dmg[0] < bw ? px->dmg[0] : bw, y0 = px->dmg[1] < bh ? px->dmg[1] : bh;
-    uint32_t x1 = px->dmg[2] < bw ? px->dmg[2] : bw, y1 = px->dmg[3] < bh ? px->dmg[3] : bh;
+    // Where the app may draw: the body and its shadows' margin (the clip of
+    // sl_app_host_render).
+    uint32_t qx, qy, qw, qh;
+    sl_window_paint_rect(win, &qx, &qy, &qw, &qh);
+    int64_t x0 = (int64_t)bx + px->dmg[0], y0 = (int64_t)by + px->dmg[1];
+    int64_t x1 = (int64_t)bx + px->dmg[2], y1 = (int64_t)by + px->dmg[3];
+    if (x0 < qx) x0 = qx;
+    if (y0 < qy) y0 = qy;
+    if (x1 > (int64_t)qx + qw) x1 = (int64_t)qx + qw;
+    if (y1 > (int64_t)qy + qh) y1 = (int64_t)qy + qh;
     if (x1 <= x0 || y1 <= y0) return 0;
-    *x = bx + x0;
-    *y = by + y0;
-    *w = x1 - x0;
-    *h = y1 - y0;
+    *x = (uint32_t)x0;
+    *y = (uint32_t)y0;
+    *w = (uint32_t)(x1 - x0);
+    *h = (uint32_t)(y1 - y0);
     return 1;
 }
 

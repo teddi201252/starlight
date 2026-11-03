@@ -236,7 +236,10 @@ int main(int argc, char **argv) {
                 app_prompt_blink_prev = app_prompt_blink_now;
                 sl_window_t *focused = sl_window_get_focused();
                 // The prompt, or a field's caret, blinks in the body.
-                if (focused && (!focused->task || !focused->task->userdata || sl_app_host_has_caret(focused->task->userdata))) {
+                if (focused && focused->task && sl_app_host_mark_field(focused->task->userdata, NULL)) {
+                    sl_windows_mark_app_pixels(&ctx, focused->task->userdata);   // a field's caret: that field
+                } else if (focused && (!focused->task || !focused->task->userdata ||
+                                       sl_app_host_has_caret(focused->task->userdata))) {
                     sl_window_dirty_body(&ctx, focused);
                 }
             }

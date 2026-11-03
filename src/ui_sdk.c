@@ -2099,6 +2099,29 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     return changed;
 }
 
+int sl_ui_text_area_caret_row(const sl_ui_ctx_t *ui, uint32_t id,
+                              uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                              const char *text, uint32_t typed, uint32_t erased,
+                              uint32_t *row_y, uint32_t *row_h) {
+    if (!ui || !ui->ctx || !text || !sl_ui_mono(ui) || w < 24u || h < 24u) return 0;   // cells of their own size
+    if (ui->focused_id != id || ui->text_caret_id != id || sl_ui_selection_range(ui, id, NULL, NULL)) return 0;
+    // As sl_ui_text_area_state lays the field out.
+    uint32_t fw = sl_ui_font_w(ui), fh = sl_ui_font_h(ui);
+    uint32_t vis_cols = (w - 12u) / fw, vis_lines = (h - 12u) / fh;
+    uint32_t len = sl_ui_strlen(text);
+    uint32_t pos = ui->text_caret_pos > len ? len : ui->text_caret_pos;
+    uint32_t col = 0u;
+    uint32_t line = sl_ui_text_line_col_at(text, pos, &col);
+    if (ui->text_area_scroll_col != 0u || line < ui->text_area_scroll_line ||
+        line >= ui->text_area_scroll_line + vis_lines) {
+        return 0;
+    }
+    if (erased > col || col + typed + 1u >= vis_cols) return 0;   // lines joined, or scrolled sideways
+    *row_y = y + 6u + (line - ui->text_area_scroll_line) * fh;
+    *row_h = fh;
+    return 1;
+}
+
 uint8_t sl_ui_scroll_v(sl_ui_ctx_t *ui, uint32_t id,
                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                        uint32_t content_h, uint32_t *offset,
@@ -2423,6 +2446,21 @@ uint32_t sl_ui_label_width(sl_ui_ctx_t *ui, const char *text) {
     if (!ui || !text) return 0u;
     const slsk_font_t *f = ui->label_face ? ui->label_face : sl_ui_face(ui);
     return f ? sl_text_width(f, text) : sl_text_measure_width_px(text, ui->font_px);
+}
+
+void sl_ui_label_box(sl_ui_ctx_t *ui, const char *text, uint32_t *w, int32_t *top, uint32_t *h) {
+    *w = 0u;
+    *top = 0;
+    *h = 0u;
+    if (!ui || !text) return;
+    *w = sl_ui_label_width(ui, text);
+    const slsk_font_t *f = ui->label_face ? ui->label_face : sl_ui_face(ui);
+    if (f) {   // the baseline at y + cap (sl_ui_label_rgb)
+        *top = (int32_t)sl_ui_cap(f) - f->ascent;
+        *h = (uint32_t)(f->ascent + f->descent);
+    } else {
+        *h = sl_text_cell_h_px(ui->font_px);
+    }
 }
 
 // sin and cos of a (radians, 0..2pi) for the ring's round ends: a short
