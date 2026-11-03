@@ -5,6 +5,8 @@
 #include "ui_sdk.h"
 #include "perf_stats.h"
 
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -221,6 +223,70 @@ static int sl_window_cache_copy(sl_window_t *win, int64_t rx, int64_t ry, int64_
         else memcpy(f, c, bytes);
     }
     return 1;
+}
+
+static void sl_window_draw_inside(sl_window_t *win);
+
+// --check-damage: a window drawn in part must have in its cache what it
+// would have drawn whole. The frame's own check cannot tell (it composes
+// from the same cache), so the inside is drawn whole once more, on a copy
+// of the frame, and compared with the cache.
+static void sl_window_check_part(sl_window_t *win) {
+    static uint8_t *copy;
+    static size_t copy_bytes;
+    static uint64_t parts, bad_parts, last_log_ns;
+    sl_ctx_t *ctx = win->ctx;
+    size_t bytes = ctx->row_stride * ctx->fb.height;
+    if (!copy || copy_bytes != bytes) {
+        free(copy);
+        copy = (uint8_t *)malloc(bytes);
+        copy_bytes = copy ? bytes : 0u;
+        if (!copy) return;
+    }
+    memcpy(copy, ctx->frame, bytes);
+    uint8_t *frame = ctx->frame;
+    ctx->frame = copy;
+    sl_window_draw_inside(win);
+    ctx->frame = frame;
+
+    sl_win_rect_t in = sl_window_inner_rect(win);
+    int64_t x0 = in.x < 0 ? 0 : in.x, y0 = in.y < 0 ? 0 : in.y;
+    int64_t x1 = (int64_t)in.x + in.w, y1 = (int64_t)in.y + in.h;
+    if (x1 > (int64_t)ctx->fb.width) x1 = ctx->fb.width;
+    if (y1 > (int64_t)ctx->fb.height) y1 = ctx->fb.height;
+    // The app's own pixels are its to say (PIXELS_DAMAGE) and change under
+    // it: drawn now they may be newer than the part. Not compared.
+    int32_t vx = 0, vy = 0;
+    uint32_t vw = 0u, vh = 0u;
+    if (!win->task || !sl_app_host_pixels_view(win->task->userdata, &vx, &vy, &vw, &vh)) vw = vh = 0u;
+    uint64_t differ = 0u;
+    int64_t dx0 = INT64_MAX, dy0 = INT64_MAX, dx1 = 0, dy1 = 0;
+    for (int64_t y = y0; y < y1; y++) {
+        for (int64_t x = x0; x < x1; x++) {
+            if (x >= vx && y >= vy && x < (int64_t)vx + vw && y < (int64_t)vy + vh) continue;
+            const uint8_t *a = copy + (size_t)y * ctx->row_stride + (size_t)x * ctx->bytespp;
+            const uint8_t *b = win->client_surface + (size_t)(y - in.y) * win->client_stride +
+                               (size_t)(x - in.x) * ctx->bytespp;
+            if (a[0] == b[0] && a[1] == b[1] && a[2] == b[2]) continue;
+            differ++;
+            if (x < dx0) dx0 = x;
+            if (y < dy0) dy0 = y;
+            if (x + 1 > dx1) dx1 = x + 1;
+            if (y + 1 > dy1) dy1 = y + 1;
+        }
+    }
+    parts++;
+    if (differ) bad_parts++;
+    uint64_t now = peos_time_ns();
+    if (differ && now - last_log_ns > 500000000ull) {
+        last_log_ns = now;
+        printf("starlight: part check: %u px differ in %d,%d %dx%d, drawn %u,%u %ux%u (%u of %u parts)\n",
+               (unsigned)differ, (int)dx0, (int)dy0, (int)(dx1 - dx0), (int)(dy1 - dy0),
+               (unsigned)win->part_x, (unsigned)win->part_y, (unsigned)win->part_w, (unsigned)win->part_h,
+               (unsigned)bad_parts, (unsigned)parts);
+    } else if (!differ && (parts % 50u) == 0u) {
+        printf("starlight: part check: %u of %u parts differ\n", (unsigned)bad_parts, (unsigned)parts);
+    }
 }
 
 static void sl_window_blit_cache_rect(uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh, void *userdata) {
@@ -549,6 +615,7 @@ int sl_window_render(sl_window_t *win) {
         uint64_t c0 = peos_time_ns();
         (void)sl_window_cache_copy(win, win->part_x, win->part_y, win->part_w, win->part_h, 1);
         sl_perf_add_cache(peos_time_ns() - c0);
+        if (ctx->check_damage && win->cache_valid && !win->cache_clipped) sl_window_check_part(win);
         uint64_t interval = target_fps > 0u ? 1000000000ull / (uint64_t)target_fps : 0ull;
         win->next_render_ns = now + (interval ? interval : 1ull);
     } else if (due) {
