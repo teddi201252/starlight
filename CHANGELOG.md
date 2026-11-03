@@ -2,6 +2,14 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.15.0] - 2026-11-03
+- A compositor that keeps to the damage: windows, the dialogs' veil, menus and the cursor no longer leave pieces of one another on screen
+- The layers in one table; the dock's label above the launcher, notifications and menus
+- Whole shadows for app controls, desktop widgets, title buttons, the launcher and notifications
+- Windows stay below the top bar and inside the screen; dragging follows the app, not a moving pointer
+- An app's window is drawn again only where it changed: its pixels (PIXELS_DAMAGE), a SLUI frame compared with the one before, a key in a text field
+- --check-damage: every frame composed again in full and compared (development builds and make test-starlight-damage)
+
 ## [0.14.0] - 2026-10-30
 - Pixels of an app's own beside its SLUI controls (SLUI SDK 1.0.7), with the mouse and typed text on them (1.0.8), the pointer's shape and the clipboard (1.0.9), Caps+A and Caps+S (1.0.10)
 - Lines an SLUI app writes outside the protocol go to the system log
