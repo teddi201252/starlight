@@ -242,6 +242,14 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
                               char *text, uint32_t text_cap,
                               const peos_input_event_t *events, uint8_t event_count,
                               uint8_t enabled);
+// The row of the focused text area (at x y w h, with text) its caret is on,
+// if typing typed letters and erasing erased of them there changes nothing
+// else: no selection, no lines joined, no scrolling. Its top and height;
+// 0 if more than that changes. The caret's blink: typed and erased 0.
+int sl_ui_text_area_caret_row(const sl_ui_ctx_t *ui, uint32_t id,
+                              uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                              const char *text, uint32_t typed, uint32_t erased,
+                              uint32_t *row_y, uint32_t *row_h);
 
 uint8_t sl_ui_scroll_v(sl_ui_ctx_t *ui, uint32_t id,
                        uint32_t x, uint32_t y, uint32_t w, uint32_t h,
@@ -301,6 +309,12 @@ void sl_ui_draw_overlays(sl_ui_ctx_t *ui);
 void sl_ui_soft_surface(sl_ui_ctx_t *ui, uint32_t kind, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t r);
 void sl_ui_set_label_face(sl_ui_ctx_t *ui, const char *name);
 uint32_t sl_ui_label_width(sl_ui_ctx_t *ui, const char *text);
+// The box of a label's text drawn at (x, y): w wide, from y + top (above y
+// for a face's tall letters) for h. For a frame's damage.
+void sl_ui_label_box(sl_ui_ctx_t *ui, const char *text, uint32_t *w, int32_t *top, uint32_t *h);
+// How far past a control its shadow reaches: the widest is RAISED_HI, 4 px
+// away and blurred 10 (16 px of blur, see surface.c), so 20; a little more.
+#define SL_UI_SHADOW_REACH 24u
 void sl_ui_ring(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t size, uint32_t thick, uint32_t permille,
                 const uint8_t track[3], const uint8_t fill[3]);
 void sl_ui_graph(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t w, uint32_t h,

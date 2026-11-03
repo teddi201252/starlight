@@ -1170,8 +1170,12 @@ int sl_handle_input(sl_ctx_t *ctx) {
         for (uint8_t i = 0u; i < input.key_event_count; i++) {
             focused->task->on_input(ctx, &input, &input.key_events[i], focused->task->userdata);
         }
-        sl_windows_mark_focused_activity();
-        sl_window_dirty_body(ctx, focused);   // typing changes the app, not the frame
+        if (sl_app_host_mark_field(focused->task->userdata, &input)) {
+            sl_windows_mark_app_pixels(ctx, focused->task->userdata);   // typing in a field: that field
+        } else {
+            sl_windows_mark_focused_activity();
+            sl_window_dirty_body(ctx, focused);   // typing changes the app, not the frame
+        }
     }
 
     if (input.quit_requested) return 1;
