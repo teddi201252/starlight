@@ -3279,8 +3279,9 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         if (shell->ui.key_event_count < 16u) {
             shell->ui.key_events[shell->ui.key_event_count++] = *event;
         }
-        // Typing on the pixels (no control has the keyboard): the characters.
-        if (event->pressed && shell->pixels.focused && shell->pixels.base &&
+        // Typing on the pixels, or in an app without pixels, while no control
+        // has the keyboard: the characters (SLUI SDK 1.0.11).
+        if (event->pressed && (shell->pixels.base ? shell->pixels.focused : 1u) &&
             shell->ui.ui.focused_id == 0u && !shell->ctrl_down && !shell->alt_down) {
             char text[8];
             size_t n = sl_keyboard_translate_event(event, shell->shift_down, shell->caps_lock_on,
@@ -3885,7 +3886,9 @@ static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
         }
 
         if (code == PEOS_KEY_ENTER || code == PEOS_KEY_SPACE) {
-            shell->ui.keyboard_nav_active = 1u;
+            // Only a control the ring shows: before Tab or the arrows the
+            // focus is not seen, and Enter is the app's (= in Calculator).
+            if (!shell->ui.keyboard_nav_active) continue;
             if (cmd->type == ORBIT_UI_CMD_BUTTON || cmd->type == ORBIT_UI_CMD_LIST_ITEM ||
                 cmd->type == ORBIT_UI_CMD_SWATCH) {
                 orbit_send_ui_event_button(shell, cmd->id);
@@ -4190,6 +4193,32 @@ int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t 
          frame->mouse_right_pressed || frame->mouse_right_released ||
          frame->mouse_wheel_x != 0 || frame->mouse_wheel_y != 0 ||
          ((frame->mouse_buttons & 0x01u) && frame->mouse_moved)) ? 1u : 0u;
+
+    // Only the hover moved, in an app's SLUI frame: the window is drawn again
+    // in part, around the control it left and the one it is on, with their
+    // shadows (as a key in a field, sl_app_host_mark_field).
+    if (hover_changed && !has_direct_interaction && !dropdown_open && !context_open &&
+        frame->mouse_wheel_x == 0 && frame->mouse_wheel_y == 0 && !shell->surface.active) {
+        uint8_t app = 0u;
+        for (size_t i = 0u; i < g_orbit_slot_count; i++) app |= g_orbit[i] == shell;
+        int64_t was[4], now[4];
+        uint32_t ox, oy, ow, oh;
+        size_t old_idx = 0u;
+        uint8_t old_ok = shell->ui.hover_cmd_id == 0u ||
+                         (orbit_ui_cmd_find_by_id(win, shell, shell->ui.hover_cmd_id, &ox, &oy, &ow, &oh, &old_idx) &&
+                          orbit_ui_cmd_reach(&shell->ui.ui, &shell->ui.cmds[old_idx], was));
+        uint8_t new_ok = !hover_now || orbit_ui_cmd_reach(&shell->ui.ui, &shell->ui.cmds[hover_idx], now);
+        if (app && old_ok && new_ok) {
+            if (shell->ui.hover_cmd_id != 0u) orbit_damage_add(&shell->pixels, was[0], was[1], was[2], was[3]);
+            if (hover_now) orbit_damage_add(&shell->pixels, now[0], now[1], now[2], now[3]);
+            shell->ui.hover_cmd_id = hover_now ? hover_id : 0u;
+            shell->ui.hover_cmd_x = hover_now ? hover_x : 0u;
+            shell->ui.hover_cmd_y = hover_now ? hover_y : 0u;
+            shell->ui.hover_cmd_w = hover_now ? hover_w : 0u;
+            shell->ui.hover_cmd_h = hover_now ? hover_h : 0u;
+            return 2;
+        }
+    }
 
     if (hover_changed && shell->ui.hover_cmd_id != 0u) {
         orbit_rect_union_accum(&has_rect, &rx, &ry, &rw, &rh,

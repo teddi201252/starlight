@@ -1139,7 +1139,10 @@ int sl_handle_input(sl_ctx_t *ctx) {
             sl_window_dirty_body(ctx, focused);
         } else {
             uint32_t dx = 0u, dy = 0u, dw = 0u, dh = 0u;
-            if (sl_app_host_input_dirty_rect(focused, &input, focused->task->userdata, &dx, &dy, &dw, &dh)) {
+            int moved = sl_app_host_input_dirty_rect(focused, &input, focused->task->userdata, &dx, &dy, &dw, &dh);
+            if (moved == 2) {
+                sl_windows_mark_app_pixels(ctx, focused->task->userdata);   // the hover: those controls
+            } else if (moved) {
                 sl_windows_mark_focused_activity();
                 sl_dirty_add(ctx, dx, dy, dw, dh);
             } else if (clipboard_cmds_pending) {
