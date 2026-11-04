@@ -73,9 +73,9 @@ typedef struct {
     // may be (resizable=0: a fixed size).
     uint32_t min_width, min_height, max_width, max_height;
     uint8_t fixed_size;
-    // dock=no: not among the apps the dock shows before anything is pinned
-    // (Demo Kit, SLUI Diag); the app manager lists it, it can be pinned.
-    uint8_t no_dock;
+    // dock=yes: among the apps the dock shows before anything is pinned;
+    // any other app is in the app manager only, until the user pins it.
+    uint8_t in_dock;
 } sl_app_bundle_t;
 
 // The app manager's filters (tavola App manager aperto): every app, or one
@@ -101,7 +101,7 @@ typedef struct {
     uint8_t category;               // SL_CAT_*
     uint32_t min_width, min_height, max_width, max_height;   // app.ini, body (0: none)
     uint8_t fixed_size;
-    uint8_t no_dock;                // app.ini dock=no
+    uint8_t in_dock;                // app.ini dock=yes
     uint64_t signature;
     app_instance_t *instance;
     // Dock and app manager tiles (render/slsk.h), resolved on first draw.
@@ -557,7 +557,7 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
         } else if (strcmp(key, "resizable") == 0) {
             out->fixed_size = (strcmp(val, "0") == 0 || strcmp(val, "no") == 0) ? 1u : 0u;
         } else if (strcmp(key, "dock") == 0) {
-            out->no_dock = (strcmp(val, "0") == 0 || strcmp(val, "no") == 0) ? 1u : 0u;
+            out->in_dock = (strcmp(val, "1") == 0 || strcmp(val, "yes") == 0) ? 1u : 0u;
         } else if (strcmp(key, "width") == 0) {
             (void)sl_parse_u32(val, &out->width);
         } else if (strcmp(key, "height") == 0) {
@@ -848,7 +848,7 @@ static int sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app,
     item->max_width = app->max_width;
     item->max_height = app->max_height;
     item->fixed_size = app->fixed_size;
-    item->no_dock = app->no_dock;
+    item->in_dock = app->in_dock;
     item->instance = NULL;
     item->icon_loaded = 0u;
     item->icon_failed = 0u;
@@ -1205,10 +1205,10 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
         }
     }
     // No pins yet, or none of them left and nothing else to show: the apps
-    // in order, but not those that asked to stay out (dock=no).
+    // that asked to be there (dock=yes), in order.
     if (!g_dock_pins_set || (L->count == 0u && settings == (size_t)-1)) {
         for (size_t i = 0u; i < g_launcher_count && L->count < take; i++) {
-            if (i != settings && !g_launcher_items[i].no_dock) L->item[L->count++] = i;
+            if (i != settings && g_launcher_items[i].in_dock) L->item[L->count++] = i;
         }
     }
     uint8_t tight = L->count > sl_dock_capacity(ctx, settings, SL_DOCK_PAD, SL_DOCK_GAP);
@@ -2224,7 +2224,7 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
         item->max_width = entry->app.max_width;
         item->max_height = entry->app.max_height;
         item->fixed_size = entry->app.fixed_size;
-        item->no_dock = entry->app.no_dock;
+        item->in_dock = entry->app.in_dock;
         item->signature = entry->signature;
         item->instance = sl_app_host_instance_peek_at(slot);
         sl_copy_str(item->title, sizeof(item->title), entry->app.title);

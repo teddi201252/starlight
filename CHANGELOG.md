@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [Unreleased]
+- The dock shows, before anything is pinned, only the apps with `dock=yes` in their app.ini (it was every app but those with `dock=no`): a new app goes to the app manager
+
 ## [0.15.0] - 2026-11-03
 - A compositor that keeps to the damage: windows, the dialogs' veil, menus and the cursor no longer leave pieces of one another on screen
 - The layers in one table; the dock's label above the launcher, notifications and menus
