@@ -7,6 +7,7 @@
 #include "peos/net.h"
 #include "ui_sdk.h"
 #include "notify.h"
+#include "music.h"
 #include "i18n.h"
 #include "peos/audio.h"
 #include "peos/calendar_file.h"
@@ -69,6 +70,7 @@ static struct {
     const void *focus_task;
     char focus_title[64];
     uint32_t data_version;
+    uint32_t music_version;          // of the music pill, as last drawn
 } g_desk;
 
 // Filled by the poller thread: netd and the audio config can be slow or
@@ -385,6 +387,9 @@ static void sl_desk_draw_bar(sl_ctx_t *ctx, const struct tm *now) {
                  has_ip ? ink[2] : muted[2]);
     r -= 8 + (int32_t)g_desk.wifi->width;
     (void)sl_desk_mask(ctx, &t, g_desk.wifi, r, cy, has_ip ? ink : muted);
+    // What plays (design/orfeus): a pill left of the network; a click opens the mini player.
+    g_desk.music_version = sl_music_version();
+    (void)sl_music_draw_pill(ctx, &t, r - 22, cy, g_desk.dark_bar);
 }
 
 // Digits stacked: hours over minutes, right-aligned; then day and date.
@@ -1007,6 +1012,7 @@ void sl_desk_tick(sl_ctx_t *ctx) {
         bar = 1u;
         widgets = 1u;
     }
+    if (sl_music_version() != g_desk.music_version) bar = 1u;   // what plays changed
     if (minute == g_desk.minute && !bar) return;   // nothing changed: no work
 
     struct tm now;

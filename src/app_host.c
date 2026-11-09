@@ -239,6 +239,10 @@ typedef struct {
     uint8_t paths_restrict;
     uint32_t path_count;
     peos_path_grant_t paths[PEOS_PATH_MAX_GRANTS];
+    // A file to give the app (SLUI SDK 1.0.12, "EVENT OPEN_FILE") once it
+    // said hello: from another app's OPEN_FILE.
+    char open_file[256];
+    uint8_t open_pending;
 } orbit_slot_cfg_t;
 
 typedef struct {
@@ -359,6 +363,7 @@ static uint8_t g_reload_display_requested = 0u;
 static uint8_t g_reload_theme_requested = 0u;
 static uint8_t g_open_app_requested = 0u;
 static char g_open_app_bundle_path[256];
+static char g_open_app_file[256];   // with OPEN_FILE: what the app is to open ("" for none)
 // The language apps get (Technical Alpha plan, phase 4): sl_app_host_set_language.
 static char g_orbit_lang[PEOS_LANG_CODE_MAX] = PEOS_LANG_FALLBACK;
 
@@ -435,6 +440,22 @@ static void orbit_clip_append(orbit_shell_t *shell, const char *src) {
         shell->clip[shell->clip_len++] = c;
     }
     if (shell->clip) shell->clip[shell->clip_len] = '\0';
+}
+
+// OPEN_FILE path: a file for the app to open (SLUI SDK 1.0.12).
+static void orbit_send_ui_event_open_file(orbit_shell_t *shell, const char *path) {
+    if (!shell || shell->child_stdin_fd < 0 || !path) return;
+    const char *prefix = "@SLUI EVENT OPEN_FILE ";
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, prefix, peos_strlen(prefix));
+    for (size_t i = 0u; path[i]; i++) {
+        char c = path[i];
+        if (c == '\\') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\\\", 2u);
+        else if (c == '\n') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\n", 2u);
+        else if (c == '\r') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\r", 2u);
+        else if (c == '\t') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\t", 2u);
+        else (void)peos_fwrite((uint64_t)shell->child_stdin_fd, &c, 1u);
+    }
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\n", 1u);
 }
 
 static void orbit_send_ui_event_clipboard(orbit_shell_t *shell) {
@@ -1950,6 +1971,39 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
                 return 1;
             }
             orbit_copy_str(g_open_app_bundle_path, sizeof(g_open_app_bundle_path), tmp);
+            g_open_app_file[0] = '\0';
+            g_open_app_requested = 1u;
+            return 1;
+        }
+        // OPEN_FILE <bundle> <file> (SLUI SDK 1.0.12): both escaped, the
+        // bundle's spaces as "\\ ", so its first plain space parts them. The
+        // app is opened, and told the file when ready.
+        if (orbit_token_is(host_tok, host_len, "OPEN_FILE")) {
+            p = orbit_skip_spaces(p);
+            const char *sep = NULL;
+            for (const char *q = p; q && *q; q++) {
+                if (*q == '\\' && q[1]) {
+                    q++;
+                    continue;
+                }
+                if (*q == ' ') {
+                    sep = q;
+                    break;
+                }
+            }
+            if (!sep || sep == p || sep[1] == '\0' || (size_t)(sep - p) >= sizeof(g_open_app_bundle_path)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "open_file_invalid_args");
+                return 1;
+            }
+            char bundle[sizeof(g_open_app_bundle_path)];
+            memcpy(bundle, p, (size_t)(sep - p));
+            bundle[sep - p] = '\0';
+            orbit_copy_unescaped(g_open_app_bundle_path, sizeof(g_open_app_bundle_path), bundle);
+            orbit_copy_unescaped(g_open_app_file, sizeof(g_open_app_file), sep + 1);
+            if (g_open_app_bundle_path[0] == '\0' || g_open_app_file[0] == '\0') {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "open_file_empty");
+                return 1;
+            }
             g_open_app_requested = 1u;
             return 1;
         }
@@ -5414,7 +5468,15 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
     }
     if (g_open_app_requested) {
         g_open_app_requested = 0u;
-        (void)sl_windows_open_app_bundle_path(ctx, g_open_app_bundle_path);
+        if (sl_windows_open_app_bundle_path(ctx, g_open_app_bundle_path) && g_open_app_file[0]) {
+            for (size_t i = 0u; i < g_orbit_slot_count; i++) {
+                if (!g_orbit_cfg[i].enabled || strcmp(g_orbit_cfg[i].bundle_dir, g_open_app_bundle_path) != 0) continue;
+                orbit_copy_str(g_orbit_cfg[i].open_file, sizeof(g_orbit_cfg[i].open_file), g_open_app_file);
+                g_orbit_cfg[i].open_pending = 1u;
+                break;
+            }
+        }
+        g_open_app_file[0] = '\0';
     }
     uint64_t now = peos_time_ns();
     for (size_t i = 0u; i < g_orbit_slot_count; i++) {
@@ -5425,6 +5487,10 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
         if (shell->body_changed) {
             shell->body_changed = 0u;
             sl_windows_mark_app_dirty(ctx, shell);
+        }
+        if (g_orbit_cfg[i].open_pending && shell->ui.enabled) {   // a file to open, now it listens
+            g_orbit_cfg[i].open_pending = 0u;
+            orbit_send_ui_event_open_file(shell, g_orbit_cfg[i].open_file);
         }
         if (shell->next_poll_ns > now) continue;
         uint8_t changed = orbit_poll_output(shell);
