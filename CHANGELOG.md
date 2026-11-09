@@ -2,8 +2,12 @@
 
 All notable changes to this module are documented in this file.
 
-## [Unreleased]
+## [0.16.0] - 2026-11-09
+- The music: what plays in a pill of the top bar, the mini player (cover, progress, previous/play/next, volume, "Open Orfeus"), Orfeus's dot in the dock while its window is closed, the media keys and Super + arrows with a toast
+- Opening a file in another app (SLUI SDK 1.0.12): Curiosity opens pictures in Orion
+- Hover redraws only the controls it touches; typed characters reach SLUI apps without pixels (SLUI SDK 1.0.11)
 - The dock shows, before anything is pinned, only the apps with `dock=yes` in their app.ini (it was every app but those with `dock=no`): a new app goes to the app manager
+- The icons of Orion and Orfeus; the fonts Orfeus needs
 
 ## [0.15.0] - 2026-11-03
 - A compositor that keeps to the damage: windows, the dialogs' veil, menus and the cursor no longer leave pieces of one another on screen
