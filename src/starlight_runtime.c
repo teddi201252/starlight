@@ -8,6 +8,7 @@
 #include "damage.h"
 #include "desktop.h"
 #include "notify.h"
+#include "music.h"
 #include "i18n.h"
 #include "app_host.h"
 #include "peos/lang.h"
@@ -1056,6 +1057,7 @@ void sl_cursor_update(sl_ctx_t *ctx) {
     int k = -1;
     if (g_drag_active) k = SL_CUR_MOVE;
     if (k < 0) k = sl_sysmenu_cursor(ctx, x, y);
+    if (k < 0) k = sl_music_cursor(ctx, x, y);
     if (k < 0) k = sl_notify_cursor(ctx, x, y);
     if (k < 0) k = sl_launcher_cursor(ctx, x, y);
     if (k < 0) k = sl_windows_cursor(ctx, x, y);
@@ -1122,6 +1124,9 @@ int sl_handle_input(sl_ctx_t *ctx) {
     uint8_t clipboard_cmds_pending = (input.clipboard_cmds != 0u) ? 1u : 0u;
 
     sl_window_t *focused = sl_window_get_focused();
+    // The app this frame went to already: a press must not reach it twice (an
+    // app's pixels would take it for a double click).
+    const void *given = NULL;
     // While a window is dragged by its title bar the moves are the drag's,
     // not the app's: forwarding them would make it redraw every frame.
     uint8_t drag_move_only = g_drag_active && !input.mouse_left_pressed && !input.mouse_left_released;
@@ -1130,6 +1135,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
         (input.mouse_updated || input.mouse_left_pressed || input.mouse_left_released ||
          input.mouse_moved || clipboard_cmds_pending)) {
         focused->task->on_input(ctx, &input, NULL, focused->task->userdata);
+        given = focused->task;
         // The app is drawn again only when this changed something in it: a
         // move that changes no hover is not a reason to (the app, if it
         // reacts, sends a frame, and that marks it).
@@ -1158,7 +1164,8 @@ int sl_handle_input(sl_ctx_t *ctx) {
     }
 
     for (uint8_t i = 0u; i < input.key_event_count; i++) {   // Esc closes the notification centre
-        if (sl_sysmenu_handle_key(ctx, &input.key_events[i]) || sl_notify_handle_key(ctx, &input.key_events[i])) {
+        if (sl_sysmenu_handle_key(ctx, &input.key_events[i]) || sl_music_handle_key(ctx, &input.key_events[i]) ||
+            sl_notify_handle_key(ctx, &input.key_events[i])) {
             input.key_events[i] = input.key_events[--input.key_event_count];
             i--;
         }
@@ -1197,6 +1204,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
         sl_win_rect_t prev_outer = focused ? sl_window_outer_rect(focused) : (sl_win_rect_t){ 0, 0, 0u, 0u };
 
         if (sl_sysmenu_handle_click(ctx, ctx->cursor_x, ctx->cursor_y) ||
+            sl_music_handle_click(ctx, ctx->cursor_x, ctx->cursor_y) ||
             sl_notify_handle_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
             sl_drag_stop();
             return 0;
@@ -1224,7 +1232,7 @@ int sl_handle_input(sl_ctx_t *ctx) {
 
         sl_windows_focus_at_cursor(ctx->cursor_x, ctx->cursor_y);
         focused = sl_window_get_focused();
-        if (focused && focused->task && focused->task->on_input) {
+        if (focused && focused->task && focused->task->on_input && (const void *)focused->task != given) {
             focused->task->on_input(ctx, &input, NULL, focused->task->userdata);
         }
         sl_windows_mark_focused_activity();

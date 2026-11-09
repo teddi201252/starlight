@@ -3,6 +3,7 @@
 #include "perf_stats.h"
 #include "desktop.h"
 #include "notify.h"
+#include "music.h"
 #include "sysmenu.h"
 #include "render/pixels.h"
 #include "render/blit.h"
@@ -109,6 +110,7 @@ static const sl_layer_t k_layers[] = {
     { sl_windows_render_all, sl_perf_add_windows },
     { sl_launcher_render, sl_perf_add_dock },                // dock and app manager
     { sl_notify_render, NULL },
+    { sl_music_render, NULL },                               // the mini player, the toast
     { sl_dock_label_render, sl_perf_add_dock },              // the hovered tile's name
     { sl_sysmenu_render, NULL },                             // sun menu, veil and dialogs
     { sl_clipboard_render_overlay, NULL },
@@ -185,6 +187,7 @@ int main(int argc, char **argv) {
 
     sl_windows_create_default(&ctx);
     sl_notify_init(&ctx);
+    sl_music_init(&ctx);
     sl_tween_init();
 
     uint64_t next_frame_ns = 0;
@@ -251,6 +254,7 @@ int main(int argc, char **argv) {
             sl_perf_add_desk(peos_time_ns() - d0);
         }
         sl_notify_tick(&ctx);
+        sl_music_tick(&ctx);
         sl_fps_tick(&ctx);
 
         // The damage is complete here: from now on, nothing adds to it until

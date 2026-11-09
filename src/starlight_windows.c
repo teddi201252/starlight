@@ -1,5 +1,6 @@
 #include "ui_sdk.h"
 #include "notify.h"
+#include "music.h"
 #include "starlight_internal.h"
 #include "app_host.h"
 #include "context_menu_renderer.h"
@@ -985,7 +986,7 @@ static const char *sl_dock_skin_key(const char *bundle_path) {
         { "terminale", "orbit" }, { "voyager", "voyager" }, { "calcolatrice", "calcolatrice" },
         { "curiosity", "curiosity" }, { "impostazioni", "impostazioni" }, { "installer", "installer" },
         { "monitor", "monitor" }, { "calendario", "calendario" }, { "consigli", "consigli" },
-        { "pegasus", "pegasus" },
+        { "pegasus", "pegasus" }, { "orion", "orion" },
     };
     const char *base = bundle_path ? strrchr(bundle_path, '/') : NULL;
     base = base ? base + 1 : (bundle_path ? bundle_path : "");
@@ -1455,7 +1456,11 @@ static uint64_t sl_dock_indicator_bits(const sl_dock_layout_t *L) {
     for (size_t k = 0u; k < L->count && k < 32u; k++) {
         app_instance_t *app = sl_app_host_instance_peek_at(g_launcher_items[L->item[k]].slot);
         size_t w = app ? sl_window_index_for_task(app) : (size_t)-1;
-        if (w == (size_t)-1) continue;
+        if (w == (size_t)-1) {
+            // Orfeus's music goes on with its window closed (design/orfeus): the dot stays.
+            if (sl_music_active() && strcmp(g_launcher_items[L->item[k]].title, "Orfeus") == 0) bits |= 1ull << (2u * k);
+            continue;
+        }
         bits |= 1ull << (2u * k);
         if (w == g_focused_window && !g_windows[w].minimized) bits |= 2ull << (2u * k);
     }
