@@ -642,6 +642,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     sl_copy_text(ctx->font_manifest_path, sizeof(ctx->font_manifest_path), SL_RESOURCE_FONT_DEFAULT);
     sl_copy_text(ctx->keyboard_layout_path, sizeof(ctx->keyboard_layout_path), "us");
     ctx->hw_cursor_scale_pct = SL_HW_CURSOR_SCALE_DEFAULT;
+    ctx->ui_scale_pct = 100u;
     ctx->cursor_theme = 1u;   // the Soft UI set, unless cursor_theme=image
     ctx->animations_enabled = SL_ANIMATIONS_ENABLED_DEFAULT;
     ctx->animation_speed_pct = SL_ANIMATION_SPEED_DEFAULT;
@@ -689,6 +690,9 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     ctx->cursor_theme = strcmp(val, "image") == 0 ? 0u : 1u;
                 } else if (strcmp(key, "font") == 0 && val[0]) {
                     sl_copy_text(ctx->font_manifest_path, sizeof(ctx->font_manifest_path), val);
+                } else if (strcmp(key, "ui_scale") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n) && n >= 100u && n <= 300u) ctx->ui_scale_pct = n;
                 } else if (strcmp(key, "cursor_scale") == 0) {
                     uint32_t n = 0;
                     // Backward-compatible: accept legacy tiny scales (eg. "2")
@@ -883,21 +887,78 @@ char *sl_u32_to_str(uint32_t value, char *out, size_t out_cap) {
     return out;
 }
 
+// The frame Starlight draws in: the screen, or with an interface scale the
+// smaller logical frame (fb.width/height) and the enlargement onto the screen.
+#define SL_UI_SCALE_MIN_W 1024u
+#define SL_UI_SCALE_MIN_H 600u
+
+static int sl_frame_setup(sl_ctx_t *ctx) {
+    if (ctx->frame) {
+        (void)peos_munmap((uint64_t)(uintptr_t)ctx->frame, ctx->map_bytes);
+        ctx->frame = NULL;
+    }
+    if (ctx->phys_frame) {
+        (void)peos_munmap((uint64_t)(uintptr_t)ctx->phys_frame, ctx->phys_map_bytes);
+        ctx->phys_frame = NULL;
+    }
+    sl_upscale_free(&ctx->upscale);
+
+    uint32_t scale = ctx->ui_scale_pct;
+    if (scale < 100u || scale > 300u) scale = 100u;
+    ctx->ui_scale_asked = scale;
+    // Never a logical screen smaller than 1024x600: the windows and the
+    // dock are made for at least that (on 1280x800 at most 125%).
+    while (scale > 100u &&
+           ((uint64_t)ctx->phys_width * 100u / scale < SL_UI_SCALE_MIN_W ||
+            (uint64_t)ctx->phys_height * 100u / scale < SL_UI_SCALE_MIN_H)) {
+        scale -= 25u;
+    }
+    if (scale < 100u) scale = 100u;
+    uint32_t lw = ctx->phys_width, lh = ctx->phys_height;
+    if (scale != 100u) {
+        sl_upscale_logical_size(ctx->phys_width, ctx->phys_height, scale, &lw, &lh);
+        if (!sl_upscale_init(&ctx->upscale, lw, lh, ctx->phys_width, ctx->phys_height)) {
+            scale = 100u;
+            lw = ctx->phys_width;
+            lh = ctx->phys_height;
+        }
+    }
+    ctx->ui_scale_active = scale;
+    ctx->fb.width = lw;
+    ctx->fb.height = lh;
+    ctx->row_stride = (size_t)lw * (size_t)ctx->bytespp;
+    ctx->frame_bytes = (size_t)lw * (size_t)lh * (size_t)ctx->bytespp;
+    ctx->map_bytes = (size_t)align_up((uint64_t)ctx->frame_bytes, 4096u);
+    uint64_t map = peos_mmap(0, ctx->map_bytes, PEOS_PROT_READ | PEOS_PROT_WRITE, PEOS_MAP_ANON | PEOS_MAP_PRIVATE);
+    if ((int64_t)map < 0) return 0;
+    ctx->frame = (uint8_t *)(uintptr_t)map;
+
+    if (scale != 100u && !ctx->fb_direct) {
+        ctx->phys_frame_bytes = (size_t)ctx->phys_width * ctx->phys_height * ctx->bytespp;
+        ctx->phys_map_bytes = (size_t)align_up((uint64_t)ctx->phys_frame_bytes, 4096u);
+        map = peos_mmap(0, ctx->phys_map_bytes, PEOS_PROT_READ | PEOS_PROT_WRITE, PEOS_MAP_ANON | PEOS_MAP_PRIVATE);
+        if ((int64_t)map < 0) return 0;
+        ctx->phys_frame = (uint8_t *)(uintptr_t)map;
+    }
+    ctx->clip_enabled = 0u;
+    return 1;
+}
+
 static int sl_update_fb_info(sl_ctx_t *ctx) {
     if (!ctx) return 0;
     if ((int64_t)peos_fbinfo(&ctx->fb) < 0) return 0;
     if (ctx->fb.bpp != 24 && ctx->fb.bpp != 32) return 0;
 
     ctx->bytespp = (uint8_t)(ctx->fb.bpp / 8u);
-    ctx->row_stride = (size_t)ctx->fb.width * (size_t)ctx->bytespp;
-    ctx->frame_bytes = (size_t)ctx->fb.width * (size_t)ctx->fb.height * (size_t)ctx->bytespp;
-    ctx->map_bytes = (size_t)align_up((uint64_t)ctx->frame_bytes, 4096u);
+    ctx->phys_width = ctx->fb.width;
+    ctx->phys_height = ctx->fb.height;
     ctx->fb_front = NULL;
     ctx->fb_front_stride = 0;
     ctx->fb_front_bytes = 0;
 
     peos_fb_map_t fbm;
-    size_t fb_row_stride = ctx->fb.pitch ? (size_t)ctx->fb.pitch : ctx->row_stride;
+    size_t phys_row = (size_t)ctx->fb.width * (size_t)ctx->bytespp;
+    size_t fb_row_stride = ctx->fb.pitch ? (size_t)ctx->fb.pitch : phys_row;
     size_t fb_needed = fb_row_stride * (size_t)ctx->fb.height;
     if (peos_fbmap(&fbm, PEOS_FBMAP_EXCLUSIVE) == 0 &&
         fbm.addr != 0 &&
@@ -907,14 +968,27 @@ static int sl_update_fb_info(sl_ctx_t *ctx) {
         ctx->fb_front_bytes = (size_t)fbm.len;
         ctx->fb_direct = 1;
     }
+    return sl_frame_setup(ctx);
+}
 
-    uint64_t map = peos_mmap(0, ctx->map_bytes,
-                             PEOS_PROT_READ | PEOS_PROT_WRITE,
-                             PEOS_MAP_ANON | PEOS_MAP_PRIVATE);
-    if ((int64_t)map < 0) return 0;
-    ctx->frame = (uint8_t *)(uintptr_t)map;
-
-    return 1;
+// A new interface scale from the settings: the frame, the background, the
+// desktop at the new size; windows back inside the screen.
+static void sl_apply_ui_scale(sl_ctx_t *ctx) {
+    uint32_t old_w = ctx->fb.width, old_h = ctx->fb.height;
+    if (!sl_frame_setup(ctx)) return;
+    sl_desk_free(ctx);
+    free(ctx->bg_frame);
+    ctx->bg_frame = NULL;
+    if (old_w && old_h) {
+        ctx->cursor_x = (uint32_t)((uint64_t)ctx->cursor_x * ctx->fb.width / old_w);
+        ctx->cursor_y = (uint32_t)((uint64_t)ctx->cursor_y * ctx->fb.height / old_h);
+    }
+    if (ctx->cursor_x >= ctx->fb.width) ctx->cursor_x = ctx->fb.width - 1u;
+    if (ctx->cursor_y >= ctx->fb.height) ctx->cursor_y = ctx->fb.height - 1u;
+    ctx->cursor_saved_valid = 0u;
+    sl_windows_screen_changed(ctx);
+    printf("[STARLIGHT] interface scale %u%% (asked %u%%): %ux%u on %ux%u\n", (unsigned)ctx->ui_scale_active,
+           (unsigned)ctx->ui_scale_asked, (unsigned)ctx->fb.width, (unsigned)ctx->fb.height, (unsigned)ctx->phys_width, (unsigned)ctx->phys_height);
 }
 
 static void sl_load_background(sl_ctx_t *ctx, const char *path) {
@@ -986,6 +1060,8 @@ void sl_shutdown(sl_ctx_t *ctx) {
         ctx->input_fd = -1;
     }
     if (ctx->frame) (void)peos_munmap((uint64_t)(uintptr_t)ctx->frame, ctx->map_bytes);
+    if (ctx->phys_frame) (void)peos_munmap((uint64_t)(uintptr_t)ctx->phys_frame, ctx->phys_map_bytes);
+    sl_upscale_free(&ctx->upscale);
     sl_font_shutdown();
 }
 
@@ -1000,6 +1076,12 @@ void sl_reload_display(sl_ctx_t *ctx) {
     sl_font_reset_default();
     if (ctx->font_manifest_path[0]) {
         (void)sl_font_load_manifest_default(ctx->font_manifest_path);
+    }
+
+    if (ctx->ui_scale_pct != ctx->ui_scale_asked) {
+        if (ctx->hw_cursor) (void)peos_cursor_set_visible(0);
+        ctx->hw_cursor = 0u;
+        sl_apply_ui_scale(ctx);
     }
 
     if (ctx->bg_loaded) {
@@ -1390,6 +1472,42 @@ void sl_render_dirty_background(sl_ctx_t *ctx) {
     }
 }
 
+// With an interface scale: each changed logical rect enlarged onto the
+// screen (the framebuffer itself, or the screen-sized buffer for fbpresent).
+static int sl_present_scaled(sl_ctx_t *ctx, peos_fb_rect_t *rects, size_t rect_count, uint64_t pixels, uint8_t full) {
+    uint8_t *dst = ctx->fb_direct ? ctx->fb_front : ctx->phys_frame;
+    size_t dst_stride = ctx->fb_direct ? ctx->fb_front_stride : (size_t)ctx->phys_width * ctx->bytespp;
+    if (!dst) return 0;
+    uint64_t copy_start_ns = peos_time_ns();
+    size_t out = 0;
+    for (size_t i = 0; i < rect_count; i++) {
+        uint32_t x, y, w, h;
+        if (!sl_upscale_rect(&ctx->upscale, rects[i].x, rects[i].y, rects[i].width, rects[i].height, &x, &y, &w,
+                             &h)) {
+            continue;
+        }
+        sl_upscale_blit(&ctx->upscale, ctx->frame, ctx->row_stride, dst, dst_stride, ctx->bytespp, x, y, w, h);
+        rects[out].x = x;
+        rects[out].y = y;
+        rects[out].width = w;
+        rects[out].height = h;
+        out++;
+    }
+    uint64_t copy_ns = peos_time_ns() - copy_start_ns;
+    uint64_t flush_start_ns = peos_time_ns();
+    int64_t r = ctx->fb_direct
+                    ? peos_fbpresent_damage(NULL, 0u, rects, out, PEOS_FBPRESENT_EXCLUSIVE)
+                    : peos_fbpresent_damage(ctx->phys_frame, ctx->phys_frame_bytes, rects, out,
+                                            PEOS_FBPRESENT_EXCLUSIVE);
+    if (r < 0) {
+        sl_dirty_mark_full();
+        return 1;
+    }
+    sl_perf_record_present(copy_ns, peos_time_ns() - flush_start_ns, out, pixels, ctx->bytespp, full);
+    sl_dirty_reset();
+    return 1;
+}
+
 int sl_present(sl_ctx_t *ctx) {
     if (!ctx || !ctx->frame) return 0;
     peos_fb_rect_t rects[SL_PRESENT_MAX_RECTS];
@@ -1403,6 +1521,8 @@ int sl_present(sl_ctx_t *ctx) {
         sl_dirty_reset();
         return 1;
     }
+
+    if (ctx->ui_scale_active != 100u) return sl_present_scaled(ctx, rects, rect_count, pixels, full);
 
     if (ctx->fb_direct) {
         if (!ctx->fb_front) return 0;

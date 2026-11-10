@@ -282,15 +282,20 @@ void sl_cursor_init(sl_ctx_t *ctx) {
     g_cur.kind = -1;
     // The Soft UI set: the hardware cursor where there is one (virtio-gpu,
     // Intel), else drawn by Starlight with the same images.
+    // With an interface scale the cursor is drawn in the logical frame, so it
+    // grows with everything else (a hardware one would stay small).
+    bool scaled = ctx->ui_scale_active != 100u;
     if (ctx->cursor_theme && ctx->skin_loaded && sl_skin_find(&ctx->skin, k_cursor_names[SL_CUR_ARROW])) {
         g_cur.ready = 1u;
-        ctx->hw_cursor = 1u;   // try it first
+        ctx->hw_cursor = scaled ? 0u : 1u;   // try it first
         sl_cursor_set(ctx, SL_CUR_ARROW);
-        if (g_cur.kind < 0 || !sl_cursor_apply_hw(ctx)) ctx->hw_cursor = 0u;
+        if (!scaled && (g_cur.kind < 0 || !sl_cursor_apply_hw(ctx))) ctx->hw_cursor = 0u;
         return;
     }
     // One image of the user's (cursor= in settings.cfg).
-    if (!sl_hw_cursor_load_resource(ctx, ctx->cursor_path)) {
+    if (scaled) {
+        ctx->hw_cursor = 0u;
+    } else if (!sl_hw_cursor_load_resource(ctx, ctx->cursor_path)) {
         (void)sl_hw_cursor_set_default(ctx);
     }
     if (!ctx->hw_cursor && ctx->skin_loaded && sl_skin_find(&ctx->skin, k_cursor_names[SL_CUR_ARROW])) {

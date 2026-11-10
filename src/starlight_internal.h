@@ -57,6 +57,7 @@ void sl_windows_create_test(sl_ctx_t *ctx, size_t count);
 void sl_windows_create_default(sl_ctx_t *ctx);
 // The theme was reloaded: every window draws its inside again.
 void sl_windows_theme_changed(sl_ctx_t *ctx);
+void sl_windows_screen_changed(sl_ctx_t *ctx);
 // The language changed: the dock and the app manager read the apps' titles again.
 void sl_windows_language_changed(sl_ctx_t *ctx);
 void sl_windows_render_all(sl_ctx_t *ctx);

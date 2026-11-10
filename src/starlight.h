@@ -4,6 +4,7 @@
 #include "resources.h"
 #include "render/image_decode.h"
 #include "render/skin.h"
+#include "render/upscale.h"
 
 typedef struct {
     peos_fb_info_t fb;
@@ -41,6 +42,15 @@ typedef struct {
     char keyboard_layout_path[160];
     uint32_t display_width;
     uint32_t display_height;
+    // The interface scale (ui_scale= in settings.cfg, 100..300): fb.width
+    // and fb.height are then the logical frame, the screen is phys_*.
+    uint32_t ui_scale_pct;
+    uint32_t ui_scale_active;  // the scale the frame is made for
+    uint32_t ui_scale_asked;   // the ui_scale it was made from (active may be less)
+    uint32_t phys_width, phys_height;
+    sl_upscale_t upscale;
+    uint8_t *phys_frame;       // without fbmap: the enlarged frame handed to fbpresent
+    size_t phys_frame_bytes, phys_map_bytes;
     uint8_t animations_enabled;
     uint32_t animation_speed_pct;
     uint32_t double_click_ms;
