@@ -2,6 +2,12 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.17.0] - 2026-11-10
+- The clipboard manager redone in the Soft UI (design/appunti): a raised card over a night veil, each copy with its number key, its age and its size, the one in use marked, a scroll past six; 1-9 choose at once, Canc takes a copy away, the wheel moves the choice
+- While Caps is held alone a neon ring fills around the pointer until the manager opens; a copy flies to the pointer as a night pill that turns into "Copied", Caps+S shows "Pasted"
+- The interface scale (100% to 300%, in Settings > Display): Starlight draws in a smaller logical screen and enlarges it, sharp at whole ratios; applied at once
+- SLUI SDK 1.0.13: Caps+A and Caps+S reach apps without pixels while no field has the keyboard; a context menu option starting with "~" is grey and cannot be chosen
+
 ## [0.16.0] - 2026-11-09
 - The music: what plays in a pill of the top bar, the mini player (cover, progress, previous/play/next, volume, "Open Orfeus"), Orfeus's dot in the dock while its window is closed, the media keys and Super + arrows with a toast
 - Opening a file in another app (SLUI SDK 1.0.12): Curiosity opens pictures in Orion
