@@ -1850,6 +1850,10 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         }
         sl_ui_text_cells(ui, text_x, text_y, draw_buf,
                          enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
+        if (len == 0u && !focused && ui->field_hint) {   // the app's hint in the empty field
+            const char *hint = ui->field_hint(ui->field_menu_app_user, id);
+            if (hint && hint[0]) sl_ui_text_tok(ui, text_x, text_y, hint, SL_UI_COLOR_TEXT_SECONDARY);
+        }
         if (caret_visible) {
             uint32_t caret_px = text_x + (caret_draw * fw);
             uint32_t caret_max = text_x + (vis_chars * fw);

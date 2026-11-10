@@ -140,6 +140,7 @@ typedef enum {
     ORBIT_UI_CMD_VEIL = 29,      // VEIL alpha: night over the whole window, title bar included
     ORBIT_UI_CMD_PIXELS = 30,    // PIXELS x y w h sx sy: the app's surface from sx,sy, at x,y
     ORBIT_UI_CMD_TEXT_MENU = 31, // TEXT_MENU field options: the app's options in a field's menu (value: the field)
+    ORBIT_UI_CMD_TEXT_HINT = 32, // TEXT_HINT field text: shown in the empty field (value: the field)
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -1399,6 +1400,15 @@ static const char *orbit_text_menu_options(void *user, uint32_t id) {
     return NULL;
 }
 
+static const char *orbit_text_hint(void *user, uint32_t id) {
+    const orbit_shell_t *shell = (const orbit_shell_t *)user;
+    for (size_t i = 0u; shell && shell->ui.cmds && i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+        if (cmd->type == ORBIT_UI_CMD_TEXT_HINT && cmd->value == id) return cmd->text;
+    }
+    return NULL;
+}
+
 static void orbit_send_ui_event_context_menu(orbit_shell_t *shell, uint32_t id, uint32_t value) {
     if (!shell || shell->child_stdin_fd < 0) return;
     char msg[64];
@@ -1755,6 +1765,7 @@ static uint8_t orbit_ui_cmd_reach(sl_ui_ctx_t *ui, const orbit_ui_cmd_t *cmd, in
     case ORBIT_UI_CMD_VEIL:
     case ORBIT_UI_CMD_CONTEXT_MENU:
     case ORBIT_UI_CMD_TEXT_MENU:
+    case ORBIT_UI_CMD_TEXT_HINT:
         return 0u;
     default:
         if (cmd->w == 0u || cmd->h == 0u) return 0u;
@@ -2414,6 +2425,19 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
 
     // TEXT_MENU field options (SLUI SDK 1.0.14): the app's own options at the
     // end of a text field's menu, "a|b" ("~" first: off).
+    if (orbit_token_is(cmd_tok, cmd_len, "TEXT_HINT")) {   // SLUI SDK 1.0.14
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TEXT_HINT);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->value)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_TEXT_INPUT, "text_hint_invalid_args");
+            return 1;
+        }
+        cmd->id = 0u;
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "text_hint_alloc_failed");
+        return 1;
+    }
+
     if (orbit_token_is(cmd_tok, cmd_len, "TEXT_MENU")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TEXT_MENU);
         if (!cmd) return 1;
@@ -4222,6 +4246,7 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_FONT_SIZE:
         case ORBIT_UI_CMD_CONTEXT_MENU:
         case ORBIT_UI_CMD_TEXT_MENU:
+        case ORBIT_UI_CMD_TEXT_HINT:
         case ORBIT_UI_CMD_SCROLL_V:
         case ORBIT_UI_CMD_PIXELS: {   // the app's own pixels: the pointer it asked for
             static const int k_kinds[3] = { SL_CUR_ARROW, SL_CUR_HAND, SL_CUR_TEXT };
@@ -4826,6 +4851,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         shell->ui.ui.mouse_r_pressed = shell->ui.mouse_r_pressed;
         shell->ui.ui.field_menu_app = orbit_text_menu_options;
         shell->ui.ui.field_menu_app_user = shell;
+        shell->ui.ui.field_hint = orbit_text_hint;
         if (shell->ui.mouse_pressed) shell->ui.keyboard_nav_active = 0u;
         sl_ui_set_font_px(&shell->ui.ui, 0u);
         if (shell->ui.theme_override_enabled) {
@@ -5291,7 +5317,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 sl_ui_rect_a(&shell->ui.ui, x, y, cmd->w, cmd->h, (sl_ui_color_token_t)cmd->value, cmd->a);
             } else if (cmd->type == ORBIT_UI_CMD_GRAD2D) {
                 orbit_draw_grad2d(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->grad);
-            } else if (cmd->type == ORBIT_UI_CMD_CONTEXT_MENU || cmd->type == ORBIT_UI_CMD_TEXT_MENU) {
+            } else if (cmd->type == ORBIT_UI_CMD_CONTEXT_MENU || cmd->type == ORBIT_UI_CMD_TEXT_MENU ||
+                       cmd->type == ORBIT_UI_CMD_TEXT_HINT) {
                 // Registration-only control: rendered by host overlay on right click.
             } else if (cmd->type == ORBIT_UI_CMD_IMAGE_FILE) {
                 if (!cmd->image_loaded && !cmd->image_failed) {
