@@ -2,6 +2,14 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.18.0] - 2026-11-10
+- A text field's menu (the right button on it): undo, redo, cut, copy, paste, paste from the clipboard manager, delete, select all; the app may add options of its own (Pegasus: "Paste and go")
+- Undo and redo in every text field, with Caps+Z and Caps+Y (peos/text_undo.h)
+- A hint in an empty one-line field; PeStore's icon
+- The dock keeps the apps' own icons when a new app arrives
+- A click on a menu open over an app's pixels no longer reaches the pixels; the right button's release no longer reaches Pegasus as a left click
+- SLUI SDK 1.0.14: slui_text_menu, slui_text_hint, slui_clipboard_manager, SLUI_CLIP_UNDO and SLUI_CLIP_REDO
+
 ## [0.17.0] - 2026-11-10
 - The clipboard manager redone in the Soft UI (design/appunti): a raised card over a night veil, each copy with its number key, its age and its size, the one in use marked, a scroll past six; 1-9 choose at once, Canc takes a copy away, the wheel moves the choice
 - While Caps is held alone a neon ring fills around the pointer until the manager opens; a copy flies to the pointer as a night pill that turns into "Copied", Caps+S shows "Pasted"
