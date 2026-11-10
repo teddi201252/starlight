@@ -138,6 +138,9 @@ typedef enum {
 void sl_ui_ctx_surface(sl_ctx_t *ctx, sl_ui_surf_kind_t kind, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                        uint32_t r);
 const slsk_font_t *sl_ui_ctx_face(sl_ctx_t *ctx);   // NULL without the skin
+// A ring as SLUI's (sl_ui_ring), for Starlight's own drawing.
+void sl_ui_ctx_ring(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t size, uint32_t thick, uint32_t permille,
+                    const uint8_t track[3], const uint8_t fill[3]);
 uint32_t sl_ui_ctx_text_width(sl_ctx_t *ctx, const char *text);
 // The mono face on fixed cells (the terminal): 0 without the skin.
 int sl_ui_ctx_mono_cell(sl_ctx_t *ctx, uint32_t *cell_w, uint32_t *cell_h);
