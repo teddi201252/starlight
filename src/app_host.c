@@ -139,6 +139,7 @@ typedef enum {
     ORBIT_UI_CMD_GRAPH = 28,     // GRAPH x y w h lr lg lb fr fg fb fa v1 v2 ...
     ORBIT_UI_CMD_VEIL = 29,      // VEIL alpha: night over the whole window, title bar included
     ORBIT_UI_CMD_PIXELS = 30,    // PIXELS x y w h sx sy: the app's surface from sx,sy, at x,y
+    ORBIT_UI_CMD_TEXT_MENU = 31, // TEXT_MENU field options: the app's options in a field's menu (value: the field)
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -1116,6 +1117,8 @@ static int orbit_ui_cmd_reserve(orbit_ui_cmd_t **arr, size_t *cap, size_t need) 
 
 static void orbit_ui_storage_free(orbit_ui_state_t *ui) {
     if (!ui) return;
+    sl_ui_free(&ui->ui);   // a text field's undo history
+    ui->ui.field_menu_id = 0u;
     orbit_ui_cmd_release_array(ui->cmds, ui->cmd_count);
     orbit_ui_cmd_release_array(ui->staged_cmds, ui->staged_count);
     if (ui->cmds) free(ui->cmds);
@@ -1377,6 +1380,23 @@ static void orbit_send_ui_event_resize(orbit_shell_t *shell, uint32_t w, uint32_
         if (n + 1u < sizeof(msg)) msg[n++] = k == 0 ? ' ' : '\n';
     }
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, n);
+}
+
+// TEXT_MENU field index: an option of the app's in a text field's menu.
+static void orbit_send_ui_event_text_menu(orbit_shell_t *shell, uint32_t id, uint32_t index) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[64];
+    int n = snprintf(msg, sizeof(msg), "@SLUI EVENT TEXT_MENU %u %u\n", (unsigned)id, (unsigned)index);
+    if (n > 0) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
+}
+
+static const char *orbit_text_menu_options(void *user, uint32_t id) {
+    const orbit_shell_t *shell = (const orbit_shell_t *)user;
+    for (size_t i = 0u; shell && shell->ui.cmds && i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+        if (cmd->type == ORBIT_UI_CMD_TEXT_MENU && cmd->value == id) return cmd->text;
+    }
+    return NULL;
 }
 
 static void orbit_send_ui_event_context_menu(orbit_shell_t *shell, uint32_t id, uint32_t value) {
@@ -1734,6 +1754,7 @@ static uint8_t orbit_ui_cmd_reach(sl_ui_ctx_t *ui, const orbit_ui_cmd_t *cmd, in
     case ORBIT_UI_CMD_FACE:
     case ORBIT_UI_CMD_VEIL:
     case ORBIT_UI_CMD_CONTEXT_MENU:
+    case ORBIT_UI_CMD_TEXT_MENU:
         return 0u;
     default:
         if (cmd->w == 0u || cmd->h == 0u) return 0u;
@@ -1750,7 +1771,7 @@ static uint8_t orbit_ui_frame_part(orbit_shell_t *shell) {
     orbit_ui_state_t *ui = &shell->ui;
     if (!ui->committed || !ui->enabled || !ui->staged_enabled || !ui->ui.ctx || shell->surface.active ||
         ui->cmd_limit_reached || ui->staged_count != ui->cmd_count ||
-        ui->ui.select_open_id != 0u || ui->context_open_id != 0u) {
+        ui->ui.select_open_id != 0u || ui->context_open_id != 0u || ui->ui.field_menu_id != 0u) {
         return 0u;
     }
     // Labels are measured in the font the commands before them chose.
@@ -1951,6 +1972,12 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
                 }
                 shell->clip_len = 0u;
             }
+            return 1;
+        }
+        // CLIPBOARD_MANAGER (SLUI SDK 1.0.14): the clipboard manager opens; the
+        // item chosen comes back as Caps+S (a CLIPCMD paste, or a field's paste).
+        if (orbit_token_is(host_tok, host_len, "CLIPBOARD_MANAGER")) {
+            sl_clipboard_open_manager_then_paste();
             return 1;
         }
         if (orbit_token_is(host_tok, host_len, "CLIPBOARD_GET")) {
@@ -2382,6 +2409,21 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         if (!cmd->text || cmd->text[0] == '\0') {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CONTEXT, "context_menu_missing_options");
         }
+        return 1;
+    }
+
+    // TEXT_MENU field options (SLUI SDK 1.0.14): the app's own options at the
+    // end of a text field's menu, "a|b" ("~" first: off).
+    if (orbit_token_is(cmd_tok, cmd_len, "TEXT_MENU")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TEXT_MENU);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->value)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CONTEXT, "text_menu_invalid_args");
+            return 1;
+        }
+        cmd->id = 0u;   // not a control: the field's id stays the field's
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "text_menu_text_alloc_failed");
         return 1;
     }
 
@@ -3226,9 +3268,21 @@ static void orbit_terminal_mouse(sl_ctx_t *ctx, orbit_shell_t *shell, const sl_i
 // The mouse over an SLUI app's pixels (the browser's page): where it is, in
 // the pixels' own coordinates, presses and releases (a press inside is
 // followed until it is let go) and the wheel.
+static uint8_t orbit_ui_context_popup_rect(const orbit_shell_t *shell,
+                                           uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
+static uint8_t orbit_ui_dropdown_popup_rect(const orbit_shell_t *shell,
+                                            uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
+
 static void orbit_pixels_mouse(sl_ctx_t *ctx, orbit_shell_t *shell, const sl_input_frame_t *frame) {
     orbit_pixels_t *px = &shell->pixels;
     if (!ctx || !px->base || !px->shown || px->view_w == 0u || px->view_h == 0u) return;
+    // A menu or a list open over the pixels takes the mouse on it: a choice
+    // there is not a click on the app's own surface too (0.14.0).
+    uint32_t ox = 0u, oy = 0u, ow = 0u, oh = 0u;
+    if ((orbit_ui_context_popup_rect(shell, &ox, &oy, &ow, &oh) || orbit_ui_dropdown_popup_rect(shell, &ox, &oy, &ow, &oh)) &&
+        ctx->cursor_x >= ox && ctx->cursor_y >= oy && ctx->cursor_x < ox + ow && ctx->cursor_y < oy + oh) {
+        return;
+    }
     int32_t mx = (int32_t)ctx->cursor_x - px->view_x, my = (int32_t)ctx->cursor_y - px->view_y;
     uint8_t inside = (mx >= 0 && my >= 0 && (uint32_t)mx < px->view_w && (uint32_t)my < px->view_h) ? 1u : 0u;
     uint32_t buttons = frame->mouse_buttons & 0x07u;
@@ -3298,7 +3352,10 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
             shell->ui.ui.focused_id == 0u) {
             if (shell->ui.clipboard_cmds & SL_CLIP_CMD_COPY) orbit_send_ui_event_clipcmd(shell, "copy");
             if (shell->ui.clipboard_cmds & SL_CLIP_CMD_PASTE) orbit_send_ui_event_clipcmd(shell, "paste");
-            shell->ui.clipboard_cmds &= ~(uint32_t)(SL_CLIP_CMD_COPY | SL_CLIP_CMD_PASTE);
+            if (shell->ui.clipboard_cmds & SL_CLIP_CMD_UNDO) orbit_send_ui_event_clipcmd(shell, "undo");
+            if (shell->ui.clipboard_cmds & SL_CLIP_CMD_REDO) orbit_send_ui_event_clipcmd(shell, "redo");
+            shell->ui.clipboard_cmds &= ~(uint32_t)(SL_CLIP_CMD_COPY | SL_CLIP_CMD_PASTE | SL_CLIP_CMD_UNDO |
+                                                    SL_CLIP_CMD_REDO);
         }
         shell->caps_lock_on = frame->caps_lock_on;
         if (!event && orbit_is_text_terminal(shell)) orbit_terminal_mouse(ctx, shell, frame);
@@ -4035,7 +4092,7 @@ static uint8_t orbit_ui_dropdown_popup_rect(const orbit_shell_t *shell,
 static uint8_t orbit_ui_context_popup_rect(const orbit_shell_t *shell,
                                            uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
     if (!shell || !x || !y || !w || !h) return 0u;
-    if (!shell->ui.context_open_id) return 0u;
+    if (!shell->ui.context_open_id) return sl_ui_field_menu_rect(&shell->ui.ui, x, y, w, h);   // a field's menu
     if (shell->ui.context_popup_w == 0u || shell->ui.context_popup_h == 0u) return 0u;
     *x = shell->ui.context_popup_x;
     *y = shell->ui.context_popup_y;
@@ -4164,6 +4221,7 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_CLIP_POP:
         case ORBIT_UI_CMD_FONT_SIZE:
         case ORBIT_UI_CMD_CONTEXT_MENU:
+        case ORBIT_UI_CMD_TEXT_MENU:
         case ORBIT_UI_CMD_SCROLL_V:
         case ORBIT_UI_CMD_PIXELS: {   // the app's own pixels: the pointer it asked for
             static const int k_kinds[3] = { SL_CUR_ARROW, SL_CUR_HAND, SL_CUR_TEXT };
@@ -4366,7 +4424,7 @@ int sl_app_host_mark_field(void *userdata, const sl_input_frame_t *frame) {
     if (!shell || !shell->initialized || !shell->ui.enabled || !shell->ui.committed || shell->surface.active) return 0;
     uint32_t id = shell->ui.ui.focused_id;
     if (id == 0u || shell->ui.nav_focus_id != id ||
-        shell->ui.ui.select_open_id != 0u || shell->ui.context_open_id != 0u) {
+        shell->ui.ui.select_open_id != 0u || shell->ui.context_open_id != 0u || shell->ui.ui.field_menu_id != 0u) {
         return 0;
     }
     // Keys that move the focus away (Shift+Tab) or let the field go (Esc)
@@ -4758,11 +4816,16 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         uint8_t veil_now = 0u;
         uint32_t select_open_before = shell->ui.ui.select_open_id;
         uint32_t context_open_before = shell->ui.context_open_id;
+        uint32_t field_menu_before = shell->ui.ui.field_menu_id;
         sl_ui_begin(&shell->ui.ui, ctx, win,
                     ctx->cursor_x, ctx->cursor_y,
                     shell->ui.mouse_down, shell->ui.mouse_pressed, shell->ui.mouse_released,
                     shell->ui.mouse_wheel_x, shell->ui.mouse_wheel_y,
                     shell->ui.clipboard_cmds, shell->caps_lock_on);
+        // A text field's menu (0.14.0, phase 3): the right button, and the app's options.
+        shell->ui.ui.mouse_r_pressed = shell->ui.mouse_r_pressed;
+        shell->ui.ui.field_menu_app = orbit_text_menu_options;
+        shell->ui.ui.field_menu_app_user = shell;
         if (shell->ui.mouse_pressed) shell->ui.keyboard_nav_active = 0u;
         sl_ui_set_font_px(&shell->ui.ui, 0u);
         if (shell->ui.theme_override_enabled) {
@@ -4779,7 +4842,22 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             }
         }
 
+        uint8_t r_on_field = 0u;   // the right button on a text field: its own menu, not a zone's
         if (shell->ui.mouse_r_pressed) {
+            uint32_t hid = 0u, hx = 0u, hy = 0u, hw = 0u, hh = 0u;
+            size_t hidx = 0u;
+            if (orbit_ui_cmd_find_hovered(win, shell, shell->ui.ui.select_open_id, shell->ui.ui.cursor_x,
+                                          shell->ui.ui.cursor_y, &hid, &hx, &hy, &hw, &hh, &hidx) &&
+                (shell->ui.cmds[hidx].type == ORBIT_UI_CMD_TEXT_INPUT ||
+                 shell->ui.cmds[hidx].type == ORBIT_UI_CMD_TEXT_AREA)) {
+                r_on_field = 1u;
+            }
+        }
+        if (shell->ui.mouse_r_pressed && r_on_field) {
+            shell->ui.context_open_id = 0u;
+            shell->ui.context_popup_w = 0u;
+            shell->ui.context_popup_h = 0u;
+        } else if (shell->ui.mouse_r_pressed) {
             size_t zone_idx = 0u;
             if (orbit_context_find_zone_hovered(shell,
                                                 shell->ui.ui.cursor_x, shell->ui.ui.cursor_y,
@@ -4886,6 +4964,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             context_stays:;
             }
         }
+        sl_ui_field_menu_input(&shell->ui.ui, shell->ui.key_events, shell->ui.key_event_count);
 
         {
             const sl_ui_color_t *canvas = sl_ui_theme_color(&shell->ui.ui, SL_UI_COLOR_BG_CANVAS);
@@ -5212,7 +5291,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 sl_ui_rect_a(&shell->ui.ui, x, y, cmd->w, cmd->h, (sl_ui_color_token_t)cmd->value, cmd->a);
             } else if (cmd->type == ORBIT_UI_CMD_GRAD2D) {
                 orbit_draw_grad2d(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->grad);
-            } else if (cmd->type == ORBIT_UI_CMD_CONTEXT_MENU) {
+            } else if (cmd->type == ORBIT_UI_CMD_CONTEXT_MENU || cmd->type == ORBIT_UI_CMD_TEXT_MENU) {
                 // Registration-only control: rendered by host overlay on right click.
             } else if (cmd->type == ORBIT_UI_CMD_IMAGE_FILE) {
                 if (!cmd->image_loaded && !cmd->image_failed) {
@@ -5237,6 +5316,10 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
         sl_clip_set(ctx, paint_x, paint_y, paint_w, paint_h);
         sl_ui_draw_overlays(&shell->ui.ui);
+        if (shell->ui.ui.field_menu_app_pick) {   // one of the app's options in a field's menu
+            orbit_send_ui_event_text_menu(shell, shell->ui.ui.field_menu_app_id, shell->ui.ui.field_menu_app_pick - 1u);
+            shell->ui.ui.field_menu_app_pick = 0u;
+        }
         if (shell->ui.context_open_id != 0u && shell->ui.context_popup_w > 0u && shell->ui.context_popup_h > 0u) {
             size_t zone_idx = 0u;
             if (orbit_context_find_zone_by_id(shell, shell->ui.context_open_id, &zone_idx)) {
@@ -5293,7 +5376,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             shell->veil_changed = 1u;
         }
         if (select_open_before != shell->ui.ui.select_open_id ||
-            context_open_before != shell->ui.context_open_id) {
+            context_open_before != shell->ui.context_open_id ||
+            field_menu_before != shell->ui.ui.field_menu_id) {
             // All controls show their state again (next tick: no damage while composing).
             shell->body_changed = 1u;
         }

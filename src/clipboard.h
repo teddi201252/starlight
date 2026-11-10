@@ -8,6 +8,8 @@ void sl_clipboard_shutdown(void);
 uint8_t sl_clipboard_set_text(const char *text, uint32_t text_len);
 const char *sl_clipboard_current_text(uint32_t *out_len);
 uint8_t sl_clipboard_has_text(void);
+// The manager opens; the item chosen there is then pasted (a field's menu).
+void sl_clipboard_open_manager_then_paste(void);
 void sl_clipboard_set_feedback_config(uint8_t audio_enabled, uint8_t visual_enabled);
 void sl_clipboard_notify_copy(sl_ctx_t *ctx, const char *text, uint32_t text_len,
                               int32_t start_x, int32_t start_y,

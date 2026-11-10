@@ -82,6 +82,21 @@ typedef struct {
     uint32_t select_scroll_idx;
     uint32_t font_px;
     const slsk_font_t *label_face;   // FACE: the skin font labels use (NULL: by font_px)
+    // A text field's menu (release 0.14.0, phase 3): the right button on a
+    // field opens it; the field does what was chosen on its next pass.
+    uint8_t mouse_r_pressed;          // set by the host after sl_ui_begin
+    uint32_t field_menu_id;           // the field whose menu is open, 0: none
+    uint32_t field_menu_anchor_x, field_menu_anchor_y;
+    uint32_t field_menu_x, field_menu_y, field_menu_w, field_menu_h, field_menu_row_h;
+    uint8_t field_menu_press;         // a press began inside it (its release chooses)
+    uint32_t field_menu_pick;         // SL_UI_FMENU_* + 1 for the field to do, 0: nothing
+    uint32_t field_menu_off;          // the options that cannot be chosen now (bit per option)
+    uint32_t field_menu_app_pick;     // an option of the app's: its index + 1, for the host to send
+    uint32_t field_menu_app_id;       // ... in this field
+    // The app's own options for a field ("a|b"), NULL: none (the host knows them).
+    const char *(*field_menu_app)(void *user, uint32_t id);
+    void *field_menu_app_user;
+    struct peos_text_undo *undo;      // the history of the field with the caret (peos/text_undo.h, malloc'd)
     sl_ui_theme_t theme;
     uint8_t theme_initialized;
     uint32_t theme_version;
@@ -151,6 +166,17 @@ void sl_ui_begin(sl_ui_ctx_t *ui, sl_ctx_t *ctx, const sl_window_t *win,
                  uint8_t mouse_down, uint8_t mouse_pressed, uint8_t mouse_released,
                  int32_t wheel_x, int32_t wheel_y,
                  uint32_t clipboard_cmds, uint8_t caps_lock_on);
+// The options of a text field's menu, in their order.
+enum {
+    SL_UI_FMENU_UNDO, SL_UI_FMENU_REDO, SL_UI_FMENU_CUT, SL_UI_FMENU_COPY, SL_UI_FMENU_PASTE,
+    SL_UI_FMENU_PASTE_FROM, SL_UI_FMENU_DELETE, SL_UI_FMENU_SELECT_ALL, SL_UI_FMENU_COUNT
+};
+// Before the controls of a frame: the open field menu takes the mouse and Esc.
+void sl_ui_field_menu_input(sl_ui_ctx_t *ui, const peos_input_event_t *events, uint8_t event_count);
+// Whether a field menu is open, and where (for the host's hover and damage).
+uint8_t sl_ui_field_menu_rect(const sl_ui_ctx_t *ui, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
+// What the context keeps that is not its own memory (the undo history).
+void sl_ui_free(sl_ui_ctx_t *ui);
 void sl_ui_theme_set_default(sl_ui_theme_t *theme);
 void sl_ui_theme_set_night(sl_ui_theme_t *theme);
 // The runtime theme as Starlight's own drawing uses it: a colour, the mode,
