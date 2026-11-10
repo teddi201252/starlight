@@ -2826,6 +2826,42 @@ void sl_windows_theme_changed(sl_ctx_t *ctx) {
     }
 }
 
+// The screen changed size (the interface scale): maximized windows fill it
+// again, the others shrink if they are resizable and move back inside.
+void sl_windows_screen_changed(sl_ctx_t *ctx) {
+    if (!ctx || !g_windows) return;
+    uint32_t left = sl_launcher_reserved_left(ctx);
+    uint32_t top = sl_windows_top(ctx);
+    uint32_t sw = ctx->fb.width, sh = ctx->fb.height;
+    for (size_t i = 0u; i < g_window_count; i++) {
+        sl_window_t *win = &g_windows[i];
+        if (win->maximized) {
+            uint32_t l = left + 24u, m = 24u;
+            if (sw > l + m + 200u && sh > top + m + 150u) {
+                win->x = l;
+                win->y = top;
+                win->width = sw - l - m;
+                win->height = sh - top - m;
+            }
+        } else {
+            uint32_t max_w = sw > left + 8u ? sw - left - 8u : sw;
+            uint32_t max_h = sh > top + 8u ? sh - top - 8u : sh;
+            if (win->resizable) {
+                if (win->width > max_w) win->width = max_w > win->min_w ? max_w : win->min_w;
+                if (win->height > max_h) win->height = max_h > win->min_h ? max_h : win->min_h;
+            }
+            if (win->x + win->width > sw) win->x = sw > win->width ? sw - win->width : 0u;
+            if (win->x < left && sw > left + win->width) win->x = left;
+            if (win->y + win->height > sh) win->y = sh > win->height ? sh - win->height : 0u;
+            if (win->y < top && sh > top + win->height) win->y = top;
+        }
+        win->force_redraw = 1u;
+        win->cache_valid = 0u;
+        win->next_render_ns = 0ull;
+    }
+    sl_dirty_mark_full();
+}
+
 int sl_windows_top_opaque_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
     if (!ctx || !g_windows) return 0;
     for (size_t i = g_window_count; i > 0u; i--) {
