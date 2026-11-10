@@ -34,6 +34,7 @@ typedef struct {
     uint8_t caps_lock_on;
     uint8_t swallow_a;
     uint8_t swallow_s;
+    uint8_t swallow_z, swallow_y;     // Caps+Z, Caps+Y: undo and redo (0.14.0)
 } sl_actionmod_tracker_t;
 
 typedef struct {
@@ -110,6 +111,8 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             g_actionmod.caps_down = 1u;
             g_actionmod.swallow_a = 0u;
             g_actionmod.swallow_s = 0u;
+            g_actionmod.swallow_z = 0u;
+            g_actionmod.swallow_y = 0u;
         } else {
             if (g_actionmod.state == SL_ACTIONMOD_PRESSED &&
                 (now_ns - g_actionmod.press_ns) <= SL_ACTIONMOD_TAP_NS) {
@@ -121,6 +124,8 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             g_actionmod.caps_down = 0u;
             g_actionmod.swallow_a = 0u;
             g_actionmod.swallow_s = 0u;
+            g_actionmod.swallow_z = 0u;
+            g_actionmod.swallow_y = 0u;
         }
         return 1u;
     }
@@ -146,6 +151,19 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             return 0u;
         } else {
             g_actionmod.swallow_s = 0u;
+        }
+        return 1u;
+    }
+    if (code == PEOS_KEY_Z || code == PEOS_KEY_Y) {
+        uint8_t *swallow = code == PEOS_KEY_Z ? &g_actionmod.swallow_z : &g_actionmod.swallow_y;
+        if (ev->pressed) {
+            out->clipboard_cmds |= code == PEOS_KEY_Z ? SL_CLIP_CMD_UNDO : SL_CLIP_CMD_REDO;
+            g_actionmod.state = SL_ACTIONMOD_CHORD_USED;
+            *swallow = 1u;
+        } else if (!*swallow) {
+            return 0u;
+        } else {
+            *swallow = 0u;
         }
         return 1u;
     }

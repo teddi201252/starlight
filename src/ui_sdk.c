@@ -1,9 +1,15 @@
 #include "ui_sdk.h"
 
+#include "clipboard.h"
+#include "context_menu_renderer.h"
+#include "i18n.h"
+#include "peos/text_undo.h"
+
 #include "keyboard_layout.h"
 #include "render/surface.h"
 #include "starlight_internal.h"   // sl_frame_time_ns
 
+#include <stdlib.h>
 #include <string.h>
 
 static sl_ui_theme_t g_runtime_theme;
@@ -469,6 +475,8 @@ static uint32_t sl_ui_utf8_count_between(const char *text, uint32_t start, uint3
 static uint32_t sl_ui_utf8_prev_pos(const char *text, uint32_t pos);
 static uint32_t sl_ui_utf8_advance_cols(const char *text, uint32_t pos, uint32_t len, uint32_t cols);
 static uint32_t sl_ui_text_line_col_at(const char *text, uint32_t pos, uint32_t *col_out);
+
+static void sl_ui_field_menu_draw(sl_ui_ctx_t *ui);
 
 static uint8_t sl_ui_clipboard_copy_selection(const sl_ui_ctx_t *ui, uint32_t id, const char *text) {
     uint32_t sel_start = 0u, sel_end = 0u;
@@ -1255,7 +1263,9 @@ uint8_t sl_ui_select_cycle_state_ex(sl_ui_ctx_t *ui, uint32_t id,
 }
 
 void sl_ui_draw_overlays(sl_ui_ctx_t *ui) {
-    if (!ui || !ui->ctx || !ui->select_overlay_pending) return;
+    if (!ui || !ui->ctx) return;
+    sl_ui_field_menu_draw(ui);
+    if (!ui->select_overlay_pending) return;
 
     uint32_t x = ui->select_overlay_x;
     uint32_t y = ui->select_overlay_y;
@@ -1322,6 +1332,263 @@ uint8_t sl_ui_text_input(sl_ui_ctx_t *ui, uint32_t id,
     return sl_ui_text_input_state(ui, id, x, y, w, h, text, text_cap, events, event_count, 1u);
 }
 
+// ------------------------------------- a text field's menu and history (0.14.0, phase 3)
+//
+// The right button on a field opens a menu Starlight draws (as an app's
+// context menu): undo, redo, cut, copy, paste, paste from the clipboard
+// manager, delete, select all, then the app's own options for that field.
+// Undo keeps the field with the caret's last states (peos/text_undo.h).
+
+static const char *const k_fmenu_keys[SL_UI_FMENU_COUNT] = {
+    "field.undo", "field.redo", "field.cut", "field.copy", "field.paste",
+    "field.paste_from", "field.delete", "field.select_all",
+};
+
+void sl_ui_free(sl_ui_ctx_t *ui) {
+    if (!ui || !ui->undo) return;
+    peos_undo_clear(ui->undo);
+    free(ui->undo);
+    ui->undo = NULL;
+}
+
+static void sl_ui_undo_sync(sl_ui_ctx_t *ui, uint32_t id, const char *text, uint32_t caret) {
+    if (!ui->undo) ui->undo = (peos_text_undo_t *)calloc(1u, sizeof(*ui->undo));
+    if (ui->undo) peos_undo_sync(ui->undo, id, text, caret);
+}
+
+static uint8_t g_ui_pasted;   // this pass pasted: a step of its own
+
+static void sl_ui_undo_record(sl_ui_ctx_t *ui, uint32_t id, const char *text, uint32_t caret) {
+    if (!ui->undo) return;
+    if (g_ui_pasted) peos_undo_break(ui->undo);
+    peos_undo_record(ui->undo, id, text, caret, sl_frame_time_ns());
+    if (g_ui_pasted) peos_undo_break(ui->undo);
+    g_ui_pasted = 0u;
+}
+
+static uint8_t sl_ui_undo_apply(sl_ui_ctx_t *ui, uint32_t id, char *text, uint32_t *len, uint32_t text_cap,
+                                uint8_t redo) {
+    if (!ui->undo || !peos_undo_apply(ui->undo, id, text, len, text_cap, &ui->text_caret_pos, redo)) return 0u;
+    sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
+    return 1u;
+}
+
+static uint32_t sl_ui_field_menu_count(const sl_ui_ctx_t *ui, const char **app) {
+    *app = ui->field_menu_app && ui->field_menu_id ? ui->field_menu_app(ui->field_menu_app_user, ui->field_menu_id)
+                                                   : NULL;
+    uint32_t n = SL_UI_FMENU_COUNT;
+    if (*app && **app) {
+        n++;
+        for (const char *c = *app; *c; c++) n += *c == '|';
+    }
+    return n;
+}
+
+// Option i's label ("~" first: there, but not now).
+static void sl_ui_field_menu_label(uint32_t i, char *out, size_t cap, void *user) {
+    const sl_ui_ctx_t *ui = (const sl_ui_ctx_t *)user;
+    out[0] = '\0';
+    if (i < SL_UI_FMENU_COUNT) {
+        uint8_t off = (ui->field_menu_off >> i) & 1u;
+        size_t o = 0u;
+        if (off && cap > 1u) out[o++] = '~';
+        const char *t = sl_tr(k_fmenu_keys[i]);
+        size_t n = strlen(t);
+        if (n > cap - 1u - o) n = cap - 1u - o;
+        memcpy(out + o, t, n);
+        out[o + n] = '\0';
+        return;
+    }
+    const char *app = NULL;
+    (void)sl_ui_field_menu_count(ui, &app);
+    uint32_t k = i - SL_UI_FMENU_COUNT;
+    for (const char *c = app; c && *c; c++) {   // the k-th piece of "a|b|c"
+        if (k == 0u) {
+            size_t n = 0u;
+            while (c[n] && c[n] != '|') n++;
+            if (n > cap - 1u) n = cap - 1u;
+            memcpy(out, c, n);
+            out[n] = '\0';
+            return;
+        }
+        if (*c == '|') k--;
+    }
+}
+
+static void sl_ui_field_menu_close(sl_ui_ctx_t *ui) {
+    ui->field_menu_id = 0u;
+    ui->field_menu_press = 0u;
+    ui->field_menu_w = ui->field_menu_h = 0u;
+}
+
+// Where the open menu goes: at the pointer where it opened, kept in the window.
+static void sl_ui_field_menu_layout(sl_ui_ctx_t *ui) {
+    const char *app = NULL;
+    uint32_t count = sl_ui_field_menu_count(ui, &app);
+    uint32_t row_h = 20u, widest = 0u;   // as an app's context menu
+    for (uint32_t i = 0u; i < count; i++) {
+        char label[128];
+        sl_ui_field_menu_label(i, label, sizeof(label), ui);
+        uint32_t w = sl_ui_ctx_text_width(ui->ctx, label[0] == '~' ? label + 1 : label);
+        if (w > widest) widest = w;
+    }
+    uint32_t w = widest + 36u, h = count * row_h + 2u;
+    if (w < 160u) w = 160u;
+    uint32_t x = ui->field_menu_anchor_x, y = ui->field_menu_anchor_y;
+    if (ui->win) {
+        uint32_t right = ui->win->x + ui->win->width, bottom = ui->win->y + ui->win->height;
+        if (x + w > right && right > w) x = right - w;
+        if (y + h > bottom && bottom > h) y = y > h ? y - h : bottom - h;
+        if (x < ui->win->x) x = ui->win->x;
+        if (y < ui->win->y) y = ui->win->y;
+    }
+    ui->field_menu_x = x;
+    ui->field_menu_y = y;
+    ui->field_menu_w = w;
+    ui->field_menu_h = h;
+    ui->field_menu_row_h = row_h;
+}
+
+uint8_t sl_ui_field_menu_rect(const sl_ui_ctx_t *ui, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!ui || !ui->field_menu_id || !ui->field_menu_w) return 0u;
+    *x = ui->field_menu_x;
+    *y = ui->field_menu_y;
+    *w = ui->field_menu_w;
+    *h = ui->field_menu_h;
+    return 1u;
+}
+
+void sl_ui_field_menu_input(sl_ui_ctx_t *ui, const peos_input_event_t *events, uint8_t event_count) {
+    if (!ui || !ui->field_menu_id) return;
+    if (ui->mouse_r_pressed) {   // the right button again: the field under it opens a new one
+        sl_ui_field_menu_close(ui);
+        return;
+    }
+    for (uint8_t i = 0u; i < event_count; i++) {
+        if (events[i].pressed && sl_ui_norm_keycode(events[i].code) == PEOS_KEY_ESC) {
+            sl_ui_field_menu_close(ui);
+            return;
+        }
+    }
+    int inside = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, ui->field_menu_x, ui->field_menu_y,
+                                     ui->field_menu_w, ui->field_menu_h);
+    if (ui->mouse_pressed) {
+        if (!inside) {   // a click elsewhere closes it, and does what it does
+            sl_ui_field_menu_close(ui);
+            return;
+        }
+        ui->field_menu_press = 1u;
+        ui->mouse_pressed = 0u;   // the controls under the menu do not see it
+    }
+    if (ui->field_menu_press) ui->mouse_down = 0u;
+    if (!ui->mouse_released || !ui->field_menu_press) return;
+    ui->field_menu_press = 0u;
+    ui->mouse_released = 0u;
+    if (!inside || ui->field_menu_row_h == 0u) return;
+    uint32_t row = (ui->cursor_y - ui->field_menu_y - (ui->cursor_y > ui->field_menu_y ? 1u : 0u)) / ui->field_menu_row_h;
+    const char *app = NULL;
+    uint32_t count = sl_ui_field_menu_count(ui, &app);
+    if (row >= count) return;
+    char label[128];
+    sl_ui_field_menu_label(row, label, sizeof(label), ui);
+    if (label[0] == '~') return;   // off: the menu stays
+    if (row < SL_UI_FMENU_COUNT) {
+        ui->field_menu_pick = row + 1u;   // the field does it in its pass, then closes the menu
+        return;
+    }
+    ui->field_menu_app_pick = row - SL_UI_FMENU_COUNT + 1u;
+    ui->field_menu_app_id = ui->field_menu_id;
+    sl_ui_field_menu_close(ui);
+}
+
+static void sl_ui_field_menu_draw(sl_ui_ctx_t *ui) {
+    if (!ui->field_menu_id || !ui->field_menu_w) return;
+    const char *app = NULL;
+    uint32_t count = sl_ui_field_menu_count(ui, &app);
+    int32_t hover = -1;
+    if (sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, ui->field_menu_x, ui->field_menu_y + 1u, ui->field_menu_w,
+                            ui->field_menu_h > 2u ? ui->field_menu_h - 2u : 0u)) {
+        hover = (int32_t)((ui->cursor_y - ui->field_menu_y - 1u) / ui->field_menu_row_h);
+    }
+    sl_context_menu_draw(ui->ctx, ui->field_menu_x, ui->field_menu_y, ui->field_menu_w, ui->field_menu_h,
+                         ui->field_menu_row_h, count, 0u, count, hover, 0u, sl_ui_field_menu_label, ui);
+}
+
+// A field's part, before its keys: the right button opens its menu (a
+// press outside the selection moves the caret there first), what the menu
+// chose and Caps+Z / Caps+Y are done. -> 1 when the text changed.
+static uint8_t sl_ui_field_menu_pass(sl_ui_ctx_t *ui, uint32_t id, int hovered, uint32_t hit,
+                                     char *text, uint32_t *len, uint32_t text_cap, uint8_t *restored) {
+    uint8_t changed = 0u;
+    *restored = 0u;
+    if (hovered && ui->mouse_r_pressed) {
+        uint32_t a = 0u, b = 0u;
+        if (!sl_ui_selection_range(ui, id, &a, &b) || hit < a || hit > b) {
+            ui->text_caret_pos = hit > *len ? *len : hit;
+            sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
+        }
+        ui->field_menu_id = id;
+        ui->field_menu_anchor_x = ui->cursor_x;
+        ui->field_menu_anchor_y = ui->cursor_y;
+        ui->field_menu_pick = 0u;
+        ui->field_menu_press = 0u;
+        ui->mouse_r_pressed = 0u;
+    }
+    uint32_t what = UINT32_MAX;
+    if (ui->field_menu_pick && ui->field_menu_id == id) {
+        what = ui->field_menu_pick - 1u;
+        ui->field_menu_pick = 0u;
+        sl_ui_field_menu_close(ui);
+    }
+    if (ui->clipboard_cmds & SL_CLIP_CMD_UNDO) what = SL_UI_FMENU_UNDO;
+    if (ui->clipboard_cmds & SL_CLIP_CMD_REDO) what = SL_UI_FMENU_REDO;
+    ui->clipboard_cmds &= ~(uint32_t)(SL_CLIP_CMD_UNDO | SL_CLIP_CMD_REDO);
+    uint32_t a = 0u, b = 0u;
+    uint8_t sel = sl_ui_selection_range(ui, id, &a, &b);
+    switch (what) {
+    case SL_UI_FMENU_UNDO:
+    case SL_UI_FMENU_REDO:
+        if (sl_ui_undo_apply(ui, id, text, len, text_cap, what == SL_UI_FMENU_REDO)) changed = *restored = 1u;
+        break;
+    case SL_UI_FMENU_CUT:
+        if (sel && sl_ui_clipboard_copy_selection(ui, id, text) &&
+            sl_ui_text_delete_selection(ui, id, text, len, &ui->text_caret_pos)) changed = 1u;
+        break;
+    case SL_UI_FMENU_COPY:
+        if (sel) (void)sl_ui_clipboard_copy_selection(ui, id, text);
+        break;
+    case SL_UI_FMENU_PASTE:
+        if (sl_ui_text_apply_paste(ui, id, text, len, text_cap, &ui->text_caret_pos)) changed = g_ui_pasted = 1u;
+        break;
+    case SL_UI_FMENU_PASTE_FROM:
+        sl_clipboard_open_manager_then_paste();   // the one chosen comes back as Caps+S
+        break;
+    case SL_UI_FMENU_DELETE:
+        if (sl_ui_text_delete_selection(ui, id, text, len, &ui->text_caret_pos)) changed = 1u;
+        break;
+    case SL_UI_FMENU_SELECT_ALL:
+        ui->text_caret_pos = *len;
+        ui->text_select_id = id;
+        ui->text_select_anchor_pos = 0u;
+        ui->text_select_focus_pos = *len;
+        break;
+    default:
+        break;
+    }
+    if (ui->field_menu_id == id) {   // what can be chosen now, for the labels
+        uint32_t off = 0u;
+        sel = sl_ui_selection_range(ui, id, NULL, NULL);
+        if (!peos_undo_can(ui->undo, id, 0u)) off |= 1u << SL_UI_FMENU_UNDO;
+        if (!peos_undo_can(ui->undo, id, 1u)) off |= 1u << SL_UI_FMENU_REDO;
+        if (!sel) off |= (1u << SL_UI_FMENU_CUT) | (1u << SL_UI_FMENU_COPY) | (1u << SL_UI_FMENU_DELETE);
+        if (!sl_clipboard_has_text()) off |= (1u << SL_UI_FMENU_PASTE) | (1u << SL_UI_FMENU_PASTE_FROM);
+        if (*len == 0u) off |= 1u << SL_UI_FMENU_SELECT_ALL;
+        ui->field_menu_off = off;
+        sl_ui_field_menu_layout(ui);
+    }
+    return changed;
+}
+
 uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
                                uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                char *text, uint32_t text_cap,
@@ -1337,6 +1604,7 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         }
         else if (ui->focused_id == id) ui->focused_id = 0u;
     }
+    if (enabled && ui->mouse_r_pressed && hovered) ui->focused_id = id;   // its menu: the field first
     if (!enabled && ui->focused_id == id) ui->focused_id = 0u;
     if (!enabled && ui->active_id == id) ui->active_id = 0u;
     int focused = (ui->focused_id == id);
@@ -1376,6 +1644,13 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     if (ui->mouse_released && ui->active_id == id) ui->active_id = 0u;
 
     uint8_t changed = 0u;
+    uint8_t restored = 0u;
+    if (enabled && focused) {
+        sl_ui_undo_sync(ui, id, text, ui->text_caret_pos);
+        uint32_t hit = (hovered && ui->mouse_r_pressed) ? sl_ui_text_input_hit_pos(ui, x, w, text, len) : ui->text_caret_pos;
+        changed |= sl_ui_field_menu_pass(ui, id, hovered, hit, text, &len, text_cap, &restored);
+    }
+    (void)restored;
     if (enabled && focused) {
         if (ui->clipboard_cmds & SL_CLIP_CMD_COPY) {
             uint32_t sel_start = 0u, sel_end = 0u;
@@ -1388,7 +1663,7 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             ui->clipboard_cmds &= ~SL_CLIP_CMD_COPY;
         }
         if (ui->clipboard_cmds & SL_CLIP_CMD_PASTE) {
-            if (sl_ui_text_apply_paste(ui, id, text, &len, text_cap, &ui->text_caret_pos)) changed = 1u;
+            if (sl_ui_text_apply_paste(ui, id, text, &len, text_cap, &ui->text_caret_pos)) changed = g_ui_pasted = 1u;
             ui->clipboard_cmds &= ~SL_CLIP_CMD_PASTE;
         }
     }
@@ -1507,6 +1782,8 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             changed = 1u;
         }
     }
+
+    if (enabled && ui->focused_id == id) sl_ui_undo_record(ui, id, text, ui->text_caret_pos);
 
     sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
     if (!enabled) state = SL_UI_STATE_DISABLED;
@@ -1769,6 +2046,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         }
         else if (ui->focused_id == id) ui->focused_id = 0u;
     }
+    if (enabled && ui->mouse_r_pressed && hovered) ui->focused_id = id;   // its menu: the field first
     if (!enabled && ui->focused_id == id) ui->focused_id = 0u;
     if (!enabled && ui->active_id == id) ui->active_id = 0u;
     int focused = (ui->focused_id == id);
@@ -1797,6 +2075,13 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     }
 
     uint8_t changed = 0u;
+    uint8_t restored = 0u;
+    if (enabled && focused) {
+        sl_ui_undo_sync(ui, id, text, ui->text_caret_pos);
+        uint32_t hit = (hovered && ui->mouse_r_pressed) ? sl_ui_text_area_hit_pos(ui, x, y, w, h, text) : ui->text_caret_pos;
+        changed |= sl_ui_field_menu_pass(ui, id, hovered, hit, text, &len, text_cap, &restored);
+    }
+    (void)restored;
     if (enabled && focused) {
         if (ui->clipboard_cmds & SL_CLIP_CMD_COPY) {
             uint32_t sel_start = 0u, sel_end = 0u;
@@ -1809,7 +2094,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             ui->clipboard_cmds &= ~SL_CLIP_CMD_COPY;
         }
         if (ui->clipboard_cmds & SL_CLIP_CMD_PASTE) {
-            if (sl_ui_text_apply_paste(ui, id, text, &len, text_cap, &ui->text_caret_pos)) changed = 1u;
+            if (sl_ui_text_apply_paste(ui, id, text, &len, text_cap, &ui->text_caret_pos)) changed = g_ui_pasted = 1u;
             ui->clipboard_cmds &= ~SL_CLIP_CMD_PASTE;
         }
     }
@@ -1955,6 +2240,8 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             }
         }
     }
+
+    if (enabled && ui->focused_id == id) sl_ui_undo_record(ui, id, text, ui->text_caret_pos);
 
     sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
     if (!enabled) state = SL_UI_STATE_DISABLED;

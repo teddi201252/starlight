@@ -26,6 +26,9 @@ typedef struct {
 #define SL_CLIP_CMD_COPY         (1u << 0)
 #define SL_CLIP_CMD_PASTE        (1u << 1)
 #define SL_CLIP_CMD_OPEN_MANAGER (1u << 2)
+// Caps+Z and Caps+Y (release 0.14.0, phase 3): undo and redo in a text field.
+#define SL_CLIP_CMD_UNDO         (1u << 3)
+#define SL_CLIP_CMD_REDO         (1u << 4)
 
 void sl_input_state_reset(void);
 void sl_input_set_key_repeat_config(uint32_t delay_ms, uint32_t rate_hz);

@@ -59,6 +59,9 @@ typedef struct {
     uint32_t count;
     uint32_t current_idx;
     uint8_t manager_open;
+    // "Paste from the clipboard..." in a field's menu (0.14.0, phase 3): the
+    // manager opens, and the item chosen is pasted (a Caps+S on the next frame).
+    uint8_t open_request, paste_after, paste_pending;
     uint32_t manager_selected;
 } sl_clipboard_state_t;
 
@@ -485,8 +488,15 @@ void sl_clipboard_tick(sl_ctx_t *ctx) {
 
 // ------------------------------------------------------------ input
 
+void sl_clipboard_open_manager_then_paste(void) {
+    if (g_clipboard.count == 0u) return;
+    g_clipboard.open_request = 1u;
+    g_clipboard.paste_after = 1u;
+}
+
 static void sl_close_manager(uint8_t *out_changed, uint8_t *out_full_redraw) {
     g_clipboard.manager_open = 0u;
+    g_clipboard.paste_after = 0u;
     if (out_changed) *out_changed = 1u;
     if (out_full_redraw) *out_full_redraw = 1u;
 }
@@ -495,7 +505,9 @@ static void sl_use_item(uint32_t idx, uint8_t *out_changed, uint8_t *out_full_re
     if (idx >= g_clipboard.count) return;
     g_clipboard.manager_selected = 0u;
     sl_clipboard_promote_index(idx);
+    uint8_t paste = g_clipboard.paste_after;
     sl_close_manager(out_changed, out_full_redraw);
+    g_clipboard.paste_pending = paste;
 }
 
 uint8_t sl_clipboard_handle_input(sl_ctx_t *ctx, sl_input_frame_t *frame,
@@ -504,6 +516,14 @@ uint8_t sl_clipboard_handle_input(sl_ctx_t *ctx, sl_input_frame_t *frame,
     if (out_changed) *out_changed = 0u;
     if (out_full_redraw) *out_full_redraw = 0u;
     if (!ctx || !frame) return 0u;
+    if (g_clipboard.paste_pending && !g_clipboard.manager_open) {   // the item chosen, into the field
+        g_clipboard.paste_pending = 0u;
+        frame->clipboard_cmds |= SL_CLIP_CMD_PASTE;
+    }
+    if (g_clipboard.open_request) {
+        g_clipboard.open_request = 0u;
+        frame->clipboard_cmds |= SL_CLIP_CMD_OPEN_MANAGER;
+    }
     if ((frame->clipboard_cmds & SL_CLIP_CMD_PASTE) && !g_clipboard.manager_open) sl_clipboard_notify_paste(ctx);
     if (frame->clipboard_cmds & SL_CLIP_CMD_OPEN_MANAGER) {
         frame->clipboard_cmds &= ~SL_CLIP_CMD_OPEN_MANAGER;
