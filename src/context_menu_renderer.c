@@ -44,19 +44,23 @@ void sl_context_menu_draw(sl_ctx_t *ctx,
         uint32_t opt_idx = start_idx + i;
         if (opt_idx >= option_count) break;
         uint32_t iy = y + 1u + i * row_h;
-        uint8_t hover = ((hover_row >= 0) && ((uint32_t)hover_row == i)) ? 1u : 0u;
+        char label[128];
+        label[0] = '\0';
+        if (label_fn) label_fn(opt_idx, label, sizeof(label), label_userdata);
+        // "~" first: an option that is there but cannot be chosen now (SLUI SDK 1.0.13)
+        uint8_t off = label[0] == '~';
+        uint8_t hover = (!off && (hover_row >= 0) && ((uint32_t)hover_row == i)) ? 1u : 0u;
         if (hover && list_w > 8u) {
             if (face) sl_ui_ctx_surface(ctx, SL_UI_SURF_INSET, x + 4u, iy, list_w - 8u, row_h, row_h / 2u > 10u ? 10u : row_h / 2u);
             else sl_fill_rect(ctx, x + 1u, iy, list_w - 2u, row_h, 62u, 74u, 92u);
         }
         if (label_fn) {
-            char label[128];
             uint32_t ty = iy + ((row_h > cell_h) ? ((row_h - cell_h) / 2u) : 0u);
-            label[0] = '\0';
-            label_fn(opt_idx, label, sizeof(label), label_userdata);
-            const sl_ui_color_t *ink = sl_ui_runtime_color(SL_UI_COLOR_TEXT_PRIMARY);
-            if (face) (void)sl_draw_text_face(ctx, face, (int32_t)(x + 12u), (int32_t)(ty + cell_h), label, ink->r, ink->g, ink->b);
-            else sl_draw_text(ctx, x + 8u, ty, label, 236u, 240u, 244u);
+            const char *text = off ? label + 1 : label;
+            const sl_ui_color_t *ink = sl_ui_runtime_color(off ? SL_UI_COLOR_TEXT_DISABLED : SL_UI_COLOR_TEXT_PRIMARY);
+            if (face) (void)sl_draw_text_face(ctx, face, (int32_t)(x + 12u), (int32_t)(ty + cell_h), text, ink->r, ink->g, ink->b);
+            else if (off) sl_draw_text(ctx, x + 8u, ty, text, 120u, 128u, 140u);
+            else sl_draw_text(ctx, x + 8u, ty, text, 236u, 240u, 244u);
         }
     }
 
