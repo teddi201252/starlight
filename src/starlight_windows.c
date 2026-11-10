@@ -1055,12 +1055,17 @@ static void sl_dock_resolve(const sl_ctx_t *ctx, sl_launcher_item_t *item) {
         if (k == 0) item->tile_custom = (uint8_t)(item->icons[k] != NULL);
     }
     if (item->tile_custom) return;
-    // No baked tile: its own icon if it has one, else its initial.
-    sl_launcher_try_load_icon(item);
-    if (item->icon_loaded && item->icon_image.data) {
-        item->own_icon[0] = sl_dock_scale_icon(&item->icon_image, 44u);
-        item->own_icon[1] = sl_dock_scale_icon(&item->icon_image, 66u);
-        sl_image_free(&item->icon_image);   // the scaled copies are all that is drawn
+    // No baked tile: its own icon if it has one, else its initial. Scaled
+    // once; read again only when the scaled copies are gone (the decoded
+    // image is freed after scaling, so "loaded" alone does not mean it is there).
+    if (!item->own_icon[0]) {
+        if (!item->icon_image.data) item->icon_loaded = 0u;
+        sl_launcher_try_load_icon(item);
+        if (item->icon_loaded && item->icon_image.data) {
+            item->own_icon[0] = sl_dock_scale_icon(&item->icon_image, 44u);
+            item->own_icon[1] = sl_dock_scale_icon(&item->icon_image, 66u);
+            sl_image_free(&item->icon_image);   // the scaled copies are all that is drawn
+        }
     }
     unsigned char c = (unsigned char)item->title[0];
     item->initial[0] = (char)((c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c);
@@ -2209,10 +2214,12 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
             g_launcher_items[old_index].own_icon[0] = NULL;   // moved with the item
             g_launcher_items[old_index].own_icon[1] = NULL;
             item->tiles_ready = 0u;                            // the title may have changed
-            free(item->own_icon[0]);
-            free(item->own_icon[1]);
-            item->own_icon[0] = item->own_icon[1] = NULL;
+            // Its own icon stays as it is, scaled, unless its file changed
+            // (it was lost at every new app: Orfeus and Abisso showed their initial).
             if (strcmp(item->icon_path, entry->app.icon) != 0) {
+                free(item->own_icon[0]);
+                free(item->own_icon[1]);
+                item->own_icon[0] = item->own_icon[1] = NULL;
                 if (item->icon_image.data) sl_image_free(&item->icon_image);
                 peos_memset(&item->icon_image, 0, sizeof(item->icon_image));
                 item->icon_loaded = 0u;
