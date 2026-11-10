@@ -2484,7 +2484,12 @@ static void sl_ui_sincos(float a, float *s, float *c) {
 // pixel, in quarters of a pixel, all in integers but the end's position.
 void sl_ui_ring(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t size, uint32_t thick, uint32_t permille,
                 const uint8_t track[3], const uint8_t fill[3]) {
-    if (!ui || !ui->ctx || size < 4u || size > 512u || thick == 0u || thick * 2u > size) return;
+    if (ui) sl_ui_ctx_ring(ui->ctx, x, y, size, thick, permille, track, fill);
+}
+
+void sl_ui_ctx_ring(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t size, uint32_t thick, uint32_t permille,
+                    const uint8_t track[3], const uint8_t fill[3]) {
+    if (!ctx || size < 4u || size > 512u || thick == 0u || thick * 2u > size) return;
     if (permille > 1000u) permille = 1000u;
     int64_t c4 = (int64_t)size * 2;                       // the centre, in quarter pixels
     int64_t ro = (int64_t)size * 2, ri = ro - (int64_t)thick * 4;
@@ -2527,8 +2532,8 @@ void sl_ui_ring(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, uint32_t size, uint32_t
             any |= (uint8_t)(nt | nf);
         }
         if (!any) continue;
-        sl_blend_coverage_row(ui->ctx, (int32_t)x, (int32_t)(y + py), cov_t, size, track[0], track[1], track[2]);
-        if (permille > 0u) sl_blend_coverage_row(ui->ctx, (int32_t)x, (int32_t)(y + py), cov_f, size, fill[0], fill[1], fill[2]);
+        sl_blend_coverage_row(ctx, (int32_t)x, (int32_t)(y + py), cov_t, size, track[0], track[1], track[2]);
+        if (permille > 0u) sl_blend_coverage_row(ctx, (int32_t)x, (int32_t)(y + py), cov_f, size, fill[0], fill[1], fill[2]);
     }
 }
 

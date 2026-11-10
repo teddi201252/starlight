@@ -30,4 +30,7 @@ typedef struct {
 void sl_input_state_reset(void);
 void sl_input_set_key_repeat_config(uint32_t delay_ms, uint32_t rate_hz);
 void sl_input_set_actionmod_hold_config(uint32_t hold_ms);
+// Caps held alone toward the clipboard manager: 0..1000 of the hold (0 when
+// not), and how long it has been held.
+uint32_t sl_input_caps_hold_permille(uint64_t now_ns, uint64_t *held_ns);
 int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out);

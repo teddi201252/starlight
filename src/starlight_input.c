@@ -62,6 +62,17 @@ static uint64_t sl_actionmod_hold_ns(void) {
     return (uint64_t)hold_ms * 1000000ull;
 }
 
+// Caps held alone, on its way to the clipboard manager: how far (0..1000),
+// and since when; 0 when it is not (released, or used with a letter).
+uint32_t sl_input_caps_hold_permille(uint64_t now_ns, uint64_t *held_ns) {
+    if (held_ns) *held_ns = 0ull;
+    if (g_actionmod.state != SL_ACTIONMOD_PRESSED || !g_actionmod.caps_down) return 0u;
+    uint64_t held = now_ns > g_actionmod.press_ns ? now_ns - g_actionmod.press_ns : 0ull;
+    if (held_ns) *held_ns = held;
+    uint64_t pm = held * 1000ull / sl_actionmod_hold_ns();
+    return pm > 1000ull ? 1000u : (uint32_t)pm;
+}
+
 static uint16_t sl_norm_keycode(uint16_t code) {
     if ((code & 0xFF00u) == 0xE000u) return (uint16_t)(code & 0x00FFu);
     return code;
