@@ -3291,8 +3291,11 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         shell->ui.mouse_wheel_x = frame->mouse_wheel_x;
         shell->ui.mouse_wheel_y = frame->mouse_wheel_y;
         shell->ui.clipboard_cmds = frame->clipboard_cmds;
-        // Caps+A and Caps+S on the pixels (no control has the keyboard): the app's.
-        if (shell->pixels.focused && shell->pixels.base && shell->ui.ui.focused_id == 0u) {
+        // Caps+A and Caps+S on the pixels (no control has the keyboard): the
+        // app's; in an app without pixels too, when no field has the keyboard
+        // (SLUI SDK 1.0.13: Curiosity pastes a file).
+        if (((shell->pixels.focused && shell->pixels.base) || (!shell->pixels.base && shell->ui.enabled)) &&
+            shell->ui.ui.focused_id == 0u) {
             if (shell->ui.clipboard_cmds & SL_CLIP_CMD_COPY) orbit_send_ui_event_clipcmd(shell, "copy");
             if (shell->ui.clipboard_cmds & SL_CLIP_CMD_PASTE) orbit_send_ui_event_clipcmd(shell, "paste");
             shell->ui.clipboard_cmds &= ~(uint32_t)(SL_CLIP_CMD_COPY | SL_CLIP_CMD_PASTE);
@@ -4870,6 +4873,9 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                         uint32_t item = (shell->ui.context_popup_row_h > 0u) ? (rel / shell->ui.context_popup_row_h) : 0u;
                         uint32_t picked = shell->ui.context_scroll_idx + item;
                         if (item < visible_items && picked < zone->min_v) {
+                            char opt[128];
+                            orbit_select_option_text(zone->text, picked, opt, sizeof(opt));
+                            if (opt[0] == '~') goto context_stays;   // there, but not now: nothing happens
                             orbit_send_ui_event_context_menu(shell, zone->id, picked);
                         }
                     }
@@ -4877,6 +4883,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     shell->ui.context_popup_w = 0u;
                     shell->ui.context_popup_h = 0u;
                 }
+            context_stays:;
             }
         }
 
