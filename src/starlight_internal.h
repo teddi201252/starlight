@@ -21,6 +21,7 @@ typedef enum {
     SL_CUR_MOVE,
     SL_CUR_WAIT,
     SL_CUR_NO,
+    SL_CUR_NONE,     // nothing shown: an app's pixels that draw their own (SLUI SDK 1.0.15)
     SL_CUR_COUNT
 } sl_cursor_kind_t;
 

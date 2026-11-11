@@ -290,7 +290,7 @@ typedef struct {
     uint8_t focused;        // pressed inside last: typing goes to them ("CHAR")
     int32_t last_x, last_y;
     uint32_t last_buttons;
-    uint8_t cursor;         // the pointer over them (SLUI SDK 1.0.9 "HOST CURSOR"): 0 arrow, 1 hand, 2 text
+    uint8_t cursor;         // the pointer over them (SLUI SDK 1.0.9 "HOST CURSOR"): 0 arrow, 1 hand, 2 text, 3 none (1.0.15)
     // What changed in the body since the window last asked, x0 y0 x1 y1 from
     // its corner: "HOST PIXELS_DAMAGE x y w h", the commands a frame changed,
     // the field being typed in. It may reach past the body (a shadow).
@@ -1966,7 +1966,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
                 orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "cursor_invalid_args");
                 return 1;
             }
-            shell->pixels.cursor = (uint8_t)(kind <= 2u ? kind : 0u);
+            shell->pixels.cursor = (uint8_t)(kind <= 3u ? kind : 0u);   // 3: none (SLUI SDK 1.0.15)
             shell->pixels.quiet_line = 1u;   // the pointer, not the window
             return 1;
         }
@@ -4251,8 +4251,8 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_TEXT_HINT:
         case ORBIT_UI_CMD_SCROLL_V:
         case ORBIT_UI_CMD_PIXELS: {   // the app's own pixels: the pointer it asked for
-            static const int k_kinds[3] = { SL_CUR_ARROW, SL_CUR_HAND, SL_CUR_TEXT };
-            return k_kinds[shell->pixels.cursor <= 2u ? shell->pixels.cursor : 0u];
+            static const int k_kinds[4] = { SL_CUR_ARROW, SL_CUR_HAND, SL_CUR_TEXT, SL_CUR_NONE };
+            return k_kinds[shell->pixels.cursor <= 3u ? shell->pixels.cursor : 0u];
         }
         case ORBIT_UI_CMD_SURF:
         case ORBIT_UI_CMD_FACE:

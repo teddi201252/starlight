@@ -199,6 +199,7 @@ static int sl_hw_cursor_load_resource(sl_ctx_t *ctx, const char *path) {
 static const char *const k_cursor_names[SL_CUR_COUNT] = {
     "cursor-arrow", "cursor-hand", "cursor-text", "cursor-resize-h", "cursor-resize-v",
     "cursor-resize-nwse", "cursor-resize-nesw", "cursor-move", "cursor-wait", "cursor-no",
+    NULL,   // SL_CUR_NONE: not in the skin, an empty image
 };
 
 // The cursor showing: premultiplied BGRA at the configured scale, its hot
@@ -251,6 +252,18 @@ static int sl_cursor_apply_hw(sl_ctx_t *ctx) {
 
 void sl_cursor_set(sl_ctx_t *ctx, sl_cursor_kind_t kind) {
     if (!ctx || !g_cur.ready || (int)kind == g_cur.kind || kind >= SL_CUR_COUNT) return;
+    if (kind == SL_CUR_NONE) {   // one clear pixel: the hardware cursor and the drawn one show nothing
+        g_cur.kind = (int)kind;
+        g_cur.w = g_cur.h = 1u;
+        g_cur.hx = g_cur.hy = 0u;
+        peos_memset(g_cur.px, 0, 4u);
+        if (ctx->hw_cursor) {
+            uint32_t x, y;
+            sl_cursor_hw_place(ctx, &x, &y, &g_cur.crop_x, &g_cur.crop_y);
+            (void)sl_cursor_apply_hw(ctx);
+        }
+        return;
+    }
     const slsk_entry_t *e = sl_skin_find(&ctx->skin, k_cursor_names[kind]);
     if (!e) e = sl_skin_find(&ctx->skin, k_cursor_names[SL_CUR_ARROW]);
     if (!e) return;
