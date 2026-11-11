@@ -3195,8 +3195,10 @@ static uint8_t orbit_poll_output(orbit_shell_t *shell) {
             uint8_t app = shell->ui.enabled;   // an app with its own window, not the terminal
             orbit_mark_child_exited(shell);
             shell->pixels.other_line = 1u;   // drawn whole: it is gone
-            // Ended from outside (SYS_PROC_KILL: 137): its window goes too.
-            if (app && status == 137) shell->ended = 1u;
+            // Its window goes too when it ended well (0: the app quit, as from
+            // its own menu) or from outside (SYS_PROC_KILL: 137); after an
+            // error it stays, with what the app wrote and Enter to restart.
+            if (app && (status == 0 || status == 137)) shell->ended = 1u;
             changed = 1u;
         }
     }
