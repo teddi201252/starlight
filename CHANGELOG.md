@@ -2,6 +2,10 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.19.0] - 2026-11-11
+- No pointer over an app's pixels that draws its own (SLUI SDK 1.0.15, `SLUI_CURSOR_NONE`): a game's cursor alone, without Starlight's arrow on top
+- An app that quits without an error closes its window; "[app exited] Press Enter to restart" stays only after an error
+
 ## [0.18.0] - 2026-11-10
 - A text field's menu (the right button on it): undo, redo, cut, copy, paste, paste from the clipboard manager, delete, select all; the app may add options of its own (Pegasus: "Paste and go")
 - Undo and redo in every text field, with Caps+Z and Caps+Y (peos/text_undo.h)
