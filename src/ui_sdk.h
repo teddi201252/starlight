@@ -99,6 +99,9 @@ typedef struct {
     // A one-line field's hint, shown while it is empty and not focused (SLUI
     // SDK 1.0.14: "Cerca un'app"); the same user as field_menu_app.
     const char *(*field_hint)(void *user, uint32_t id);
+    // A password field (SLUI SDK 1.0.16, PeOS 0.16.0): its text drawn as
+    // asterisks, never copied to the clipboard; the same user as above.
+    uint8_t (*field_secret)(void *user, uint32_t id);
     struct peos_text_undo *undo;      // the history of the field with the caret (peos/text_undo.h, malloc'd)
     sl_ui_theme_t theme;
     uint8_t theme_initialized;

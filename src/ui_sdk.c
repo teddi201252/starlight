@@ -478,9 +478,14 @@ static uint32_t sl_ui_text_line_col_at(const char *text, uint32_t pos, uint32_t 
 
 static void sl_ui_field_menu_draw(sl_ui_ctx_t *ui);
 
+static uint8_t sl_ui_field_is_secret(const sl_ui_ctx_t *ui, uint32_t id) {
+    return ui && ui->field_secret && ui->field_secret(ui->field_menu_app_user, id);
+}
+
 static uint8_t sl_ui_clipboard_copy_selection(const sl_ui_ctx_t *ui, uint32_t id, const char *text) {
     uint32_t sel_start = 0u, sel_end = 0u;
     if (!ui || !text) return 0u;
+    if (sl_ui_field_is_secret(ui, id)) return 0u;   // a password never goes to the clipboard
     if (!sl_ui_selection_range(ui, id, &sel_start, &sel_end)) return 0u;
     return sl_clipboard_set_text(text + sel_start, sel_end - sel_start);
 }
@@ -1819,8 +1824,13 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         uint32_t n = 0u;
         uint32_t pos = start;
         uint32_t cols = 0u;
+        uint8_t secret = sl_ui_field_is_secret(ui, id);
         while (text[pos] && n + 5u < (uint32_t)sizeof(draw_buf) && cols < vis_chars) {
             uint32_t next = sl_ui_utf8_next_pos(text, pos, len);
+            if (secret) {   // one asterisk per character
+                draw_buf[n++] = '*';
+                pos = next;
+            }
             while (pos < next && n + 1u < (uint32_t)sizeof(draw_buf)) {
                 draw_buf[n++] = text[pos++];
             }
