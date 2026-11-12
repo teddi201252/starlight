@@ -2,6 +2,9 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.20.0] - 2026-11-12
+- Password fields (SLUI SDK 1.0.16, `TEXT_SECRET`): drawn as asterisks, never copied to the clipboard
+
 ## [0.19.0] - 2026-11-11
 - No pointer over an app's pixels that draws its own (SLUI SDK 1.0.15, `SLUI_CURSOR_NONE`): a game's cursor alone, without Starlight's arrow on top
 - An app that quits without an error closes its window; "[app exited] Press Enter to restart" stays only after an error
