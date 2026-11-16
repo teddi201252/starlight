@@ -119,8 +119,10 @@ static struct {
     uint64_t busy, idle, rx, tx, ns;
 } g_prev;
 
-// The battery every 30 s (the kernel reads the SMC at most every 20 s).
-#define SL_DESK_BATTERY_POLLS (30000u / SL_DESK_POLL_MS)
+// The battery every 5 s, so the charger shows soon after it is plugged in
+// (the kernel reads the whole battery at most every 20 s, and in between
+// only the charger, one SMC key, at most every 4 s).
+#define SL_DESK_BATTERY_POLLS (5000u / SL_DESK_POLL_MS)
 
 static void sl_desk_poller(void *arg) {
     (void)arg;
@@ -415,8 +417,12 @@ static void sl_desk_draw_bar(sl_ctx_t *ctx, const struct tm *now) {
         snprintf(pct, sizeof(pct), "%d%%", (int)battery);
         r -= 22 + (int32_t)sl_text_width(g_desk.bar, pct);
         sl_text_draw(&t, g_desk.bar, r, text_base, pct, ink[0], ink[1], ink[2]);
-        const slsk_entry_t *icon = (bflags & PEOS_BATTERY_CHARGING) ? g_desk.battery_charge
-                                                                    : g_desk.battery[(battery + 12) / 25 > 4 ? 4 : (battery + 12) / 25];
+        // the charger's icon whenever it is plugged in (a full battery, or one
+        // the Mac holds near full, is not charging: 2026-11-16, the MacBook at
+        // 97% with the charger showed the plain icon); neon while charging
+        const slsk_entry_t *icon = (bflags & (PEOS_BATTERY_AC | PEOS_BATTERY_CHARGING))
+                                       ? g_desk.battery_charge
+                                       : g_desk.battery[(battery + 12) / 25 > 4 ? 4 : (battery + 12) / 25];
         if (icon) {
             r -= 6 + (int32_t)icon->width;
             const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
@@ -431,7 +437,7 @@ static void sl_desk_draw_bar(sl_ctx_t *ctx, const struct tm *now) {
             said = 1u;
             char line[64];
             snprintf(line, sizeof(line), "starlight: battery shown, %d%%%s\n", (int)battery,
-                     (bflags & PEOS_BATTERY_CHARGING) ? " charging" : "");
+                     (bflags & PEOS_BATTERY_CHARGING) ? " charging" : (bflags & PEOS_BATTERY_AC) ? " on the charger" : "");
             peos_puts(line);
         }
     }
