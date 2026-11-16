@@ -3089,8 +3089,23 @@ static void orbit_request_child_exit(orbit_shell_t *shell) {
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, quit_line, sizeof(quit_line) - 1u);
 }
 
+static void orbit_cfg_apply_to_shell(size_t index);
+
+// Called just before an app's process starts (sl_app_host_set_prespawn).
+static int (*g_orbit_prespawn)(size_t index) = NULL;
+
+void sl_app_host_set_prespawn(int (*fn)(size_t index)) {
+    g_orbit_prespawn = fn;
+}
+
 static int orbit_spawn_process(orbit_shell_t *shell) {
     if (!shell) return 0;
+    // Its manifest read again (an app.ini edited since the catalog scan),
+    // then the slot's settings into the shell
+    if (g_orbit_prespawn && shell->slot_index < g_orbit_slot_count) {
+        if (!g_orbit_prespawn(shell->slot_index)) return 0;
+        orbit_cfg_apply_to_shell(shell->slot_index);
+    }
     if (!shell->enabled || shell->exec_path[0] == '\0') return 0;
 
     uint64_t stdin_pipe[2] = {0, 0};

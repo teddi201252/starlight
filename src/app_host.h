@@ -21,6 +21,9 @@ void sl_app_host_set_language(const char *code);
 int sl_app_host_slot_restrict_caps(size_t index, uint64_t caps_mask);
 /* Limits the filesystem the app may touch (call after slot_configure). */
 int sl_app_host_slot_restrict_paths(size_t index, const peos_path_grant_t *grants, size_t count);
+/* Called just before an app's process starts, with its slot: 0 and the app
+ * does not start. Starlight reads the app's app.ini again there. */
+void sl_app_host_set_prespawn(int (*fn)(size_t index));
 size_t sl_app_host_next_slot_index(void);
 size_t sl_app_host_slot_count_enabled(void);
 /* What this input changes in the focused app: 1, the rect to add to the

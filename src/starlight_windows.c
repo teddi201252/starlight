@@ -2094,6 +2094,46 @@ static void sl_launcher_pick_window_rect(const sl_ctx_t *ctx, const sl_launcher_
     *out_h = h;
 }
 
+// Its app.ini read again just before the app starts: the catalog follows
+// only the app directories (an app added, removed or rebuilt), so an
+// app.ini edited in place (args=, paths=) took effect only after a
+// restart. One small file per launch, nothing while the apps sit still.
+// 0: the slot could not be set up again (the app does not start).
+static int sl_launcher_reload_manifest(sl_launcher_item_t *item) {
+    if (item->bundle_path[0] == '\0') return 1;
+    char manifest_path[320];
+    sl_app_bundle_t app;
+    if (!sl_join_path(manifest_path, sizeof(manifest_path), item->bundle_path, SL_APP_MANIFEST) ||
+        !sl_load_app_bundle(manifest_path, item->bundle_path, &app)) {
+        return 1;   // unreadable now: as it was
+    }
+    // configure drops the slot's limits: the app starts only with all of
+    // them back
+    if (!sl_app_host_slot_configure(item->slot, app.title, app.exec, app.args) ||
+        !sl_app_host_slot_restrict_caps(item->slot, app.caps_mask) ||
+        !sl_app_host_slot_restrict_paths(item->slot, app.paths, app.path_count) ||
+        !sl_app_host_slot_set_bundle(item->slot, item->bundle_path)) {
+        return 0;
+    }
+    item->width = app.width;
+    item->height = app.height;
+    item->min_width = app.min_width;
+    item->min_height = app.min_height;
+    item->max_width = app.max_width;
+    item->max_height = app.max_height;
+    item->fixed_size = app.fixed_size;
+    return 1;
+}
+
+// app_host's hook before a process starts (the dock, the app manager, Enter
+// in a window whose app exited): the item of that slot, its app.ini again.
+static int sl_launcher_prespawn(size_t slot) {
+    for (size_t i = 0u; i < g_launcher_count; i++) {
+        if (g_launcher_items[i].slot == slot) return sl_launcher_reload_manifest(&g_launcher_items[i]);
+    }
+    return 1;
+}
+
 static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index) {
     if (!ctx || launcher_index >= g_launcher_count) return 0;
 
@@ -2739,6 +2779,7 @@ void sl_windows_create_default(sl_ctx_t *ctx) {
     if (!ctx) return;
 
     (void)sl_launcher_dir_changed();   // baseline for sl_launcher_tick_catalog
+    sl_app_host_set_prespawn(sl_launcher_prespawn);
     sl_dock_pins_load();
     size_t loaded = sl_load_apps_from_system(ctx);
     if (loaded == 0u) {
