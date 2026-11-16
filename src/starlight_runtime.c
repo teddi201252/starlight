@@ -9,6 +9,7 @@
 #include "desktop.h"
 #include "notify.h"
 #include "music.h"
+#include "peos/tz.h"
 #include "i18n.h"
 #include "app_host.h"
 #include "peos/lang.h"
@@ -654,7 +655,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->clipboard_feedback_visual_enabled = SL_CLIPBOARD_FEEDBACK_VISUAL_DEFAULT;
     ctx->graphics_perf_enabled = 0u;
     ctx->show_perf = 0u;
-    ctx->timezone_eu_central = 1u;
+    ctx->timezone = (uint8_t)peos_tz_find(PEOS_TZ_DEFAULT);
     sl_copy_text(ctx->language, sizeof(ctx->language), PEOS_LANG_FALLBACK);
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
@@ -755,7 +756,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                 } else if (strcmp(key, "language") == 0 && peos_lang_code_valid(val)) {
                     sl_copy_text(ctx->language, sizeof(ctx->language), val);
                 } else if (strcmp(key, "timezone") == 0) {
-                    ctx->timezone_eu_central = (strcmp(val, "UTC") != 0) ? 1u : 0u;
+                    ctx->timezone = (uint8_t)peos_tz_find(val);
                 } else if (strcmp(key, "show_performance") == 0) {
                     uint32_t n = 0u;
                     if (sl_parse_u32(val, &n)) ctx->show_perf = n ? 1u : 0u;
@@ -1253,7 +1254,8 @@ int sl_handle_input(sl_ctx_t *ctx) {
     }
 
     for (uint8_t i = 0u; i < input.key_event_count; i++) {   // Esc closes the notification centre
-        if (sl_sysmenu_handle_key(ctx, &input.key_events[i]) || sl_music_handle_key(ctx, &input.key_events[i]) ||
+        if (sl_sysmenu_handle_key(ctx, &input.key_events[i]) || sl_desk_handle_key(ctx, &input.key_events[i]) ||
+            sl_music_handle_key(ctx, &input.key_events[i]) ||
             sl_notify_handle_key(ctx, &input.key_events[i])) {
             input.key_events[i] = input.key_events[--input.key_event_count];
             i--;

@@ -26,6 +26,8 @@ uint8_t sl_desk_held(void);                                      // a widget is 
 void sl_desk_drag(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_desk_release(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 int sl_desk_wheel(sl_ctx_t *ctx, uint32_t x, uint32_t y, int32_t delta);   // 1: taken
+// The volume, mute and screen light keys: 1 when taken.
+int sl_desk_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev);
 // The hand over a widget, or -1.
 int sl_desk_cursor(uint32_t x, uint32_t y);
 
