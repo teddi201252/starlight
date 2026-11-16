@@ -1977,7 +1977,13 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
                 orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "cursor_invalid_args");
                 return 1;
             }
+            uint8_t was = shell->pixels.cursor;
             shell->pixels.cursor = (uint8_t)(kind <= 3u ? kind : 0u);   // 3: none (SLUI SDK 1.0.15)
+            if (shell->pixels.cursor != was) {   // in the log: which pointer a game asks for, when
+                static const char *const k_names[4] = { "arrow\n", "hand\n", "text\n", "none\n" };
+                peos_puts("starlight: an app's pointer over its pixels: ");
+                peos_puts(k_names[shell->pixels.cursor]);
+            }
             shell->pixels.quiet_line = 1u;   // the pointer, not the window
             return 1;
         }
