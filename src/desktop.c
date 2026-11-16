@@ -5,6 +5,7 @@
 #include "render/pixels.h"
 #include "render/surface.h"
 #include "peos/net.h"
+#include "peos/tz.h"
 #include "ui_sdk.h"
 #include "notify.h"
 #include "music.h"
@@ -55,6 +56,7 @@ static struct {
     uint8_t ready;
     const slsk_font_t *bar, *bar_bold, *digits, *day, *date, *cal_title, *cal, *cal_bold;
     const slsk_entry_t *logo, *wifi, *volume, *globe;
+    const slsk_entry_t *battery[5], *battery_charge;   // bar-battery-0..4 (empty .. full), charging
     const slsk_font_t *w_label, *w_value, *w_small, *mono, *mono_small;
     sl_desk_rect_t bar_r, clock_r, cal_r;
     sl_desk_rect_t vol_r, cpu_r, net_r;   // the widgets themselves (0 wide: no room)
@@ -62,6 +64,7 @@ static struct {
     int8_t hot, pressed;                  // widget under the mouse / held down (SL_DW_*, -1 none)
     uint8_t dragging;                     // the pressed widget follows the mouse (the volume)
     int32_t local_volume;                 // set from the desktop, until the poller reads it back
+    int32_t unmute_volume;                // the level before the mute key (-1: not muted)
     uint64_t local_volume_until;
     int32_t shown_volume, shown_cpu;      // last drawn
     uint32_t shown_net;                   // feed version of the network card
@@ -84,7 +87,9 @@ static struct {
     uint64_t rx_rate, tx_rate;       // bytes a second over the last poll
     uint64_t hist[SL_DESK_NET_BARS]; // rx + tx a second, oldest first
     uint32_t net_version;            // bumped when the rates move
-} g_feed;
+    int32_t battery;                 // percent, -1 no battery
+    uint32_t battery_flags;          // PEOS_BATTERY_*
+} g_feed = { .battery = -1 };
 static uint8_t g_poller_stack[16384] __attribute__((aligned(16)));
 static uint8_t g_poller_started;
 
@@ -114,9 +119,30 @@ static struct {
     uint64_t busy, idle, rx, tx, ns;
 } g_prev;
 
+// The battery every 30 s (the kernel reads the SMC at most every 20 s).
+#define SL_DESK_BATTERY_POLLS (30000u / SL_DESK_POLL_MS)
+
 static void sl_desk_poller(void *arg) {
     (void)arg;
+    uint32_t battery_wait = 0u;
+    int32_t battery = -1;
+    uint32_t battery_flags = 0u;
     for (;;) {
+        uint8_t battery_moved = 0u;
+        if (battery_wait == 0u) {
+            peos_battery_t b;
+            int32_t pct = -1;
+            uint32_t fl = 0u;
+            if (peos_battery(&b) == 0 && (b.flags & PEOS_BATTERY_PRESENT)) {
+                pct = (int32_t)b.percent;
+                fl = b.flags;
+            }
+            battery_moved = pct != battery || fl != battery_flags;
+            battery = pct;
+            battery_flags = fl;
+            battery_wait = SL_DESK_BATTERY_POLLS;
+        }
+        battery_wait--;
         peos_netcfg_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         uint8_t has_ip = (net_config_get(&cfg) == NET_OK && (cfg.ip[0] | cfg.ip[1] | cfg.ip[2] | cfg.ip[3])) ? 1u : 0u;
@@ -155,8 +181,10 @@ static void sl_desk_poller(void *arg) {
         g_prev.have = have_si || have_ns;
 
         if (has_ip != g_feed.has_ip || vol != g_feed.volume || memcmp(cfg.ip, g_feed.ip, 4) != 0 ||
-            cpu != g_feed.cpu || net_moved) {
+            cpu != g_feed.cpu || net_moved || battery_moved) {
             __atomic_add_fetch(&g_feed.version, 1u, __ATOMIC_RELEASE);
+            g_feed.battery = battery;
+            g_feed.battery_flags = battery_flags;
             memcpy(g_feed.ip, cfg.ip, 4);
             g_feed.has_ip = has_ip;
             g_feed.volume = vol;
@@ -232,6 +260,12 @@ static int sl_desk_ready(sl_ctx_t *ctx) {
     g_desk.logo = sl_skin_find(&ctx->skin, "bar-logo");
     g_desk.wifi = sl_skin_find(&ctx->skin, "bar-wifi");
     g_desk.volume = sl_skin_find(&ctx->skin, "bar-volume");
+    for (int i = 0; i < 5; i++) {
+        char name[20];
+        snprintf(name, sizeof(name), "bar-battery-%d", i);
+        g_desk.battery[i] = sl_skin_find(&ctx->skin, name);
+    }
+    g_desk.battery_charge = sl_skin_find(&ctx->skin, "bar-battery-charge");
     g_desk.globe = sl_skin_find(&ctx->skin, "globe-40");
     g_desk.w_label = sl_desk_font(ctx, "ui-15");
     g_desk.w_value = sl_desk_font(ctx, "ui-22-mid");
@@ -248,6 +282,7 @@ static int sl_desk_ready(sl_ctx_t *ctx) {
     g_feed.cpu = -1;
     g_desk.hot = g_desk.pressed = -1;
     g_desk.local_volume = -1;
+    g_desk.unmute_volume = -1;
     g_desk.ready = 1u;
     return 1;
 }
@@ -373,6 +408,33 @@ static void sl_desk_draw_bar(sl_ctx_t *ctx, const struct tm *now) {
     int32_t volume = -1;
     uint32_t version = 0u;
     (void)sl_desk_feed(addr, &has_ip, &volume, &version);
+    int32_t battery = g_feed.battery;   // a word: read whole
+    uint32_t bflags = g_feed.battery_flags;
+    if (battery >= 0) {   // a laptop: the battery left of the time
+        char pct[8];
+        snprintf(pct, sizeof(pct), "%d%%", (int)battery);
+        r -= 22 + (int32_t)sl_text_width(g_desk.bar, pct);
+        sl_text_draw(&t, g_desk.bar, r, text_base, pct, ink[0], ink[1], ink[2]);
+        const slsk_entry_t *icon = (bflags & PEOS_BATTERY_CHARGING) ? g_desk.battery_charge
+                                                                    : g_desk.battery[(battery + 12) / 25 > 4 ? 4 : (battery + 12) / 25];
+        if (icon) {
+            r -= 6 + (int32_t)icon->width;
+            const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+            static const uint8_t low[3] = { 0xE5, 0x48, 0x4D };
+            uint8_t c[3] = { ink[0], ink[1], ink[2] };
+            if (bflags & PEOS_BATTERY_CHARGING) c[0] = n->r, c[1] = n->g, c[2] = n->b;
+            else if (battery <= 10 && !(bflags & PEOS_BATTERY_AC)) memcpy(c, low, 3);
+            (void)sl_desk_mask(ctx, &t, icon, r, cy, c);
+        }
+        static uint8_t said;   // once, for the log (make test-laptop)
+        if (!said) {
+            said = 1u;
+            char line[64];
+            snprintf(line, sizeof(line), "starlight: battery shown, %d%%%s\n", (int)battery,
+                     (bflags & PEOS_BATTERY_CHARGING) ? " charging" : "");
+            peos_puts(line);
+        }
+    }
     if (volume >= 0) {
         snprintf(vol, sizeof(vol), "%d", (int)volume);
         r -= 22 + (int32_t)sl_text_width(g_desk.bar, vol);
@@ -860,32 +922,9 @@ static void sl_desk_draw_calendar_region(sl_ctx_t *ctx, const struct tm *now) {
 
 // ------------------------------------------------------------------ public
 
-// Seconds of the last Sunday of a month (March or October) at 01:00 UTC.
-static int64_t sl_desk_last_sunday_0100(int year, int month) {
-    // Days from 1970-01-01 to the 1st of the next month (civil from days).
-    int y = year, m = month + 2;   // month is 0-based; m is the next one, 1-based
-    if (m > 12) {
-        m = 1;
-        y++;
-    }
-    y -= m <= 2;
-    int64_t era = (y >= 0 ? y : y - 399) / 400;
-    int64_t yoe = y - era * 400;
-    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5;
-    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    int64_t days = era * 146097 + doe - 719468 - 1;      // the last day of the month
-    int64_t wday = (days + 4) % 7;                        // 0 = Sunday
-    if (wday < 0) wday += 7;
-    return (days - wday) * 86400 + 3600;
-}
-
-// Local time: UTC, or Central European with summer time (EU rule).
+// Local time: the zone of settings.cfg (peos/tz.h).
 static int64_t sl_desk_offset(const sl_ctx_t *ctx, int64_t utc) {
-    if (!ctx->timezone_eu_central) return 0;
-    time_t t = (time_t)utc;
-    int year = localtime(&t)->tm_year + 1900;
-    int64_t start = sl_desk_last_sunday_0100(year, 2), end = sl_desk_last_sunday_0100(year, 9);
-    return (utc >= start && utc < end) ? 7200 : 3600;
+    return peos_tz_offset_at(ctx->timezone, utc);
 }
 
 static int64_t sl_desk_local_seconds(const sl_ctx_t *ctx) {
@@ -1181,6 +1220,52 @@ static void sl_desk_volume_save(void) {
     int n = snprintf(buf, sizeof(buf), "# PeOS global audio config\nvolume=%d\n", (int)sl_desk_volume_now());
     if (n > 0) (void)peos_fwrite(fd, buf, (size_t)n);
     (void)peos_fclose(fd);
+}
+
+// The laptop's keys (the Touch Bar's on a MacBook, the media keys of a
+// keyboard): the volume, mute, the screen's light. Taken here, wherever the
+// focus is.
+int sl_desk_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev) {
+    if (!ctx || !ev) return 0;
+    switch (ev->code) {
+    case PEOS_KEY_VOLUME_UP:
+    case PEOS_KEY_VOLUME_DOWN:
+        if (ev->pressed) {
+            if (g_desk.unmute_volume >= 0 && ev->code == PEOS_KEY_VOLUME_UP) {
+                sl_desk_set_volume(ctx, g_desk.unmute_volume);
+                g_desk.unmute_volume = -1;
+            }
+            sl_desk_volume_step(ctx, ev->code == PEOS_KEY_VOLUME_UP ? 1 : -1);
+        }
+        return 1;
+    case PEOS_KEY_MUTE:
+        if (ev->pressed) {
+            if (g_desk.unmute_volume >= 0) {
+                sl_desk_set_volume(ctx, g_desk.unmute_volume);
+                g_desk.unmute_volume = -1;
+            } else {
+                g_desk.unmute_volume = sl_desk_volume_now();
+                sl_desk_set_volume(ctx, 0);
+            }
+            sl_desk_volume_save();
+        }
+        return 1;
+    case PEOS_KEY_LIGHT_UP:
+    case PEOS_KEY_LIGHT_DOWN:
+        if (ev->pressed) {   // a sixteenth of the range a press
+            int64_t now = peos_backlight_get();
+            if (now >= 0) {
+                int64_t step = (int64_t)PEOS_BACKLIGHT_MAX / 16;
+                int64_t v = now + (ev->code == PEOS_KEY_LIGHT_UP ? step : -step);
+                if (v < 0) v = 0;
+                if (v > (int64_t)PEOS_BACKLIGHT_MAX) v = PEOS_BACKLIGHT_MAX;
+                (void)peos_backlight_set((uint32_t)v);
+            }
+        }
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 static void sl_desk_clock_click(sl_ctx_t *ctx) {
