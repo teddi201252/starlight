@@ -104,6 +104,10 @@ uint32_t sl_windows_top(const sl_ctx_t *ctx);
 int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 // The app manager is open: keys type in its search field.
 uint8_t sl_launcher_manager_open(void);
+uint8_t sl_launcher_handle_wheel(sl_ctx_t *ctx, int32_t wheel);
+uint8_t sl_launcher_scrollbar_press(sl_ctx_t *ctx);
+void sl_launcher_scrollbar_drag(sl_ctx_t *ctx);
+uint8_t sl_launcher_scrollbar_release(void);
 void sl_launcher_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev, uint8_t caps_lock_on);
 int sl_launcher_handle_right_click(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_launcher_handle_context_hover(sl_ctx_t *ctx);

@@ -67,6 +67,8 @@ typedef struct {
     uint32_t text_input_scroll_col;
     uint32_t text_area_scroll_line;
     uint32_t text_area_scroll_col;
+    uint32_t text_area_caret_seen;
+    uint32_t text_area_scroll_owner;   // the text area the scroll above belongs to   // the caret as the last frame had it: the view follows only when it moves
     uint32_t select_open_id;
     uint8_t select_overlay_pending;
     uint32_t select_overlay_id;

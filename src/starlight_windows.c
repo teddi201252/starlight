@@ -1150,6 +1150,8 @@ typedef struct {
     uint32_t ex, ey, ew, eh;        // the app manager
     uint32_t cx, cy, cw, ch;        // now (while it widens or narrows)
     uint32_t gx, gy, gw, cols, cell_w, grid_top;
+    uint32_t grid_bottom;           // the grid shows tiles between grid_top and this
+    uint32_t scroll, max_scroll;    // the grid scrolled up by, in pixels
     size_t mgr_count;               // the app manager's tiles: the apps that pass the filters
     size_t mgr_item[SL_MGR_ITEMS_MAX];
 } sl_dock_layout_t;
@@ -1158,6 +1160,7 @@ typedef struct {
 // the category.
 static char g_mgr_query[40];
 static uint8_t g_mgr_cat = SL_CAT_ALL;
+static uint32_t g_mgr_scroll = 0u;   // the grid, scrolled (more apps than fit)
 static uint8_t g_mgr_shift = 0u, g_mgr_altgr = 0u;
 static const char *const g_mgr_cat_keys[SL_CAT_COUNT] = { "apps.cat.all", "apps.cat.system", "apps.cat.tools",
                                                           "apps.cat.fun" };
@@ -1258,6 +1261,14 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
     L->cell_w = L->gw / L->cols;
     L->grid_top = L->gy + 34u + 40u;
     sl_mgr_filter(L);
+    // More apps than fit: the grid scrolls (the wheel, or the bar at its right).
+    L->grid_bottom = L->ey + L->eh > L->grid_top + 20u ? L->ey + L->eh - 20u : L->grid_top;
+    uint32_t rows = (uint32_t)((L->mgr_count + L->cols - 1u) / L->cols);
+    uint32_t content_h = rows * SL_MGR_ROW_H;
+    uint32_t view_h = L->grid_bottom - L->grid_top;
+    L->max_scroll = content_h > view_h ? content_h - view_h : 0u;
+    if (g_mgr_scroll > L->max_scroll) g_mgr_scroll = L->max_scroll;
+    L->scroll = g_mgr_scroll;
 }
 
 // Where the header's pieces go: the search field at the right edge of the
@@ -1306,10 +1317,23 @@ static void sl_dock_tile_rect(const sl_dock_layout_t *L, size_t k, uint32_t *x, 
 }
 
 // The tile at position i of the filtered grid.
+// Its y is where it is now, the grid scrolled: 0 when it is above the grid's
+// top (scrolled away), so check sl_mgr_tile_shown first.
+static int64_t sl_mgr_tile_y(const sl_dock_layout_t *L, size_t i) {
+    return (int64_t)L->grid_top + (int64_t)(i / L->cols) * SL_MGR_ROW_H - (int64_t)L->scroll;
+}
+
+// Some of the tile (with its label) is in the grid's view.
+static int sl_mgr_tile_shown(const sl_dock_layout_t *L, size_t i) {
+    int64_t y = sl_mgr_tile_y(L, i);
+    return y + (int64_t)SL_MGR_ROW_H > (int64_t)L->grid_top && y < (int64_t)L->grid_bottom;
+}
+
 static void sl_mgr_tile_rect(const sl_dock_layout_t *L, size_t i, uint32_t *x, uint32_t *y) {
-    uint32_t col = (uint32_t)(i % L->cols), row = (uint32_t)(i / L->cols);
+    uint32_t col = (uint32_t)(i % L->cols);
+    int64_t ty = sl_mgr_tile_y(L, i);
     *x = L->gx + col * L->cell_w + (L->cell_w > SL_MGR_TILE ? (L->cell_w - SL_MGR_TILE) / 2u : 0u);
-    *y = L->grid_top + row * SL_MGR_ROW_H;
+    *y = ty > 0 ? (uint32_t)ty : 0u;
 }
 
 static void sl_fin_rect(const sl_dock_layout_t *L, uint32_t *x, uint32_t *y) {
@@ -1334,12 +1358,29 @@ static int sl_dock_hit_tile(const sl_dock_layout_t *L, uint32_t x, uint32_t y, s
     return 0;
 }
 
+// The grid's scroll bar: track x, y, height, width; the thumb's height and y.
+static void sl_mgr_scrollbar(const sl_dock_layout_t *L, uint32_t *bx, uint32_t *by, uint32_t *bh,
+                             uint32_t *bw, uint32_t *th, uint32_t *ty) {
+    uint32_t view_h = L->grid_bottom - L->grid_top;
+    *bw = 8u;
+    *bx = L->ex + L->ew - 30u;
+    *by = L->grid_top;
+    *bh = view_h;
+    uint32_t content_h = view_h + L->max_scroll;
+    *th = content_h ? (uint32_t)(((uint64_t)view_h * view_h) / content_h) : view_h;
+    if (*th < 32u) *th = 32u;
+    if (*th > view_h) *th = view_h;
+    uint32_t travel = view_h - *th;
+    *ty = *by + (L->max_scroll ? (uint32_t)(((uint64_t)travel * L->scroll) / L->max_scroll) : 0u);
+}
+
 static int sl_mgr_hit_tile(const sl_dock_layout_t *L, uint32_t x, uint32_t y, size_t *out) {
     if (!sl_dock_expanded_fully()) return 0;
+    if (y < L->grid_top || y >= L->grid_bottom) return 0;   // the part of a tile scrolled out
     for (size_t i = 0u; i < L->mgr_count; i++) {
         uint32_t tx, ty;
+        if (!sl_mgr_tile_shown(L, i)) continue;
         sl_mgr_tile_rect(L, i, &tx, &ty);
-        if (ty + SL_MGR_TILE > L->ey + L->eh) break;
         if (sl_point_in_rect(x, y, tx, ty, SL_MGR_TILE, SL_MGR_TILE + 32u)) {
             *out = L->mgr_item[i];
             return 1;
@@ -1446,7 +1487,10 @@ static void sl_launcher_toggle(sl_ctx_t *ctx) {
     if (!ctx) return;
     sl_dock_set_hover(ctx, (size_t)-1);
     g_launcher_expanded = g_launcher_expanded ? 0u : 1u;
-    if (!g_launcher_expanded) g_mgr_query[0] = '\0';   // opened again, it shows every app
+    if (!g_launcher_expanded) {   // opened again, it shows every app, from the top
+        g_mgr_query[0] = '\0';
+        g_mgr_scroll = 0u;
+    }
     uint32_t target = g_launcher_expanded ? SL_DOCK_ANIM_FULL : 0u;
     if (!sl_tween_to_u32(SL_LAUNCHER_TWEEN_ID, &g_launcher_extra_width, target,
                          SL_LAUNCHER_ANIM_MS, SL_TWEEN_EASE_IN_OUT_CUBIC, NULL, NULL)) {
@@ -3039,6 +3083,7 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
                 if (!sl_point_in_rect(x, y, H.cell_x[c], H.y + SL_MGR_SEG_PAD, H.cell_w[c], SL_MGR_HDR_H - 2u * SL_MGR_SEG_PAD)) continue;
                 if (g_mgr_cat != (uint8_t)c) {
                     g_mgr_cat = (uint8_t)c;
+                    g_mgr_scroll = 0u;
                     sl_dock_set_hover_at(ctx, (size_t)-1, 0u);
                     sl_dock_dirty_panel(ctx, &L);
                 }
@@ -3087,6 +3132,66 @@ int sl_launcher_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if ((g_dock_hot && on_fin) || sl_dock_hit_tile(&L, x, y, &i)) return SL_CUR_HAND;
     if (sl_point_in_rect(x, y, L.px, L.py, L.pw, L.ph)) return SL_CUR_ARROW;
     return -1;
+}
+
+// The wheel over the open app manager scrolls its grid: 1 if it took it.
+uint8_t sl_launcher_handle_wheel(sl_ctx_t *ctx, int32_t wheel) {
+    if (!ctx || !sl_dock_ready(ctx) || !g_launcher_expanded || !sl_dock_expanded_fully() || wheel == 0) return 0u;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    if (!sl_point_in_rect(ctx->cursor_x, ctx->cursor_y, L.ex, L.ey, L.ew, L.eh)) return 0u;
+    if (L.max_scroll == 0u) return 1u;   // over the manager: not for what is under it
+    int64_t nv = (int64_t)g_mgr_scroll - (int64_t)wheel * (int64_t)(SL_MGR_ROW_H / 2u);
+    if (nv < 0) nv = 0;
+    if (nv > (int64_t)L.max_scroll) nv = (int64_t)L.max_scroll;
+    if ((uint32_t)nv != g_mgr_scroll) {
+        g_mgr_scroll = (uint32_t)nv;
+        sl_dock_set_hover_at(ctx, (size_t)-1, 0u);
+        sl_dock_dirty_panel(ctx, &L);
+        sl_launcher_handle_hover(ctx);   // the tile now under the mouse
+    }
+    return 1u;
+}
+
+// A press on the grid's scroll bar, then the mouse held: the bar follows it.
+static uint8_t g_mgr_dragging = 0u;
+static uint32_t g_mgr_drag_grab = 0u;   // where on the thumb it was taken
+
+uint8_t sl_launcher_scrollbar_press(sl_ctx_t *ctx) {
+    if (!ctx || !sl_dock_ready(ctx) || !sl_dock_expanded_fully()) return 0u;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    if (L.max_scroll == 0u) return 0u;
+    uint32_t bx, by, bh, bw, th, ty;
+    sl_mgr_scrollbar(&L, &bx, &by, &bh, &bw, &th, &ty);
+    if (!sl_point_in_rect(ctx->cursor_x, ctx->cursor_y, bx - 6u, by, bw + 12u, bh)) return 0u;
+    g_mgr_dragging = 1u;
+    g_mgr_drag_grab = (ctx->cursor_y >= ty && ctx->cursor_y < ty + th) ? ctx->cursor_y - ty : th / 2u;
+    sl_launcher_scrollbar_drag(ctx);
+    return 1u;
+}
+
+void sl_launcher_scrollbar_drag(sl_ctx_t *ctx) {
+    if (!ctx || !g_mgr_dragging) return;
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    uint32_t bx, by, bh, bw, th, ty;
+    sl_mgr_scrollbar(&L, &bx, &by, &bh, &bw, &th, &ty);
+    uint32_t travel = bh > th ? bh - th : 0u;
+    int64_t pos = (int64_t)ctx->cursor_y - (int64_t)g_mgr_drag_grab - (int64_t)by;
+    if (pos < 0) pos = 0;
+    if (pos > (int64_t)travel) pos = travel;
+    uint32_t nv = travel ? (uint32_t)(((uint64_t)pos * L.max_scroll) / travel) : 0u;
+    if (nv != g_mgr_scroll) {
+        g_mgr_scroll = nv;
+        sl_dock_dirty_panel(ctx, &L);
+    }
+}
+
+uint8_t sl_launcher_scrollbar_release(void) {
+    uint8_t was = g_mgr_dragging;
+    g_mgr_dragging = 0u;
+    return was;
 }
 
 uint8_t sl_launcher_manager_open(void) {
@@ -3140,6 +3245,7 @@ void sl_launcher_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev, uint8_t
         }
     }
     if (changed) {
+        g_mgr_scroll = 0u;   // a new search starts at the top
         sl_dock_set_hover_at(ctx, (size_t)-1, 0u);
         sl_dock_dirty_panel(ctx, &L);
     }
@@ -3372,22 +3478,42 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
         }
     }
 
-    for (size_t i = 0u; i < L.mgr_count; i++) {
+    // The tiles, cut at the grid's top and bottom (the header stays put).
+    sl_target_t gin = in;
+    if ((int32_t)L.grid_top - 24 > gin.clip_y0) gin.clip_y0 = (int32_t)L.grid_top - 24;   // room for a tile's glow
+    if ((int32_t)L.grid_bottom < gin.clip_y1) gin.clip_y1 = (int32_t)L.grid_bottom;
+    if (gin.clip_y1 > gin.clip_y0) {
+        sl_clip_set(ctx, (uint32_t)gin.clip_x0, (uint32_t)gin.clip_y0, (uint32_t)(gin.clip_x1 - gin.clip_x0),
+                    (uint32_t)(gin.clip_y1 - gin.clip_y0));
+    }
+    for (size_t i = 0u; i < L.mgr_count && gin.clip_y1 > gin.clip_y0; i++) {
         uint32_t tx, ty;
+        if (!sl_mgr_tile_shown(&L, i)) continue;
         sl_mgr_tile_rect(&L, i, &tx, &ty);
-        if (ty + SL_MGR_TILE > L.ey + L.eh) break;
+        int64_t ty64 = sl_mgr_tile_y(&L, i);
+        if (ty64 < (int64_t)L.grid_top - (int64_t)SL_MGR_ROW_H) continue;
+        ty = (uint32_t)(ty64 < 0 ? 0 : ty64);
         size_t idx = L.mgr_item[i];
         sl_launcher_item_t *item = &g_launcher_items[idx];
         if (idx == g_launcher_hover_index && g_dock_hover_in_mgr && sl_dock_expanded_fully()) {
-            sl_dock_draw_tile(ctx, &in, item, 4, (int32_t)tx - 4, (int32_t)ty - 4, SL_MGR_HI);
+            sl_dock_draw_tile(ctx, &gin, item, 4, (int32_t)tx - 4, (int32_t)ty - 4, SL_MGR_HI);
         } else {
-            sl_dock_draw_tile(ctx, &in, item, 3, (int32_t)tx, (int32_t)ty, SL_MGR_TILE);
+            sl_dock_draw_tile(ctx, &gin, item, 3, (int32_t)tx, (int32_t)ty, SL_MGR_TILE);
         }
         char label[26];
         sl_launcher_compact_label(item->title, label, sizeof(label));
         uint32_t lw = sl_text_width(g_dock.label, label);
-        sl_text_draw(&in, g_dock.label, (int32_t)(tx + SL_MGR_TILE / 2u) - (int32_t)lw / 2,
+        sl_text_draw(&gin, g_dock.label, (int32_t)(tx + SL_MGR_TILE / 2u) - (int32_t)lw / 2,
                      (int32_t)(ty + SL_MGR_TILE + 12u) + g_dock.label->ascent, label, SL_DOCK_INK);
+    }
+    sl_clip_set(ctx, (uint32_t)in.clip_x0, (uint32_t)in.clip_y0, (uint32_t)(in.clip_x1 - in.clip_x0),
+                (uint32_t)(in.clip_y1 - in.clip_y0));
+    // The scroll bar, at the grid's right, when there is more than fits.
+    if (L.max_scroll > 0u && L.grid_bottom > L.grid_top + 40u) {
+        uint32_t bx, by, bh, tw, th, ty0;
+        sl_mgr_scrollbar(&L, &bx, &by, &bh, &tw, &th, &ty0);
+        sl_ui_ctx_surface(ctx, SL_UI_SURF_INSET, bx, by, tw, bh, tw / 2u);
+        sl_ui_ctx_surface(ctx, SL_UI_SURF_NIGHT, bx, ty0, tw, th, tw / 2u);
     }
     if (L.mgr_count == 0u) {
         sl_text_draw(&in, g_dock.search, (int32_t)L.gx, (int32_t)L.grid_top + g_dock.search->ascent,

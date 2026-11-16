@@ -19,6 +19,7 @@
 
 #define ORBIT_MAX_LINES 5000u          // the scrollback: older lines are dropped
 #define ORBIT_LINE_MAX_CHARS 16384u    // a longer line goes on in the next one
+#define ORBIT_PROTO_LINE_MAX_CHARS (16u * 1024u * 1024u)   // a protocol line (@SLUI ...) may carry a whole file: a text area
 #define ORBIT_DRAW_ROW_CHARS 512u
 #define ORBIT_PENDING_LINE_INITIAL_CHARS 256u
 #define ORBIT_TITLE_CHARS 64u
@@ -1612,14 +1613,22 @@ static void orbit_send_ui_event_text_area(orbit_shell_t *shell, uint32_t id, con
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "@SLUI EVENT TEXT_AREA ", peos_strlen("@SLUI EVENT TEXT_AREA "));
     orbit_write_fd_u32(shell->child_stdin_fd, id);
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, " ", 1u);
+    // In pieces: a write per character made every key in a long text slow.
+    char buf[512];
+    size_t n = 0u;
     for (size_t i = 0u; text[i]; i++) {
         char c = text[i];
-        if (c == '\\') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\\\", 2u);
-        else if (c == '\n') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\n", 2u);
-        else if (c == '\r') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\r", 2u);
-        else if (c == '\t') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\t", 2u);
-        else (void)peos_fwrite((uint64_t)shell->child_stdin_fd, &c, 1u);
+        if (n + 2u > sizeof(buf)) {
+            (void)peos_fwrite((uint64_t)shell->child_stdin_fd, buf, n);
+            n = 0u;
+        }
+        if (c == '\\') { buf[n++] = '\\'; buf[n++] = '\\'; }
+        else if (c == '\n') { buf[n++] = '\\'; buf[n++] = 'n'; }
+        else if (c == '\r') { buf[n++] = '\\'; buf[n++] = 'r'; }
+        else if (c == '\t') { buf[n++] = '\\'; buf[n++] = 't'; }
+        else buf[n++] = c;
     }
+    if (n) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, buf, n);
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\n", 1u);
 }
 
@@ -2531,7 +2540,27 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         }
         if (cmd->max_v < 1u) cmd->max_v = 1u;
         p = orbit_skip_spaces(p);
-        if (!orbit_cmd_set_text_unescaped(cmd, p)) {
+        if (p[0] == '\\' && p[1] == 'K' && p[2] == '\0') {
+            // "\K": the same text as the last frame's field with this id (a
+            // long text is not sent again at every frame).
+            const char *prev = NULL;
+            for (size_t k = 0u; k < shell->ui.cmd_count; k++) {
+                const orbit_ui_cmd_t *o = &shell->ui.cmds[k];
+                if (o->type == ORBIT_UI_CMD_TEXT_AREA && o->id == cmd->id && o->text) { prev = o->text; break; }
+            }
+            if (prev) {
+                if (!orbit_cmd_set_text_raw(cmd, prev)) {
+                    orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "text_area_alloc_failed");
+                    return 1;
+                }
+            } else {   // nothing to keep (the frame before is gone): the app sends the text whole
+                (void)orbit_cmd_set_text_raw(cmd, "");
+                if (shell->child_stdin_fd >= 0) {
+                    static const char resync[] = "@SLUI HOST TEXT_RESYNC\n";
+                    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, resync, sizeof(resync) - 1u);
+                }
+            }
+        } else if (!orbit_cmd_set_text_unescaped(cmd, p)) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "text_area_alloc_failed");
             return 1;
         }
@@ -2981,7 +3010,13 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
     if (shell->surface.active && shell->pending_len == 0u && c != '@') {
         shell->surface.active = 0u;
     }
-    if (shell->pending_cursor >= ORBIT_LINE_MAX_CHARS) {   // too long: it goes on in a new line
+    size_t line_limit = ORBIT_LINE_MAX_CHARS;
+    if (shell->pending_line && shell->pending_len >= 6u && shell->pending_line[0] == '@' &&
+        shell->pending_line[1] == 'S' && shell->pending_line[2] == 'L' && shell->pending_line[3] == 'U' &&
+        shell->pending_line[4] == 'I' && shell->pending_line[5] == ' ') {
+        line_limit = ORBIT_PROTO_LINE_MAX_CHARS;   // cut in two, a text area would lose its tail and vanish
+    }
+    if (shell->pending_cursor >= line_limit) {   // too long: it goes on in a new line
         orbit_push_line_n(shell, shell->pending_line ? shell->pending_line : "", shell->pending_len);
         orbit_pending_line_reset(shell);
     }

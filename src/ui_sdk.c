@@ -788,6 +788,16 @@ uint8_t sl_ui_segment_state(sl_ui_ctx_t *ui, uint32_t id,
     if (enabled && hovered && ui->mouse_pressed) ui->active_id = id;
     int active = (ui->active_id == id);
 
+    // The choice is made on release: take it before drawing, so this very
+    // frame already shows the new cell (not only after the mouse moves).
+    uint8_t changed = 0u;
+    if (enabled && ui->mouse_released && active) {
+        if (over < option_count && over != *selected) {
+            *selected = over;
+            changed = 1u;
+        }
+    }
+
     sl_ui_surface(ui, enabled ? SL_UI_SURF_RAISED : SL_UI_SURF_FLAT, x, y, w, h, sl_ui_pill_r(h, 26u));
     for (uint32_t i = 0u; i < option_count; i++) {
         uint32_t cx = x + pad + i * cell_w;
@@ -807,14 +817,8 @@ uint8_t sl_ui_segment_state(sl_ui_ctx_t *ui, uint32_t id,
         sl_ui_text_tok(ui, tx, sl_ui_text_center_y(ui, y + pad, cell_h), label, tok);
     }
     if (!enabled && active) ui->active_id = 0u;
-    if (enabled && ui->mouse_released && active) {
-        ui->active_id = 0u;
-        if (over < option_count && over != *selected) {
-            *selected = over;
-            return 1u;
-        }
-    }
-    return 0u;
+    if (enabled && ui->mouse_released && active) ui->active_id = 0u;
+    return changed;
 }
 
 uint8_t sl_ui_slider_u32(sl_ui_ctx_t *ui, uint32_t id,
@@ -1904,6 +1908,7 @@ static uint32_t sl_ui_text_max_line_len(const char *text) {
     if (!text) return 0u;
     uint32_t max_len = 0u;
     uint32_t cur_len = 0u;
+    uint32_t len = sl_ui_strlen(text);   // once: per character it made a long text quadratic
     for (uint32_t i = 0u;;) {
         char c = text[i];
         if (c == '\0' || c == '\n') {
@@ -1913,7 +1918,7 @@ static uint32_t sl_ui_text_max_line_len(const char *text) {
             i++;
             continue;
         }
-        i = sl_ui_utf8_next_pos(text, i, sl_ui_strlen(text));
+        i = sl_ui_utf8_next_pos(text, i, len);
         cur_len++;
     }
     return max_len;
@@ -2074,8 +2079,10 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     if (focused && ui->text_caret_id != id) {
         ui->text_caret_id = id;
         ui->text_caret_pos = len;
-        ui->text_area_scroll_line = 0u;
-        ui->text_area_scroll_col = 0u;
+        if (ui->text_area_scroll_owner != id) {   // the view of another field: start at the top
+            ui->text_area_scroll_line = 0u;
+            ui->text_area_scroll_col = 0u;
+        }
         sl_ui_selection_collapse(ui, id, len);
     }
     if (ui->text_caret_id == id && ui->text_caret_pos > len) ui->text_caret_pos = len;
@@ -2273,6 +2280,11 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t vis_lines = content_h / fh;
     if (vis_cols == 0u || vis_lines == 0u) return changed;
 
+    if (ui->text_area_scroll_owner != id && (focused || hovered)) {   // the scroll was another field's
+        ui->text_area_scroll_owner = id;
+        ui->text_area_scroll_line = 0u;
+        ui->text_area_scroll_col = 0u;
+    }
     uint32_t total_lines = sl_ui_text_total_lines(text);
     uint32_t max_scroll = (total_lines > vis_lines) ? (total_lines - vis_lines) : 0u;
     if (ui->text_area_scroll_line > max_scroll) ui->text_area_scroll_line = max_scroll;
@@ -2293,13 +2305,24 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     }
     if (ui->mouse_released && ui->active_id == id) ui->active_id = 0u;
 
-    if (enabled && hovered && !ui->wheel_consumed && max_scroll > 0u) {
-        int32_t wheel = (ui->wheel_y != 0) ? ui->wheel_y : ui->wheel_x;
-        if (wheel != 0) {
-            int64_t nv = (int64_t)ui->text_area_scroll_line - (int64_t)wheel;
+    // The wheel: up and down by lines, left and right by columns (a mouse
+    // with a side wheel, a trackpad); Shift with the wheel goes sideways for
+    // a mouse without one.
+    if (enabled && hovered && !ui->wheel_consumed) {
+        int32_t wy = ui->wheel_y, wx = ui->wheel_x;
+        if (wy != 0 && ui->shift_down && wx == 0) { wx = -wy; wy = 0; }
+        if (wy != 0 && max_scroll > 0u) {
+            int64_t nv = (int64_t)ui->text_area_scroll_line - (int64_t)wy;
             if (nv < 0) nv = 0;
             if (nv > (int64_t)max_scroll) nv = (int64_t)max_scroll;
             ui->text_area_scroll_line = (uint32_t)nv;
+            ui->wheel_consumed = 1u;
+        }
+        if (wx != 0 && max_scroll_col > 0u) {
+            int64_t nv = (int64_t)ui->text_area_scroll_col + (int64_t)wx;
+            if (nv < 0) nv = 0;
+            if (nv > (int64_t)max_scroll_col) nv = (int64_t)max_scroll_col;
+            ui->text_area_scroll_col = (uint32_t)nv;
             ui->wheel_consumed = 1u;
         }
     }
@@ -2309,14 +2332,20 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     uint32_t caret_line = sl_ui_text_line_col_at(text, area_caret_pos, &caret_col);
     uint8_t caret_visible = (enabled && focused &&
                              (((sl_frame_time_ns() / 500000000ull) & 1ull) != 0ull)) ? 1u : 0u;
-    if (caret_line < ui->text_area_scroll_line) ui->text_area_scroll_line = caret_line;
-    if (caret_line >= ui->text_area_scroll_line + vis_lines) {
-        ui->text_area_scroll_line = caret_line - vis_lines + 1u;
+    // The view follows the caret when the caret moves (typing, arrows, a
+    // click), not on every frame: otherwise the wheel would be pulled back
+    // to the caret at once.
+    if (focused && (changed || area_caret_pos != ui->text_area_caret_seen)) {
+        if (caret_line < ui->text_area_scroll_line) ui->text_area_scroll_line = caret_line;
+        if (caret_line >= ui->text_area_scroll_line + vis_lines) {
+            ui->text_area_scroll_line = caret_line - vis_lines + 1u;
+        }
+        if (caret_col < ui->text_area_scroll_col) ui->text_area_scroll_col = caret_col;
+        if (caret_col >= ui->text_area_scroll_col + vis_cols) {
+            ui->text_area_scroll_col = caret_col - vis_cols + 1u;
+        }
     }
-    if (caret_col < ui->text_area_scroll_col) ui->text_area_scroll_col = caret_col;
-    if (caret_col >= ui->text_area_scroll_col + vis_cols) {
-        ui->text_area_scroll_col = caret_col - vis_cols + 1u;
-    }
+    ui->text_area_caret_seen = area_caret_pos;
     if (ui->text_area_scroll_col > max_scroll_col) ui->text_area_scroll_col = max_scroll_col;
 
     uint32_t line_idx = 0u;

@@ -1198,6 +1198,13 @@ int sl_handle_input(sl_ctx_t *ctx) {
         sl_desk_wheel(ctx, ctx->cursor_x, ctx->cursor_y, input.mouse_wheel_y)) {
         input.mouse_wheel_y = 0;
     }
+    // The open app manager: its wheel and its scroll bar (more apps than fit).
+    if (mouse_on_launcher && input.mouse_wheel_y != 0 && sl_launcher_handle_wheel(ctx, input.mouse_wheel_y)) {
+        input.mouse_wheel_y = 0;
+    }
+    if (input.mouse_left_pressed && mouse_on_launcher && sl_launcher_scrollbar_press(ctx)) return 0;
+    if (input.mouse_moved && (input.mouse_buttons & 0x01u)) sl_launcher_scrollbar_drag(ctx);
+    if (input.mouse_left_released && sl_launcher_scrollbar_release()) return 0;
     if (input.mouse_left_released) sl_launcher_handle_release(ctx);
     // A title bar button held down owns the mouse until it is let go.
     if (input.mouse_left_released && sl_windows_title_button_release(ctx, ctx->cursor_x, ctx->cursor_y)) return 0;
