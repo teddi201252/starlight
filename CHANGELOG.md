@@ -2,6 +2,11 @@
 
 All notable changes to this module are documented in this file.
 
+## [0.21.0] - 2026-11-17
+- The battery in the top bar, the light and volume keys, time zones in the clock and calendar
+- An app's app.ini read again before every launch (args, capabilities, paths, sizes)
+- Text areas with long files (blocks, not a character a write; resent only when changed), sideways scrolling; the app manager scrolls; the segmented control redraws at once; the day and night themes' own backgrounds
+
 ## [0.20.0] - 2026-11-12
 - Password fields (SLUI SDK 1.0.16, `TEXT_SECRET`): drawn as asterisks, never copied to the clipboard
 
