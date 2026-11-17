@@ -2970,6 +2970,13 @@ static void orbit_reset_buffer(orbit_shell_t *shell) {
     shell->ui.ui.theme_initialized = 0u;
 }
 
+// Orbit's terminal (exec /bin/orbit): a console, whose lines are the user's
+// commands' output, not an app's log.
+static int orbit_is_terminal(const orbit_shell_t *shell) {
+    size_t n = strlen(shell->exec_path);
+    return n >= 6u && strcmp(shell->exec_path + n - 6u, "/orbit") == 0;
+}
+
 static void orbit_feed_char(orbit_shell_t *shell, char c) {
     if (!shell) return;
     if (orbit_feed_ansi(shell, c)) return;
@@ -2990,9 +2997,13 @@ static void orbit_feed_char(orbit_shell_t *shell, char c) {
         if (!orbit_fb_handle_line(shell, line)) {
             shell->surface.active = 0u;
             if (!orbit_ui_handle_line(shell, line)) {
-                // An SLUI app's own output (not the protocol) is hidden behind
-                // its controls: the system log has it, for whoever debugs it.
-                if (shell->ui.enabled && line[0]) printf("[%s] %s\n", shell->title, line);
+                // An app's own output (not the protocol) is hidden behind its
+                // controls: the system log has it, for whoever debugs it, from
+                // its first line (2026-11-17: a game's errors before its
+                // window opened were lost). Orbit's terminal is the exception:
+                // what its commands print is shown in it, not logged.
+                if (line[0] && (shell->ui.enabled || !orbit_is_terminal(shell)))
+                    printf("[%s] %s\n", shell->title, line);
                 orbit_push_line_n(shell, line, shell->pending_len);
             }
         }
