@@ -297,7 +297,7 @@ void sl_cursor_init(sl_ctx_t *ctx) {
     // Intel), else drawn by Starlight with the same images.
     // With an interface scale the cursor is drawn in the logical frame, so it
     // grows with everything else (a hardware one would stay small).
-    bool scaled = ctx->ui_scale_active != 100u;
+    bool scaled = ctx->upscaled != 0u;
     if (ctx->cursor_theme && ctx->skin_loaded && sl_skin_find(&ctx->skin, k_cursor_names[SL_CUR_ARROW])) {
         g_cur.ready = 1u;
         ctx->hw_cursor = scaled ? 0u : 1u;   // try it first

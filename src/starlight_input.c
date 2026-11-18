@@ -418,7 +418,7 @@ int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out) {
 
         // Absolute positions are on the screen; with an interface scale the
         // cursor lives in the smaller logical frame.
-        if (has_abs && ctx->ui_scale_active != 100u) {
+        if (has_abs && ctx->upscaled) {
             abs[0] = (int32_t)sl_upscale_to_logical_x(&ctx->upscale, abs[0]);
             abs[1] = (int32_t)sl_upscale_to_logical_y(&ctx->upscale, abs[1]);
         }

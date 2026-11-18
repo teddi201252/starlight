@@ -46,6 +46,7 @@ typedef struct {
     // and fb.height are then the logical frame, the screen is phys_*.
     uint32_t ui_scale_pct;
     uint32_t ui_scale_active;  // the scale the frame is made for
+    uint8_t upscaled;          // the frame is smaller than the screen and enlarged onto it
     uint32_t ui_scale_asked;   // the ui_scale it was made from (active may be less)
     uint32_t phys_width, phys_height;
     sl_upscale_t upscale;

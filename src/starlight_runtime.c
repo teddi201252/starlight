@@ -907,23 +907,31 @@ static int sl_frame_setup(sl_ctx_t *ctx) {
     uint32_t scale = ctx->ui_scale_pct;
     if (scale < 100u || scale > 300u) scale = 100u;
     ctx->ui_scale_asked = scale;
+    // The resolution asked in Settings (display.cfg), when the card did not
+    // take it as a mode and it is smaller than the screen: drawn at that
+    // size and enlarged, on any card, at once.
+    uint32_t bw = ctx->phys_width, bh = ctx->phys_height;
+    if (ctx->display_width >= SL_UI_SCALE_MIN_W && ctx->display_height >= SL_UI_SCALE_MIN_H &&
+        ctx->display_width <= bw && ctx->display_height <= bh) {
+        bw = ctx->display_width;
+        bh = ctx->display_height;
+    }
     // Never a logical screen smaller than 1024x600: the windows and the
     // dock are made for at least that (on 1280x800 at most 125%).
     while (scale > 100u &&
-           ((uint64_t)ctx->phys_width * 100u / scale < SL_UI_SCALE_MIN_W ||
-            (uint64_t)ctx->phys_height * 100u / scale < SL_UI_SCALE_MIN_H)) {
+           ((uint64_t)bw * 100u / scale < SL_UI_SCALE_MIN_W || (uint64_t)bh * 100u / scale < SL_UI_SCALE_MIN_H)) {
         scale -= 25u;
     }
     if (scale < 100u) scale = 100u;
-    uint32_t lw = ctx->phys_width, lh = ctx->phys_height;
-    if (scale != 100u) {
-        sl_upscale_logical_size(ctx->phys_width, ctx->phys_height, scale, &lw, &lh);
-        if (!sl_upscale_init(&ctx->upscale, lw, lh, ctx->phys_width, ctx->phys_height)) {
-            scale = 100u;
-            lw = ctx->phys_width;
-            lh = ctx->phys_height;
-        }
+    uint32_t lw = bw, lh = bh;
+    if (scale != 100u) sl_upscale_logical_size(bw, bh, scale, &lw, &lh);
+    if ((lw != ctx->phys_width || lh != ctx->phys_height) &&
+        !sl_upscale_init(&ctx->upscale, lw, lh, ctx->phys_width, ctx->phys_height)) {
+        scale = 100u;
+        lw = ctx->phys_width;
+        lh = ctx->phys_height;
     }
+    ctx->upscaled = lw != ctx->phys_width || lh != ctx->phys_height;
     ctx->ui_scale_active = scale;
     ctx->fb.width = lw;
     ctx->fb.height = lh;
@@ -934,7 +942,7 @@ static int sl_frame_setup(sl_ctx_t *ctx) {
     if ((int64_t)map < 0) return 0;
     ctx->frame = (uint8_t *)(uintptr_t)map;
 
-    if (scale != 100u && !ctx->fb_direct) {
+    if (ctx->upscaled && !ctx->fb_direct) {
         ctx->phys_frame_bytes = (size_t)ctx->phys_width * ctx->phys_height * ctx->bytespp;
         ctx->phys_map_bytes = (size_t)align_up((uint64_t)ctx->phys_frame_bytes, 4096u);
         map = peos_mmap(0, ctx->phys_map_bytes, PEOS_PROT_READ | PEOS_PROT_WRITE, PEOS_MAP_ANON | PEOS_MAP_PRIVATE);
@@ -972,11 +980,27 @@ static int sl_update_fb_info(sl_ctx_t *ctx) {
     return sl_frame_setup(ctx);
 }
 
-// A new interface scale from the settings: the frame, the background, the
-// desktop at the new size; windows back inside the screen.
-static void sl_apply_ui_scale(sl_ctx_t *ctx) {
+// The resolution of display.cfg: a driver that changes the mode now
+// (virtio-gpu) takes it; on any other card the frame is made at that size
+// and enlarged (sl_frame_setup). Never the Intel "logical sizing": it shows
+// a corner of the screen.
+static void sl_set_display_mode(sl_ctx_t *ctx) {
+    peos_fb_modes_t m;
+    if (peos_fb_modes(&m) == 0 && (m.flags & PEOS_FB_MODES_LIVE)) {
+        (void)peos_fb_set_mode(ctx->display_width, ctx->display_height);
+    }
+}
+
+// A new interface scale or resolution from the settings: the frame, the
+// background, the desktop at the new size; windows back inside the screen.
+static void sl_screen_resize(sl_ctx_t *ctx, uint8_t new_mode) {
     uint32_t old_w = ctx->fb.width, old_h = ctx->fb.height;
-    if (!sl_frame_setup(ctx)) return;
+    if (new_mode) {
+        sl_set_display_mode(ctx);
+        if (!sl_update_fb_info(ctx)) return;   // the mode's size, mapped again
+    } else if (!sl_frame_setup(ctx)) {
+        return;
+    }
     sl_desk_free(ctx);
     free(ctx->bg_frame);
     ctx->bg_frame = NULL;
@@ -988,9 +1012,13 @@ static void sl_apply_ui_scale(sl_ctx_t *ctx) {
     if (ctx->cursor_y >= ctx->fb.height) ctx->cursor_y = ctx->fb.height - 1u;
     ctx->cursor_saved_valid = 0u;
     sl_windows_screen_changed(ctx);
-    printf("[STARLIGHT] interface scale %u%% (asked %u%%): %ux%u on %ux%u\n", (unsigned)ctx->ui_scale_active,
-           (unsigned)ctx->ui_scale_asked, (unsigned)ctx->fb.width, (unsigned)ctx->fb.height, (unsigned)ctx->phys_width, (unsigned)ctx->phys_height);
+    printf("[STARLIGHT] interface scale %u%% (asked %u%%): %ux%u on %ux%u (resolution asked %ux%u)\n",
+           (unsigned)ctx->ui_scale_active, (unsigned)ctx->ui_scale_asked, (unsigned)ctx->fb.width, (unsigned)ctx->fb.height,
+           (unsigned)ctx->phys_width, (unsigned)ctx->phys_height, (unsigned)ctx->display_width,
+           (unsigned)ctx->display_height);
 }
+
+static void sl_apply_ui_scale(sl_ctx_t *ctx) { sl_screen_resize(ctx, 0u); }
 
 static void sl_load_background(sl_ctx_t *ctx, const char *path) {
     int ok = 0;
@@ -1027,7 +1055,7 @@ int sl_init(sl_ctx_t *ctx) {
 
     if ((ctx->display_width == 0u && ctx->display_height == 0u) ||
         (ctx->display_width > 0u && ctx->display_height > 0u)) {
-        (void)peos_fb_set_mode(ctx->display_width, ctx->display_height);
+        sl_set_display_mode(ctx);
     }
 
     if (!sl_update_fb_info(ctx)) return 0;
@@ -1079,10 +1107,13 @@ void sl_reload_display(sl_ctx_t *ctx) {
         (void)sl_font_load_manifest_default(ctx->font_manifest_path);
     }
 
-    if (ctx->ui_scale_pct != ctx->ui_scale_asked) {
+    uint32_t old_dw = ctx->display_width, old_dh = ctx->display_height;
+    sl_load_display_config(ctx);   // the resolution (Settings, Display)
+    uint8_t new_mode = old_dw != ctx->display_width || old_dh != ctx->display_height;
+    if (new_mode || ctx->ui_scale_pct != ctx->ui_scale_asked) {
         if (ctx->hw_cursor) (void)peos_cursor_set_visible(0);
         ctx->hw_cursor = 0u;
-        sl_apply_ui_scale(ctx);
+        sl_screen_resize(ctx, new_mode);
     }
 
     if (ctx->bg_loaded) {
@@ -1575,7 +1606,7 @@ int sl_present(sl_ctx_t *ctx) {
         return 1;
     }
 
-    if (ctx->ui_scale_active != 100u) return sl_present_scaled(ctx, rects, rect_count, pixels, full);
+    if (ctx->upscaled) return sl_present_scaled(ctx, rects, rect_count, pixels, full);
 
     if (ctx->fb_direct) {
         if (!ctx->fb_front) return 0;
