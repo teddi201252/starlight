@@ -45,6 +45,7 @@
 #define SL_CENTER_ROW 76u
 #define SL_CENTER_ROWS 6u
 #define SL_CENTER_FOOT 20u
+#define SL_CENTER_MORE 34u   // "and N older ones", when they do not all fit
 
 typedef struct {
     char source[PEOS_NOTIFY_SOURCE_MAX];
@@ -117,7 +118,8 @@ static void sl_note_count(sl_ctx_t *ctx, const char *source) {
 static uint32_t sl_center_h(void) {
     uint32_t rows = g_note.history_count < SL_CENTER_ROWS ? g_note.history_count : SL_CENTER_ROWS;
     if (rows == 0u) rows = 1u;   // "Nessuna notifica"
-    return SL_CENTER_HEAD + rows * SL_CENTER_ROW + SL_CENTER_FOOT;
+    return SL_CENTER_HEAD + rows * SL_CENTER_ROW + SL_CENTER_FOOT +
+           (g_note.history_count > SL_CENTER_ROWS ? SL_CENTER_MORE : 0u);
 }
 
 static uint32_t sl_center_x(const sl_ctx_t *ctx) {
@@ -128,13 +130,23 @@ static void sl_center_dirty(sl_ctx_t *ctx) {
     uint32_t x = sl_center_x(ctx);
     x = x > SL_NOTIFY_SHADOW ? x - SL_NOTIFY_SHADOW : 0u;
     sl_dirty_add(ctx, x, SL_NOTIFY_TOP - 20u, SL_CENTER_W + 2u * SL_NOTIFY_SHADOW,
-                 SL_CENTER_HEAD + SL_CENTER_ROWS * SL_CENTER_ROW + SL_CENTER_FOOT + 2u * SL_NOTIFY_SHADOW);
+                 SL_CENTER_HEAD + SL_CENTER_ROWS * SL_CENTER_ROW + SL_CENTER_FOOT + SL_CENTER_MORE +
+                     2u * SL_NOTIFY_SHADOW);
 }
 
 static void sl_center_set(sl_ctx_t *ctx, uint8_t open) {
     if (g_note.center_open == open) return;
     sl_center_dirty(ctx);
     g_note.center_open = open;
+    if (open) g_note.count = 0u;   // the cards still to come: the centre shows them
+}
+
+// The time at the right of the top bar (its real place; the battery and
+// the volume left of it are not part of it).
+static int sl_center_time_hit(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    uint32_t left = sl_desk_time_x();
+    if (left == 0u) left = ctx->fb.width > 140u ? ctx->fb.width - 140u : 0u;
+    return y < SL_DESK_BAR_HEIGHT && x + 10u >= left;
 }
 
 // "Cancella", at the right of the centre's title.
@@ -146,7 +158,7 @@ static int sl_center_clear_hit(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
 int sl_notify_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx) return 0;
     // The time at the right of the top bar opens and closes the centre.
-    if (y < SL_DESK_BAR_HEIGHT && x + 140u >= ctx->fb.width) {
+    if (sl_center_time_hit(ctx, x, y)) {
         sl_center_set(ctx, (uint8_t)!g_note.center_open);
         return 1;
     }
@@ -165,7 +177,7 @@ int sl_notify_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
 
 int sl_notify_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx) return -1;
-    if (y < SL_DESK_BAR_HEIGHT && x + 140u >= ctx->fb.width) return SL_CUR_HAND;   // the time opens the centre
+    if (sl_center_time_hit(ctx, x, y)) return SL_CUR_HAND;   // the time opens the centre
     if (!g_note.center_open) return -1;
     uint32_t cx = sl_center_x(ctx);
     if (x < cx || x >= cx + SL_CENTER_W || y < SL_NOTIFY_TOP || y >= SL_NOTIFY_TOP + sl_center_h()) return -1;
@@ -191,8 +203,11 @@ static void sl_note_receive(sl_ctx_t *ctx, const peos_notify_msg_t *msg) {
         g_note.head = (g_note.head + 1u) % SL_NOTIFY_QUEUE;
         g_note.count--;
     }
-    g_note.queue[(g_note.head + g_note.count) % SL_NOTIFY_QUEUE] = n;
-    g_note.count++;
+    // With the centre open it shows there at once: no card later.
+    if (!g_note.center_open) {
+        g_note.queue[(g_note.head + g_note.count) % SL_NOTIFY_QUEUE] = n;
+        g_note.count++;
+    }
     g_note.history[g_note.history_head] = n;
     g_note.history_head = (g_note.history_head + 1u) % SL_NOTIFY_HISTORY;
     if (g_note.history_count < SL_NOTIFY_HISTORY) g_note.history_count++;
@@ -407,6 +422,13 @@ static void sl_note_draw_center(sl_ctx_t *ctx, sl_target_t *t) {
         sl_note_icon(ctx, t, x + 30, ry + 16, 44u, note->source);
         sl_note_lines(t, note, x + 30 + 44 + 16, right, ry + (int32_t)SL_CENTER_ROW / 2, note->when);
         ry += (int32_t)SL_CENTER_ROW;
+    }
+    if (g_note.history_count > SL_CENTER_ROWS) {   // the older ones kept, not shown
+        uint32_t more = g_note.history_count - SL_CENTER_ROWS;
+        char line[64];
+        snprintf(line, sizeof(line), sl_tr_n("notify.more", more), (unsigned)more);
+        sl_fill_rect(ctx, (uint32_t)x + 30u, (uint32_t)ry, SL_CENTER_W - 60u, 1u, 0x23, 0x2B, 0x45);
+        sl_text_draw(t, g_note.small_f, x + 30, ry + 24, line, 0x9F, 0xB4, 0xD8);
     }
 }
 

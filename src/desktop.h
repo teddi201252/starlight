@@ -33,3 +33,5 @@ int sl_desk_cursor(uint32_t x, uint32_t y);
 
 // The top bar's height: the time at its right opens the notification centre.
 #define SL_DESK_BAR_HEIGHT 44u
+// Where the time in the top bar starts (its left edge); 0 before it is drawn.
+uint32_t sl_desk_time_x(void);

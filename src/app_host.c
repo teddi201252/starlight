@@ -3251,7 +3251,7 @@ static void orbit_mark_child_exited(orbit_shell_t *shell) {
     orbit_ui_storage_free(&shell->ui);
     orbit_surface_destroy_shared_object(shell);
     peos_memset(&shell->ui, 0, sizeof(shell->ui));
-    orbit_push_line(shell, "[app exited] Press Enter to restart.");
+    orbit_push_line(shell, sl_tr("host.app_exited"));
 }
 
 static uint8_t orbit_poll_output(orbit_shell_t *shell) {
@@ -3305,7 +3305,7 @@ static void orbit_send_input(orbit_shell_t *shell, const char *buf, size_t len) 
     if (!shell || !buf || len == 0u) return;
     if (shell->child_pid <= 0) {
         if (!orbit_spawn_process(shell)) {
-            orbit_push_line(shell, "failed to start app process");
+            orbit_push_line(shell, sl_tr("host.start_failed"));
             return;
         }
     }
@@ -5949,7 +5949,7 @@ app_instance_t *sl_app_host_instance_at(size_t index) {
         orbit_reset_buffer(shell);
 
         if (!orbit_spawn_process(shell)) {
-            orbit_push_line(shell, "failed to start app process");
+            orbit_push_line(shell, sl_tr("host.start_failed"));
         }
 
         app->pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);
@@ -5958,7 +5958,7 @@ app_instance_t *sl_app_host_instance_at(size_t index) {
         if (shell->enabled && shell->child_pid <= 0) {
             orbit_cfg_apply_to_shell(index);
             if (!orbit_spawn_process(shell)) {
-                orbit_push_line(shell, "failed to start app process");
+                orbit_push_line(shell, sl_tr("host.start_failed"));
             }
         }
         app->pid = (uint32_t)((shell->child_pid > 0) ? shell->child_pid : 0u);

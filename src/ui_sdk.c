@@ -1564,7 +1564,8 @@ static uint8_t sl_ui_field_menu_pass(sl_ui_ctx_t *ui, uint32_t id, int hovered, 
             sl_ui_text_delete_selection(ui, id, text, len, &ui->text_caret_pos)) changed = 1u;
         break;
     case SL_UI_FMENU_COPY:
-        if (sel) (void)sl_ui_clipboard_copy_selection(ui, id, text);
+        // As Caps+A: the caller copies right after, with the copy's sign.
+        if (sel) ui->clipboard_cmds |= SL_CLIP_CMD_COPY;
         break;
     case SL_UI_FMENU_PASTE:
         if (sl_ui_text_apply_paste(ui, id, text, len, text_cap, &ui->text_caret_pos)) changed = g_ui_pasted = 1u;

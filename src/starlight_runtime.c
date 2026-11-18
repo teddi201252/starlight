@@ -1378,22 +1378,38 @@ int sl_handle_input(sl_ctx_t *ctx) {
     if (input.mouse_moved && (input.mouse_buttons & 0x01u) && drag_win) {
         uint32_t old_x = drag_win->x;
         uint32_t old_y = drag_win->y;
+        uint32_t old_w = drag_win->width, old_h = drag_win->height;
+
+        // A maximized window dragged goes back to its size, under the
+        // pointer at the same place along the title bar.
+        if (drag_win->maximized && drag_win->restore_w && drag_win->restore_h && old_w) {
+            g_drag_grab_offset_x = (int32_t)((int64_t)g_drag_grab_offset_x * drag_win->restore_w / old_w);
+            drag_win->width = drag_win->restore_w;
+            drag_win->height = drag_win->restore_h;
+            drag_win->maximized = 0u;
+            drag_win->force_redraw = 1u;
+            drag_win->next_render_ns = 0ull;
+        }
 
         int64_t new_x = (int64_t)ctx->cursor_x - (int64_t)g_drag_grab_offset_x;
         int64_t new_y = (int64_t)ctx->cursor_y - (int64_t)g_drag_grab_offset_y;
+        // At least 60 px of the title bar stay on the screen, right and below.
+        uint32_t bar_h = drag_win->top_bar_height ? drag_win->top_bar_height : 40u;
+        if (new_x > (int64_t)ctx->fb.width - 60) new_x = (int64_t)ctx->fb.width - 60;
+        if (new_y > (int64_t)ctx->fb.height - (int64_t)bar_h) new_y = (int64_t)ctx->fb.height - (int64_t)bar_h;
         if (new_x < (int64_t)reserved_left) new_x = (int64_t)reserved_left;
         if (new_y < (int64_t)sl_windows_top(ctx)) new_y = sl_windows_top(ctx);   // under the top bar
 
         sl_window_move(drag_win, (uint32_t)new_x, (uint32_t)new_y);
-        if (drag_win->x != old_x || drag_win->y != old_y) {
+        if (drag_win->x != old_x || drag_win->y != old_y || drag_win->width != old_w) {
             // Part of it was off screen when cached: what comes back is drawn.
             if (drag_win->cache_clipped) drag_win->force_redraw = 1u;
             // Moving does not change what the app shows: its cached inside is
             // copied to the new place, the app is not asked to redraw.
             // Where it was and where it is, shadows included.
             sl_window_dirty_all(ctx, &(sl_window_t){ .x = old_x, .y = old_y,
-                                                     .width = drag_win->width,
-                                                     .height = drag_win->height });
+                                                     .width = old_w,
+                                                     .height = old_h });
             sl_window_dirty_all(ctx, drag_win);
         }
     }

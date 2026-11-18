@@ -15,7 +15,6 @@ static uint32_t g_held_n = 0u;
 #define SL_KEY_REPEAT_RATE_HZ_DEFAULT 30u
 #define SL_KEY_REPEAT_RATE_HZ_MIN 5u
 #define SL_KEY_REPEAT_RATE_HZ_MAX 60u
-#define SL_ACTIONMOD_TAP_NS 180000000ull
 #define SL_ACTIONMOD_HOLD_MS_DEFAULT 400u
 #define SL_ACTIONMOD_HOLD_MS_MIN 100u
 #define SL_ACTIONMOD_HOLD_MS_MAX 3000u
@@ -114,8 +113,9 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             g_actionmod.swallow_z = 0u;
             g_actionmod.swallow_y = 0u;
         } else {
-            if (g_actionmod.state == SL_ACTIONMOD_PRESSED &&
-                (now_ns - g_actionmod.press_ns) <= SL_ACTIONMOD_TAP_NS) {
+            // Released before the clipboard opened, alone: a tap, however
+            // long (between the tap and the hold time it did nothing).
+            if (g_actionmod.state == SL_ACTIONMOD_PRESSED) {
                 g_actionmod.caps_lock_on ^= 1u;
                 sl_append_key_event(out, PEOS_KEY_CAPSLOCK, 1u, now_ns);
                 sl_append_key_event(out, PEOS_KEY_CAPSLOCK, 0u, now_ns);
@@ -166,6 +166,11 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             *swallow = 0u;
         }
         return 1u;
+    }
+    // Another key while Caps is held: Caps was not alone, the clipboard
+    // manager does not open (nor Caps Lock change on the release).
+    if (ev->pressed && !sl_is_modifier_key(ev->code) && g_actionmod.state == SL_ACTIONMOD_PRESSED) {
+        g_actionmod.state = SL_ACTIONMOD_CHORD_USED;
     }
     return 0u;
 }

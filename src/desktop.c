@@ -385,6 +385,12 @@ static int32_t sl_desk_mask(const sl_ctx_t *ctx, sl_target_t *t, const slsk_entr
     return x + (int32_t)m->width;
 }
 
+static uint32_t g_desk_time_x;   // the time's left edge in the bar (0: not drawn)
+
+uint32_t sl_desk_time_x(void) {
+    return g_desk_time_x;
+}
+
 static void sl_desk_draw_bar(sl_ctx_t *ctx, const struct tm *now) {
     sl_desk_clear(ctx, &g_desk.bar_r);
     sl_target_t t = sl_desk_target(ctx, &g_desk.bar_r);
@@ -406,6 +412,7 @@ static void sl_desk_draw_bar(sl_ctx_t *ctx, const struct tm *now) {
     int32_t r = (int32_t)ctx->fb.width - 40;
     r -= (int32_t)sl_text_width(g_desk.bar_bold, clock);
     sl_text_draw(&t, g_desk.bar_bold, r, text_base, clock, ink[0], ink[1], ink[2]);
+    g_desk_time_x = r > 0 ? (uint32_t)r : 0u;
     uint8_t addr[4] = { 0, 0, 0, 0 }, has_ip = 0u;
     int32_t volume = -1;
     uint32_t version = 0u;
@@ -998,7 +1005,7 @@ static void sl_desk_calendar_reminders(sl_ctx_t *ctx, int64_t minute) {
             }
             printf("[CAL] reminder: %s\n", text);
             const char *cal = sl_windows_app_title("calendario");
-            sl_notify_post(ctx, cal ? cal : "Calendario", text);
+            sl_notify_post(ctx, cal ? cal : sl_tr("desk.app.calendario"), text);
         }
     }
     g_cal_checked = minute;
@@ -1100,6 +1107,7 @@ typedef struct {
     // notification says so when it is not installed yet).
     void (*click)(sl_ctx_t *ctx);
     const char *app;
+    const char *app_name;   // the String.lang key of that app's name
 } sl_desk_widget_t;
 
 static uint8_t sl_desk_volume_press(sl_ctx_t *ctx, int32_t x, int32_t y) {
@@ -1120,12 +1128,12 @@ static void sl_desk_volume_release(sl_ctx_t *ctx) {
 
 // The registry: a new widget is a row here (and its rectangle and drawing).
 static const sl_desk_widget_t k_widgets[SL_DW_COUNT] = {
-    [SL_DW_CLOCK] = { "orologio", NULL, NULL, NULL, NULL, sl_desk_clock_click, NULL },
-    [SL_DW_CAL] = { "calendario", NULL, NULL, NULL, NULL, NULL, "calendario" },
+    [SL_DW_CLOCK] = { "orologio", NULL, NULL, NULL, NULL, sl_desk_clock_click, NULL, NULL },
+    [SL_DW_CAL] = { "calendario", NULL, NULL, NULL, NULL, NULL, "calendario", "desk.app.calendario" },
     [SL_DW_VOL] = { "volume", sl_desk_volume_press, sl_desk_volume_drag, sl_desk_volume_release, sl_desk_volume_step,
-                    NULL, NULL },
-    [SL_DW_CPU] = { "cpu", NULL, NULL, NULL, NULL, NULL, "monitor" },
-    [SL_DW_NET] = { "rete", NULL, NULL, NULL, NULL, NULL, "impostazioni" },
+                    NULL, NULL, NULL },
+    [SL_DW_CPU] = { "cpu", NULL, NULL, NULL, NULL, NULL, "monitor", "desk.app.monitor" },
+    [SL_DW_NET] = { "rete", NULL, NULL, NULL, NULL, NULL, "impostazioni", "desk.app.impostazioni" },
 };
 
 static const sl_desk_rect_t *sl_desk_widget_rect(int id) {
@@ -1187,7 +1195,12 @@ static void sl_desk_set_volume(sl_ctx_t *ctx, int32_t v) {
     if (v < 0) v = 0;
     if (v > 100) v = 100;
     if (audio_set_volume((uint32_t)v) != 0) {
-        sl_notify_post(ctx, "Starlight", sl_tr("desk.no_audio"));
+        // Once a session: a drag on the capsule would fill the queue.
+        static uint8_t told;
+        if (!told) {
+            told = 1u;
+            sl_notify_post(ctx, sl_tr("notify.system"), sl_tr("desk.no_audio"));
+        }
         return;
     }
     if (v == g_desk.local_volume && peos_time_ns() < g_desk.local_volume_until) return;
@@ -1200,6 +1213,7 @@ static void sl_desk_set_volume(sl_ctx_t *ctx, int32_t v) {
 }
 
 static void sl_desk_volume_at(sl_ctx_t *ctx, int32_t y) {
+    g_desk.unmute_volume = -1;   // a level chosen by hand: mute mutes again
     int32_t bottom = g_desk.vol_r.y + 15 + SL_DESK_CAP_H;
     sl_desk_set_volume(ctx, (bottom - y) * 100 / SL_DESK_CAP_H);
 }
@@ -1210,6 +1224,7 @@ static int32_t sl_desk_volume_now(void) {
 }
 
 static void sl_desk_volume_step(sl_ctx_t *ctx, int32_t delta) {
+    g_desk.unmute_volume = -1;
     sl_desk_set_volume(ctx, sl_desk_volume_now() + delta * 5);
     sl_desk_volume_save();
 }
@@ -1287,8 +1302,8 @@ static void sl_desk_activate(sl_ctx_t *ctx, int id) {
     if (!w->app) return;
     if (!sl_windows_open_app_id(ctx, w->app)) {
         char msg[96];
-        snprintf(msg, sizeof(msg), sl_tr("desk.not_installed"), w->app);
-        sl_notify_post(ctx, "Starlight", msg);
+        snprintf(msg, sizeof(msg), sl_tr("desk.not_installed"), w->app_name ? sl_tr(w->app_name) : w->app);
+        sl_notify_post(ctx, sl_tr("notify.system"), msg);
     }
 }
 

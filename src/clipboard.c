@@ -173,10 +173,10 @@ static void sl_fit_line(const slsk_font_t *font, const char *src, uint32_t len, 
 static void sl_age(uint64_t created_ns, uint64_t now_ns, char *out, size_t cap) {
     uint64_t s = (created_ns && now_ns > created_ns) ? (now_ns - created_ns) / 1000000000ull : 0ull;
     if (s < 60u) snprintf(out, cap, "%s", sl_tr("clip.now"));
-    else if (s < 3600u) snprintf(out, cap, sl_tr("clip.minutes"), (unsigned)(s / 60u));
+    else if (s < 3600u) snprintf(out, cap, sl_tr_n("clip.minutes", (uint32_t)(s / 60u)), (unsigned)(s / 60u));
     else if (s < 86400u) snprintf(out, cap, sl_tr("clip.hours"), (unsigned)(s / 3600u));
     else if (s < 2u * 86400u) snprintf(out, cap, "%s", sl_tr("clip.yesterday"));
-    else snprintf(out, cap, sl_tr("clip.days"), (unsigned)(s / 86400u));
+    else snprintf(out, cap, sl_tr_n("clip.days", (uint32_t)(s / 86400u)), (unsigned)(s / 86400u));
 }
 
 static void sl_clipboard_compact_label(const char *src, char *out, uint32_t out_cap) {
@@ -682,8 +682,9 @@ static void sl_render_row(sl_ctx_t *ctx, sl_cb_draw_t *d, uint32_t idx, uint32_t
     sl_fit_line(g_face.row, it->text ? it->text : "", it->len, tw, line, sizeof(line));
     sl_age(it->created_ns, now_ns, age, sizeof(age));
     uint32_t lines = it->text ? sl_lines(it->text, it->len) : 1u;
-    if (lines > 1u) snprintf(size, sizeof(size), sl_tr("clip.lines"), (unsigned)lines);
-    else snprintf(size, sizeof(size), sl_tr("clip.chars"), (unsigned)(it->text ? sl_utf8_chars(it->text, it->len) : 0u));
+    uint32_t chars = it->text ? sl_utf8_chars(it->text, it->len) : 0u;
+    if (lines > 1u) snprintf(size, sizeof(size), sl_tr_n("clip.lines", lines), (unsigned)lines);
+    else snprintf(size, sizeof(size), sl_tr_n("clip.chars", chars), (unsigned)chars);
     snprintf(meta, sizeof(meta), "%s \xc2\xb7 %s", age, size);
     sl_text(d, g_face.row, (int32_t)tx, (int32_t)(y + 15u), line, d->ink.r, d->ink.g, d->ink.b);
     sl_text(d, g_face.small, (int32_t)tx, (int32_t)(y + 38u), meta, d->muted.r, d->muted.g, d->muted.b);
@@ -721,16 +722,20 @@ static void sl_render_manager(sl_ctx_t *ctx, sl_cb_draw_t *d) {
     uint32_t ly = sl_list_top(cy);
     if (!g_clipboard.count) {
         sl_ui_ctx_surface(ctx, SL_UI_SURF_INSET, x, ly, inner, CB_EMPTY_H, 24u);
-        const char *t1 = sl_tr("clip.empty_title"), *t2 = sl_tr("clip.empty_hint");
+        // design/appunti, "Vuoti": how to copy, and what Caps+S does then
+        const char *t1 = sl_tr("clip.empty_title"), *t2 = sl_tr("clip.empty_hint"), *t3 = sl_tr("clip.empty_hint2");
         uint32_t w1 = sl_text_width(g_face.row, t1), w2 = sl_text_width(g_face.label, t2);
+        uint32_t w3 = sl_text_width(g_face.label, t3);
         uint32_t kw = sl_text_width(g_face.mono_small, "Caps") + 16u + 10u + 26u + 10u;
         uint32_t kx = x + (inner > kw ? (inner - kw) / 2u : 0u);
         kx += sl_kbd(ctx, d, kx, ly + 28u, "Caps") + 6u;
         sl_text(d, g_face.label, (int32_t)kx, (int32_t)(ly + 34u), "+", d->muted.r, d->muted.g, d->muted.b);
         (void)sl_kbd(ctx, d, kx + 14u, ly + 28u, "A");
-        sl_text(d, g_face.row, (int32_t)(x + (inner > w1 ? (inner - w1) / 2u : 0u)), (int32_t)(ly + 74u), t1, d->ink.r,
+        sl_text(d, g_face.row, (int32_t)(x + (inner > w1 ? (inner - w1) / 2u : 0u)), (int32_t)(ly + 70u), t1, d->ink.r,
                 d->ink.g, d->ink.b);
-        sl_text(d, g_face.label, (int32_t)(x + (inner > w2 ? (inner - w2) / 2u : 0u)), (int32_t)(ly + 102u), t2,
+        sl_text(d, g_face.label, (int32_t)(x + (inner > w2 ? (inner - w2) / 2u : 0u)), (int32_t)(ly + 96u), t2,
+                d->muted.r, d->muted.g, d->muted.b);
+        sl_text(d, g_face.label, (int32_t)(x + (inner > w3 ? (inner - w3) / 2u : 0u)), (int32_t)(ly + 116u), t3,
                 d->muted.r, d->muted.g, d->muted.b);
     } else {
         uint32_t visible = sl_visible_rows(), start = sl_first_row(visible);

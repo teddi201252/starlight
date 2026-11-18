@@ -1096,6 +1096,7 @@ static size_t g_dock_pin_count = 0u;
 static uint8_t g_dock_pins_set = 0u;
 
 static size_t sl_launcher_find_bundle(const char *bundle_path);
+static size_t sl_launcher_find_id(const char *id);
 
 static void sl_dock_pins_load(void) {
     g_dock_pin_count = 0u;
@@ -1166,28 +1167,47 @@ static const char *const g_mgr_cat_keys[SL_CAT_COUNT] = { "apps.cat.all", "apps.
                                                           "apps.cat.fun" };
 #define g_mgr_cat_labels(c) sl_tr(g_mgr_cat_keys[c])
 
-// ASCII case-insensitive "needle in hay" (accented letters must match).
-static int sl_mgr_matches(const char *hay, const char *needle) {
-    if (!needle[0]) return 1;
-    for (size_t i = 0u; hay[i]; i++) {
-        size_t k = 0u;
-        for (; needle[k] && hay[i + k]; k++) {
-            char a = hay[i + k], b = needle[k];
-            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-            if (a != b) break;
+// For the search: lower case, and the Latin-1 accented letters (UTF-8
+// C3 xx) as their plain letter, so "citta" finds "Città"; up to ".app".
+static void sl_mgr_fold(const char *in, char *out, size_t cap) {
+    // C3 80..9F (upper) and A0..BF (lower) by (byte & 0x1F); '.' keeps it
+    static const char k_plain[] = "aaaaaaaceeeeiiiidnooooo.ouuuuy..";
+    size_t o = 0u;
+    for (size_t i = 0u; in[i] && o + 2u < cap; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '.' && strcmp(in + i, ".app") == 0) break;
+        if (c == 0xC3u && (unsigned char)in[i + 1] >= 0x80u && (unsigned char)in[i + 1] <= 0xBFu) {
+            char p = k_plain[(unsigned char)in[i + 1] & 0x1Fu];
+            if (p != '.') {
+                out[o++] = p;
+                i++;
+                continue;
+            }
         }
-        if (!needle[k]) return 1;
+        out[o++] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
     }
-    return 0;
+    out[o] = '\0';
+}
+
+// The query in the title or in the bundle's name, case and accents aside.
+static int sl_mgr_matches(const sl_launcher_item_t *item, const char *needle) {
+    if (!needle[0]) return 1;
+    char n[sizeof(g_mgr_query) * 2u], h[sizeof(item->title)];
+    sl_mgr_fold(needle, n, sizeof(n));
+    sl_mgr_fold(item->title, h, sizeof(h));
+    if (strstr(h, n)) return 1;
+    const char *base = strrchr(item->bundle_path, '/');
+    sl_mgr_fold(base ? base + 1 : item->bundle_path, h, sizeof(h));
+    return h[0] && strstr(h, n) != NULL;
 }
 
 static void sl_mgr_filter(sl_dock_layout_t *L) {
     L->mgr_count = 0u;
     for (size_t i = 0u; i < g_launcher_count && L->mgr_count < SL_MGR_ITEMS_MAX; i++) {
         const sl_launcher_item_t *item = &g_launcher_items[i];
-        if (g_mgr_cat != SL_CAT_ALL && item->category != g_mgr_cat) continue;
-        if (!sl_mgr_matches(item->title, g_mgr_query)) continue;
+        // A search looks in every category (the chosen one stays for later).
+        if (!g_mgr_query[0] && g_mgr_cat != SL_CAT_ALL && item->category != g_mgr_cat) continue;
+        if (!sl_mgr_matches(item, g_mgr_query)) continue;
         L->mgr_item[L->mgr_count++] = i;
     }
 }
@@ -1292,7 +1312,7 @@ static void sl_mgr_header(const sl_dock_layout_t *L, sl_mgr_header_t *H) {
     uint32_t right = L->gx + L->gw;
     uint32_t title_w = sl_text_width(g_dock.title, sl_tr("apps.header"));
     char widest[48];
-    snprintf(widest, sizeof(widest), sl_tr("apps.count_all"), 888u);
+    snprintf(widest, sizeof(widest), sl_tr_n("apps.count_all", 888u), 888u);
     uint32_t count_w = 14u + sl_text_width(g_dock.label, widest);
     uint32_t left = L->gx + title_w + 22u;
     uint32_t room = right > left ? right - left : 0u;
@@ -1502,12 +1522,13 @@ static void sl_launcher_toggle(sl_ctx_t *ctx) {
 // the indicators left of the tiles are redrawn.
 static uint64_t sl_dock_indicator_bits(const sl_dock_layout_t *L) {
     uint64_t bits = 0u;
+    size_t orfeus = sl_music_active() ? sl_launcher_find_id("orfeus") : (size_t)-1;
     for (size_t k = 0u; k < L->count && k < 32u; k++) {
         app_instance_t *app = sl_app_host_instance_peek_at(g_launcher_items[L->item[k]].slot);
         size_t w = app ? sl_window_index_for_task(app) : (size_t)-1;
         if (w == (size_t)-1) {
             // Orfeus's music goes on with its window closed (design/orfeus): the dot stays.
-            if (sl_music_active() && strcmp(g_launcher_items[L->item[k]].title, "Orfeus") == 0) bits |= 1ull << (2u * k);
+            if (L->item[k] == orfeus) bits |= 1ull << (2u * k);
             continue;
         }
         bits |= 1ull << (2u * k);
@@ -1566,7 +1587,8 @@ static void sl_launcher_context_close(sl_ctx_t *ctx) {
     g_launcher_ctx_rows = 0u;
 }
 
-enum { SL_CTX_OPEN, SL_CTX_SHOW, SL_CTX_CLOSE, SL_CTX_PIN, SL_CTX_UNPIN, SL_CTX_INFO };
+// SL_CTX_FULL: "the dock is full" in place of Keep in Dock; it does nothing.
+enum { SL_CTX_OPEN, SL_CTX_SHOW, SL_CTX_CLOSE, SL_CTX_PIN, SL_CTX_UNPIN, SL_CTX_INFO, SL_CTX_FULL };
 
 static const char *sl_launcher_context_action_name(uint8_t action) {
     switch (action) {
@@ -1575,6 +1597,7 @@ static const char *sl_launcher_context_action_name(uint8_t action) {
         case SL_CTX_CLOSE: return sl_tr("apps.ctx.close");
         case SL_CTX_PIN: return sl_tr("apps.ctx.pin");
         case SL_CTX_UNPIN: return sl_tr("apps.ctx.unpin");
+        case SL_CTX_FULL: return sl_tr("apps.ctx.dock_full");
         default: return sl_tr("apps.ctx.info");
     }
 }
@@ -1609,6 +1632,8 @@ static uint32_t sl_launcher_context_build(const sl_ctx_t *ctx, size_t item_index
             if (settings != (size_t)-1 || shown > 1u) out[n++] = SL_CTX_UNPIN;
         } else if (shown < sl_dock_capacity(ctx, settings, SL_DOCK_PAD_TIGHT, SL_DOCK_GAP_TIGHT)) {
             out[n++] = SL_CTX_PIN;
+        } else {
+            out[n++] = SL_CTX_FULL;
         }
     }
     out[n++] = SL_CTX_INFO;
@@ -1769,6 +1794,7 @@ static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint8_
                                         uint32_t anchor_x, uint32_t anchor_y) {
     if (!ctx || item_index >= g_launcher_count) return 0;
     sl_launcher_item_t *item = &g_launcher_items[item_index];
+    if (action == SL_CTX_FULL) return 1;
     if (action == SL_CTX_PIN || action == SL_CTX_UNPIN) {
         sl_dock_pin_set(ctx, item_index, action == SL_CTX_PIN);
         return 1;
@@ -2134,7 +2160,20 @@ static int sl_launcher_prespawn(size_t slot) {
     return 1;
 }
 
+static int sl_windows_open_launcher_item_try(sl_ctx_t *ctx, size_t launcher_index);
+
+// Open (or bring up) an app; when it cannot, a notification says so (the
+// click on the dock is not silent).
 static int sl_windows_open_launcher_item(sl_ctx_t *ctx, size_t launcher_index) {
+    if (!ctx || launcher_index >= g_launcher_count) return 0;
+    if (sl_windows_open_launcher_item_try(ctx, launcher_index)) return 1;
+    char msg[160];   // a notification's text (peos/notify.h)
+    snprintf(msg, sizeof(msg), sl_tr("apps.cant_open"), g_launcher_items[launcher_index].title);
+    sl_notify_post(ctx, sl_tr("notify.system"), msg);
+    return 0;
+}
+
+static int sl_windows_open_launcher_item_try(sl_ctx_t *ctx, size_t launcher_index) {
     if (!ctx || launcher_index >= g_launcher_count) return 0;
 
     sl_launcher_item_t *item = &g_launcher_items[launcher_index];
@@ -2725,7 +2764,8 @@ static int sl_windows_title_button_act(sl_ctx_t *ctx, size_t idx, int b) {
         return 1;
     }
     // Maximize: the space right of the dock, with a margin for the shadow;
-    // again to go back.
+    // again to go back. Not a window of a fixed size (the double click too).
+    if (!win->resizable && !win->maximized) return 1;
     if (!win->maximized) {
         uint32_t left = sl_launcher_reserved_left(ctx) + 24u;
         uint32_t m = 24u, top = sl_windows_top(ctx);
@@ -3419,11 +3459,15 @@ static void sl_dock_draw(sl_ctx_t *ctx) {
         uint32_t unseen = sl_notify_badge(item->title);
         if (unseen) {
             char num[4];
-            snprintf(num, sizeof(num), "%u", (unsigned)(unseen > 9u ? 9u : unseen));
-            sl_ui_ctx_surface(ctx, SL_UI_SURF_NEON_DOT, tx + SL_DOCK_TILE - 14u, ty - 6u, 20u, 20u, 10u);
+            if (unseen > 9u) snprintf(num, sizeof(num), "9+");
+            else snprintf(num, sizeof(num), "%u", (unsigned)unseen);
             const slsk_font_t *f = g_dock.label;
             uint32_t nw = sl_text_width(f, num);
-            sl_text_draw(&t, f, (int32_t)(tx + SL_DOCK_TILE - 4u) - (int32_t)nw / 2, (int32_t)ty + 9, num, 0x11, 0x16, 0x26);
+            // A circle, or a pill growing left over the tile for "9+".
+            uint32_t bw = nw + 10u > 20u ? nw + 10u : 20u;
+            uint32_t bx = tx + SL_DOCK_TILE + 6u - bw;
+            sl_ui_ctx_surface(ctx, SL_UI_SURF_NEON_DOT, bx, ty - 6u, bw, 20u, 10u);
+            sl_text_draw(&t, f, (int32_t)(bx + bw / 2u) - (int32_t)nw / 2, (int32_t)ty + 9, num, 0x11, 0x16, 0x26);
         }
         // Left of the tile: a dot if the app is open, a bar if it is focused.
         uint64_t bits = g_dock_indicators >> (2u * k);
@@ -3475,7 +3519,7 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
     sl_mgr_header(&L, &H);
     if (H.show_count) {
         char count[64];
-        if (L.mgr_count == g_launcher_count) snprintf(count, sizeof(count), sl_tr("apps.count_all"), (unsigned)g_launcher_count);
+        if (L.mgr_count == g_launcher_count) snprintf(count, sizeof(count), sl_tr_n("apps.count_all", (uint32_t)g_launcher_count), (unsigned)g_launcher_count);
         else snprintf(count, sizeof(count), sl_tr("apps.count_some"), (unsigned)L.mgr_count, (unsigned)g_launcher_count);
         sl_text_draw(&in, g_dock.label, end + 14, base, count, SL_DOCK_MUTED);
     }
@@ -3536,7 +3580,10 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
         ty = (uint32_t)(ty64 < 0 ? 0 : ty64);
         size_t idx = L.mgr_item[i];
         sl_launcher_item_t *item = &g_launcher_items[idx];
-        if (idx == g_launcher_hover_index && g_dock_hover_in_mgr && sl_dock_expanded_fully()) {
+        // Raised: the tile under the mouse, and with a search the first
+        // one (the app Enter opens).
+        uint8_t raised = (idx == g_launcher_hover_index && g_dock_hover_in_mgr) || (i == 0u && g_mgr_query[0]);
+        if (raised && sl_dock_expanded_fully()) {
             sl_dock_draw_tile(ctx, &gin, item, 4, (int32_t)tx - 4, (int32_t)ty - 4, SL_MGR_HI);
         } else {
             sl_dock_draw_tile(ctx, &gin, item, 3, (int32_t)tx, (int32_t)ty, SL_MGR_TILE);

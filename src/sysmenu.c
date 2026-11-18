@@ -11,6 +11,7 @@
 #include "render/surface.h"
 #include "ui_sdk.h"
 #include "i18n.h"
+#include "notify.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -190,12 +191,13 @@ static void sm_set_dialog(sl_ctx_t *ctx, uint8_t dialog) {
 
 // Every app is asked to close (as with its close button), then the machine.
 static void sm_power(sl_ctx_t *ctx, int reboot) {
-    (void)ctx;
     printf("[STARLIGHT] %s requested\n", reboot ? "reboot" : "power off");
     sl_windows_destroy_all();
     if (reboot) (void)peos_reboot();
     else (void)peos_poweroff();
     printf("[STARLIGHT] the firmware did not %s\n", reboot ? "reboot" : "power off");
+    // The windows are gone already: say what to do, not an empty desktop.
+    sl_notify_post(ctx, sl_tr("notify.system"), sl_tr(reboot ? "power.failed_restart" : "power.failed_off"));
 }
 
 void sl_sysmenu_show_about(sl_ctx_t *ctx) {
@@ -312,7 +314,7 @@ static void sm_draw_dialog(sl_ctx_t *ctx, sl_target_t *t) {
     int32_t tx = (int32_t)x + 30, ty = (int32_t)y + 28;
     if (g_sm.dialog == SM_ABOUT) {
         sm_text(t, g_sm.big_f, tx, ty, "PeOS", SL_UI_COLOR_TEXT_PRIMARY);
-        sm_text(t, g_sm.row_f, tx + (int32_t)sl_text_width(g_sm.big_f, "PeOS") + 14, ty + 14, "Technical Alpha",
+        sm_text(t, g_sm.row_f, tx + (int32_t)sl_text_width(g_sm.big_f, "PeOS") + 14, ty + 14, sl_tr("about.stage"),
                 SL_UI_COLOR_TEXT_SECONDARY);
         peos_sysinfo_t si;
         memset(&si, 0, sizeof(si));

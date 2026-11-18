@@ -156,9 +156,15 @@ void sl_window_button_rect(const sl_window_t *win, int button, uint32_t *x, uint
     *y = win->y + SL_WIN_PAD_TOP + (SL_WIN_BAR_H - SL_WIN_BTN) / 2u;
 }
 
+// Maximize is off on a window of a fixed size (drawn faded, not pressed).
+static int sl_window_button_off(const sl_window_t *win, int b) {
+    return b == SL_WIN_BTN_MAX && !win->resizable && !win->maximized;
+}
+
 int sl_window_button_at(const sl_window_t *win, uint32_t x, uint32_t y) {
     if (!win || !win->focused) return SL_WIN_BTN_NONE;   // inactive windows show dots, not buttons
     for (int b = SL_WIN_BTN_CLOSE; b <= SL_WIN_BTN_MAX; b++) {
+        if (sl_window_button_off(win, b)) continue;
         uint32_t bx, by;
         sl_window_button_rect(win, b, &bx, &by);
         // A circle: the corners of its box are not the button.
@@ -390,7 +396,8 @@ static void sl_window_draw_inside(sl_window_t *win) {
             if (win->focused) {
                 const slsk_entry_t *bs = (win->pressed_btn == b) ? g_frame.btn_down : g_frame.btn;
                 sl_draw_skin(ctx, bs, (int32_t)bx, (int32_t)by, SL_WIN_BTN, SL_WIN_BTN);
-                sl_blit_mask(&t, sl_skin_data(&ctx->skin, g), g->width, g->height, g->width, gx, gy, SL_WIN_INK, 255u);
+                sl_blit_mask(&t, sl_skin_data(&ctx->skin, g), g->width, g->height, g->width, gx, gy, SL_WIN_INK,
+                             sl_window_button_off(win, b) ? 80u : 255u);
             } else {
                 const slsk_entry_t *d = g_frame.dot;
                 sl_blit_mask(&t, sl_skin_data(&ctx->skin, d), d->width, d->height, d->width,
