@@ -3,6 +3,8 @@
 #include "render/pixels.h"
 #include "ui_sdk.h"
 
+#include <string.h>
+
 void sl_context_menu_draw(sl_ctx_t *ctx,
                           uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                           uint32_t row_h,
@@ -56,6 +58,20 @@ void sl_context_menu_draw(sl_ctx_t *ctx,
         }
         if (label_fn) {
             uint32_t ty = iy + ((row_h > cell_h) ? ((row_h - cell_h) / 2u) : 0u);
+            // "label\tkey": the key at the right of the row, quieter.
+            char *tab = strchr(label, '\t');
+            if (tab) {
+                *tab = '\0';
+                const char *key = tab + 1;
+                if (face && key[0]) {
+                    uint32_t kw = sl_ui_ctx_text_width(ctx, key);
+                    const sl_ui_color_t *kc = sl_ui_runtime_color(off ? SL_UI_COLOR_TEXT_DISABLED : SL_UI_COLOR_TEXT_SECONDARY);
+                    if (list_w > kw + 14u) {
+                        (void)sl_draw_text_face(ctx, face, (int32_t)(x + list_w - 14u - kw), (int32_t)(ty + cell_h), key,
+                                                kc->r, kc->g, kc->b);
+                    }
+                }
+            }
             const char *text = off ? label + 1 : label;
             const sl_ui_color_t *ink = sl_ui_runtime_color(off ? SL_UI_COLOR_TEXT_DISABLED : SL_UI_COLOR_TEXT_PRIMARY);
             if (face) (void)sl_draw_text_face(ctx, face, (int32_t)(x + 12u), (int32_t)(ty + cell_h), text, ink->r, ink->g, ink->b);

@@ -111,6 +111,7 @@ static const sl_layer_t k_layers[] = {
     { sl_launcher_render, sl_perf_add_dock },                // dock and app manager
     { sl_notify_render, NULL },
     { sl_music_render, NULL },                               // the mini player, the toast
+    { sl_desk_pill_render, NULL },                           // the volume or light pill
     { sl_dock_label_render, sl_perf_add_dock },              // the hovered tile's name
     { sl_sysmenu_render, NULL },                             // sun menu, veil and dialogs
     { sl_clipboard_render_overlay, NULL },

@@ -26,6 +26,10 @@ uint32_t sl_music_version(void);
 int sl_music_active(void);
 // Clicks and keys: 1 when they were the music's.
 int sl_music_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y);
+// The card's volume bar held down: it follows the mouse until let go.
+uint8_t sl_music_held(void);
+void sl_music_drag(sl_ctx_t *ctx, uint32_t x);
+void sl_music_release(sl_ctx_t *ctx, uint32_t x);
 int sl_music_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev);
 // The cursor over the pill and the mini player, or -1.
 int sl_music_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y);

@@ -34,6 +34,7 @@
 // The card (tavola Finestre): 92 high, radius 46, 28 of padding, an icon in a
 // 46 px circle, 18 between them.
 #define SL_NOTIFY_H 92u
+#define SL_NOTIFY_LINE 24u   // a second line of text makes the card this much taller
 #define SL_NOTIFY_PAD 28u
 #define SL_NOTIFY_ICON 46u
 #define SL_NOTIFY_GAP 18u
@@ -46,6 +47,7 @@
 #define SL_CENTER_ROWS 6u
 #define SL_CENTER_FOOT 20u
 #define SL_CENTER_MORE 34u   // "and N older ones", when they do not all fit
+#define SL_CENTER_X_W 28u    // a row's close mark, at its right
 
 typedef struct {
     char source[PEOS_NOTIFY_SOURCE_MAX];
@@ -59,6 +61,8 @@ static struct {
     sl_note_t queue[SL_NOTIFY_QUEUE];
     uint32_t head, count;
     sl_note_t shown;
+    char line1[PEOS_NOTIFY_TEXT_MAX + 4u], line2[PEOS_NOTIFY_TEXT_MAX + 4u];   // the card's text, cut to fit
+    uint32_t card_h;
     uint8_t showing;
     uint64_t start_ns, until_ns;        // shown since, and until (then it slides out)
     uint32_t card_x, card_w;            // where the card rests
@@ -79,6 +83,35 @@ static int sl_note_same(const char *a, const char *b) {
         if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
         if (x != y) return 0;
         if (!x) return 1;
+    }
+}
+
+// The longest start of <text> (whole UTF-8 characters) that fits in <max_w>,
+// with "..." when it was cut. Returns the bytes of <text> kept.
+static size_t sl_note_fit(const slsk_font_t *f, const char *text, uint32_t max_w, char *out, size_t cap) {
+    snprintf(out, cap, "%s", text);
+    size_t n = strlen(out);
+    if (!f || sl_text_width(f, out) <= max_w) return n;
+    // Halve the range: the widths grow with the bytes kept.
+    size_t lo = 0u, hi = n;
+    while (lo < hi) {
+        size_t mid = (lo + hi + 1u) / 2u;
+        while (mid > 0u && ((unsigned char)text[mid] & 0xC0u) == 0x80u) mid--;
+        if (mid <= lo) break;
+        snprintf(out, cap, "%.*s\xE2\x80\xA6", (int)mid, text);
+        if (sl_text_width(f, out) <= max_w) lo = mid;
+        else hi = mid - 1u;
+    }
+    while (lo > 0u && text[lo - 1u] == ' ') lo--;
+    snprintf(out, cap, "%.*s\xE2\x80\xA6", (int)lo, text);
+    return lo;
+}
+
+// A small cross (the close mark), 10 px, centred on (cx, cy).
+static void sl_note_cross(sl_ctx_t *ctx, int32_t cx, int32_t cy) {
+    for (int32_t k = -4; k <= 4; k++) {
+        sl_fill_rect(ctx, (uint32_t)(cx + k - 1), (uint32_t)(cy + k - 1), 2u, 2u, 0x9F, 0xB4, 0xD8);
+        sl_fill_rect(ctx, (uint32_t)(cx + k - 1), (uint32_t)(cy - k - 1), 2u, 2u, 0x9F, 0xB4, 0xD8);
     }
 }
 
@@ -155,6 +188,40 @@ static int sl_center_clear_hit(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     return x >= cx + SL_CENTER_W - 140u && x < cx + SL_CENTER_W && y >= SL_NOTIFY_TOP && y < SL_NOTIFY_TOP + SL_CENTER_HEAD;
 }
 
+// The centre's row under (x, y), newest first; -1 for none. *on_x: on its close mark.
+static int32_t sl_center_row_hit(const sl_ctx_t *ctx, uint32_t x, uint32_t y, uint8_t *on_x) {
+    uint32_t cx = sl_center_x(ctx), top = SL_NOTIFY_TOP + SL_CENTER_HEAD;
+    if (x < cx || x >= cx + SL_CENTER_W || y < top) return -1;
+    uint32_t row = (y - top) / SL_CENTER_ROW;
+    uint32_t rows = g_note.history_count < SL_CENTER_ROWS ? g_note.history_count : SL_CENTER_ROWS;
+    if (row >= rows) return -1;
+    if (on_x) *on_x = x >= cx + SL_CENTER_W - 30u - SL_CENTER_X_W && x < cx + SL_CENTER_W - 20u;
+    return (int32_t)row;
+}
+
+// Takes away the <i>th notification of the centre (newest first).
+static void sl_center_remove(sl_ctx_t *ctx, uint32_t i) {
+    if (i >= g_note.history_count) return;
+    sl_note_t keep[SL_NOTIFY_HISTORY];
+    uint32_t n = 0u;
+    for (uint32_t k = g_note.history_count; k > 0u; k--) {   // oldest first
+        uint32_t newest_index = k - 1u;
+        if (newest_index == i) continue;
+        keep[n++] = g_note.history[(g_note.history_head + SL_NOTIFY_HISTORY - 1u - newest_index) % SL_NOTIFY_HISTORY];
+    }
+    sl_center_dirty(ctx);
+    for (uint32_t k = 0u; k < n; k++) g_note.history[k] = keep[k];
+    g_note.history_count = n;
+    g_note.history_head = n % SL_NOTIFY_HISTORY;
+    printf("starlight: notification centre: %u left\n", (unsigned)n);
+}
+
+// The card, where it rests.
+static int sl_note_card_hit(uint32_t x, uint32_t y) {
+    return g_note.showing && g_note.card_w && x >= g_note.card_x && x < g_note.card_x + g_note.card_w &&
+           y >= SL_NOTIFY_TOP && y < SL_NOTIFY_TOP + g_note.card_h;
+}
+
 int sl_notify_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx) return 0;
     // The time at the right of the top bar opens and closes the centre.
@@ -162,12 +229,41 @@ int sl_notify_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
         sl_center_set(ctx, (uint8_t)!g_note.center_open);
         return 1;
     }
-    if (!g_note.center_open) return 0;
+    if (!g_note.center_open) {
+        // A click on the card: it goes, and the app that sent it comes up
+        // (when the source is an app's name).
+        if (!sl_note_card_hit(x, y)) return 0;
+        uint64_t now = peos_time_ns();
+        if (g_note.until_ns > now) g_note.until_ns = now;
+        printf("starlight: notification closed (click)\n");
+        if (sl_windows_open_app_title(ctx, g_note.shown.source)) {
+            printf("starlight: notification: opened %s\n", g_note.shown.source);
+        }
+        return 1;
+    }
     uint32_t cx = sl_center_x(ctx);
     if (x >= cx && x < cx + SL_CENTER_W && y >= SL_NOTIFY_TOP && y < SL_NOTIFY_TOP + sl_center_h()) {
         if (sl_center_clear_hit(ctx, x, y) && g_note.history_count) {
             sl_center_dirty(ctx);
             g_note.history_count = 0u;
+            return 1;
+        }
+        uint8_t on_x = 0u;
+        int32_t row = sl_center_row_hit(ctx, x, y, &on_x);
+        if (row < 0) return 1;
+        const sl_note_t *note =
+            &g_note.history[(g_note.history_head + SL_NOTIFY_HISTORY - 1u - (uint32_t)row) % SL_NOTIFY_HISTORY];
+        if (on_x) {
+            printf("starlight: notification removed (centre)\n");
+            sl_center_remove(ctx, (uint32_t)row);
+            return 1;
+        }
+        char source[PEOS_NOTIFY_SOURCE_MAX];
+        snprintf(source, sizeof(source), "%s", note->source);
+        if (sl_windows_open_app_title(ctx, source)) {   // its app; the row goes, and the centre closes
+            printf("starlight: notification: opened %s (centre)\n", source);
+            sl_center_remove(ctx, (uint32_t)row);
+            sl_center_set(ctx, 0u);
         }
         return 1;
     }
@@ -178,10 +274,11 @@ int sl_notify_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
 int sl_notify_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx) return -1;
     if (sl_center_time_hit(ctx, x, y)) return SL_CUR_HAND;   // the time opens the centre
-    if (!g_note.center_open) return -1;
+    if (!g_note.center_open) return sl_note_card_hit(x, y) ? SL_CUR_HAND : -1;
     uint32_t cx = sl_center_x(ctx);
     if (x < cx || x >= cx + SL_CENTER_W || y < SL_NOTIFY_TOP || y >= SL_NOTIFY_TOP + sl_center_h()) return -1;
-    return (g_note.history_count && sl_center_clear_hit(ctx, x, y)) ? SL_CUR_HAND : SL_CUR_ARROW;
+    if (g_note.history_count && sl_center_clear_hit(ctx, x, y)) return SL_CUR_HAND;
+    return sl_center_row_hit(ctx, x, y, NULL) >= 0 ? SL_CUR_HAND : SL_CUR_ARROW;
 }
 
 int sl_notify_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev) {
@@ -268,7 +365,7 @@ static int32_t sl_note_offset(const sl_ctx_t *ctx, uint64_t now) {
 static void sl_note_dirty_card(sl_ctx_t *ctx) {
     if (!g_note.card_w) return;
     uint32_t x = g_note.card_x > SL_NOTIFY_SHADOW ? g_note.card_x - SL_NOTIFY_SHADOW : 0u;
-    sl_dirty_add(ctx, x, SL_NOTIFY_TOP - 20u, ctx->fb.width - x, SL_NOTIFY_H + 2u * SL_NOTIFY_SHADOW);
+    sl_dirty_add(ctx, x, SL_NOTIFY_TOP - 20u, ctx->fb.width - x, g_note.card_h + 2u * SL_NOTIFY_SHADOW);
 }
 
 void sl_notify_tick(sl_ctx_t *ctx) {
@@ -343,11 +440,28 @@ void sl_notify_tick(sl_ctx_t *ctx) {
         g_note.until_ns = now + SL_NOTIFY_IN_NS + SL_NOTIFY_SHOW_NS;
         uint32_t tw = sl_text_width(g_note.text_f, g_note.shown.text);
         uint32_t sw = sl_text_width(g_note.source_f, g_note.shown.source);
-        uint32_t w = 2u * SL_NOTIFY_PAD + SL_NOTIFY_ICON + 2u * SL_NOTIFY_GAP + (tw > sw ? tw : sw) +
-                     sl_text_width(g_note.small_f, sl_tr("notify.now"));
+        uint32_t frame = 2u * SL_NOTIFY_PAD + SL_NOTIFY_ICON + 2u * SL_NOTIFY_GAP +
+                         sl_text_width(g_note.small_f, sl_tr("notify.now"));
+        uint32_t w = frame + (tw > sw ? tw : sw);
         uint32_t max_w = ctx->fb.width > 2u * SL_NOTIFY_RIGHT + SL_NOTIFY_MIN_W ? ctx->fb.width / 2u : ctx->fb.width;
         if (w < SL_NOTIFY_MIN_W) w = SL_NOTIFY_MIN_W;
         g_note.card_w = w > max_w ? max_w : w;
+        // The text: one line if it fits, else two (cut at a space), the
+        // second ending in "..." if it is still too long.
+        uint32_t room = g_note.card_w > frame ? g_note.card_w - frame : 0u;
+        g_note.card_h = SL_NOTIFY_H;
+        g_note.line2[0] = '\0';
+        size_t kept = sl_note_fit(g_note.text_f, g_note.shown.text, room, g_note.line1, sizeof(g_note.line1));
+        if (g_note.shown.text[kept] != '\0') {
+            size_t cut = kept;
+            while (cut > 0u && g_note.shown.text[cut] != ' ') cut--;
+            if (cut == 0u) cut = kept;
+            snprintf(g_note.line1, sizeof(g_note.line1), "%.*s", (int)cut, g_note.shown.text);
+            const char *rest = g_note.shown.text + cut;
+            while (*rest == ' ') rest++;
+            (void)sl_note_fit(g_note.text_f, rest, room, g_note.line2, sizeof(g_note.line2));
+            g_note.card_h = SL_NOTIFY_H + SL_NOTIFY_LINE;
+        }
         g_note.card_x = ctx->fb.width > g_note.card_w + SL_NOTIFY_RIGHT ? ctx->fb.width - g_note.card_w - SL_NOTIFY_RIGHT : 0u;
         g_note.drawn_off = 0x7FFFFFFF;
         sl_note_dirty_card(ctx);
@@ -378,26 +492,31 @@ static void sl_note_icon(sl_ctx_t *ctx, sl_target_t *t, int32_t x, int32_t y, ui
                  y + (int32_t)(size - m->height) / 2, n->r, n->g, n->b, 255u);
 }
 
-// Source over text, the time at the right, between x and right.
-static void sl_note_lines(sl_target_t *t, const sl_note_t *n, int32_t x, int32_t right, int32_t cy, const char *when) {
+// Source over text (one or two lines), the time at the right, between x and right.
+static void sl_note_lines(sl_target_t *t, const char *source, const char *line1, const char *line2, int32_t x,
+                          int32_t right, int32_t cy, const char *when) {
     static const uint8_t head[3] = { 0x9F, 0xB4, 0xD8 }, text[3] = { 0xE8, 0xF4, 0xFF };
+    int32_t up = (line2 && line2[0]) ? (int32_t)SL_NOTIFY_LINE / 2 : 0;
     int32_t ww = (int32_t)sl_text_width(g_note.small_f, when);
-    sl_text_draw(t, g_note.small_f, right - ww, cy + 5, when, head[0], head[1], head[2]);
+    sl_text_draw(t, g_note.small_f, right - ww, cy + 5 - up, when, head[0], head[1], head[2]);
     sl_target_t tt = *t;
     if (right - ww - 12 < tt.clip_x1) tt.clip_x1 = right - ww - 12;
-    sl_text_draw(&tt, g_note.source_f, x, cy - 6, n->source, head[0], head[1], head[2]);
-    sl_text_draw(&tt, g_note.text_f, x, cy + 18, n->text, text[0], text[1], text[2]);
+    sl_text_draw(&tt, g_note.source_f, x, cy - 6 - up, source, head[0], head[1], head[2]);
+    sl_target_t lt = *t;   // the text has the whole width: the time is above it
+    if (right < lt.clip_x1) lt.clip_x1 = right;
+    sl_text_draw(up ? &lt : &tt, g_note.text_f, x, cy + 18 - up, line1, text[0], text[1], text[2]);
+    if (up) sl_text_draw(&lt, g_note.text_f, x, cy + 18 + up, line2, text[0], text[1], text[2]);
 }
 
 static const sl_surf_style_t k_night_card = { 0x11, 0x16, 0x26, 1, { { 6, 6, 16, 0, 0x00, 0x00, 0x00, 110 } } };
 
 static void sl_note_draw_card(sl_ctx_t *ctx, sl_target_t *t, int32_t off) {
     int32_t x = (int32_t)g_note.card_x + off, y = (int32_t)SL_NOTIFY_TOP;
-    sl_note_surface(t, &k_night_card, x, y, g_note.card_w, SL_NOTIFY_H, SL_NOTIFY_H / 2u);
-    int32_t ix = x + (int32_t)SL_NOTIFY_PAD, iy = y + (int32_t)(SL_NOTIFY_H - SL_NOTIFY_ICON) / 2;
+    sl_note_surface(t, &k_night_card, x, y, g_note.card_w, g_note.card_h, SL_NOTIFY_H / 2u);
+    int32_t ix = x + (int32_t)SL_NOTIFY_PAD, iy = y + (int32_t)(g_note.card_h - SL_NOTIFY_ICON) / 2;
     sl_note_icon(ctx, t, ix, iy, SL_NOTIFY_ICON, g_note.shown.source);
-    sl_note_lines(t, &g_note.shown, ix + (int32_t)(SL_NOTIFY_ICON + SL_NOTIFY_GAP),
-                  x + (int32_t)(g_note.card_w - SL_NOTIFY_PAD), y + (int32_t)SL_NOTIFY_H / 2, sl_tr("notify.now"));
+    sl_note_lines(t, g_note.shown.source, g_note.line1, g_note.line2, ix + (int32_t)(SL_NOTIFY_ICON + SL_NOTIFY_GAP),
+                  x + (int32_t)(g_note.card_w - SL_NOTIFY_PAD), y + (int32_t)g_note.card_h / 2, sl_tr("notify.now"));
 }
 
 static void sl_note_draw_center(sl_ctx_t *ctx, sl_target_t *t) {
@@ -420,7 +539,14 @@ static void sl_note_draw_center(sl_ctx_t *ctx, sl_target_t *t) {
         const sl_note_t *note = &g_note.history[(g_note.history_head + SL_NOTIFY_HISTORY - 1u - i) % SL_NOTIFY_HISTORY];
         if (i) sl_fill_rect(ctx, (uint32_t)x + 30u, (uint32_t)ry, SL_CENTER_W - 60u, 1u, 0x23, 0x2B, 0x45);
         sl_note_icon(ctx, t, x + 30, ry + 16, 44u, note->source);
-        sl_note_lines(t, note, x + 30 + 44 + 16, right, ry + (int32_t)SL_CENTER_ROW / 2, note->when);
+        // One line, cut with "..." (a click on the row opens its app), and
+        // the close mark at the right.
+        int32_t tx = x + 30 + 44 + 16, tright = right - (int32_t)SL_CENTER_X_W;
+        char line[PEOS_NOTIFY_TEXT_MAX + 4u];
+        int32_t room = tright - (int32_t)sl_text_width(g_note.small_f, note->when) - 12 - tx;   // left of the time
+        (void)sl_note_fit(g_note.text_f, note->text, room > 0 ? (uint32_t)room : 0u, line, sizeof(line));
+        sl_note_lines(t, note->source, line, NULL, tx, tright, ry + (int32_t)SL_CENTER_ROW / 2, note->when);
+        sl_note_cross(ctx, right - 6, ry + (int32_t)SL_CENTER_ROW / 2);
         ry += (int32_t)SL_CENTER_ROW;
     }
     if (g_note.history_count > SL_CENTER_ROWS) {   // the older ones kept, not shown
@@ -453,6 +579,6 @@ void sl_notify_render(sl_ctx_t *ctx) {
     if (!g_note.showing || !g_note.card_w) return;
     g_note.drawn_off = sl_note_offset(ctx, sl_frame_time_ns());
     uint32_t x = g_note.card_x > SL_NOTIFY_SHADOW ? g_note.card_x - SL_NOTIFY_SHADOW : 0u;
-    sl_dirty_for_each_intersection(x, SL_NOTIFY_TOP - 20u, ctx->fb.width - x, SL_NOTIFY_H + 2u * SL_NOTIFY_SHADOW,
+    sl_dirty_for_each_intersection(x, SL_NOTIFY_TOP - 20u, ctx->fb.width - x, g_note.card_h + 2u * SL_NOTIFY_SHADOW,
                                    sl_note_draw_rect, ctx);
 }

@@ -6176,6 +6176,13 @@ int sl_app_host_slot_set_bundle(size_t index, const char *bundle_dir) {
     return 1;
 }
 
+void sl_app_host_open_with(const char *bundle_path, const char *file) {
+    if (!bundle_path || !bundle_path[0] || !file || !file[0]) return;
+    orbit_copy_str(g_open_app_bundle_path, sizeof(g_open_app_bundle_path), bundle_path);
+    orbit_copy_str(g_open_app_file, sizeof(g_open_app_file), file);
+    g_open_app_requested = 1u;
+}
+
 void sl_app_host_set_language(const char *code) {
     if (!peos_lang_code_valid(code) || strcmp(code, g_orbit_lang) == 0) return;
     orbit_copy_str(g_orbit_lang, sizeof(g_orbit_lang), code);

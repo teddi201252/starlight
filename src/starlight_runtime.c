@@ -1193,6 +1193,21 @@ int sl_handle_input(sl_ctx_t *ctx) {
         return input.quit_requested ? 1 : 0;
     }
 
+    // The mini player's volume bar held down: it follows the mouse.
+    if (sl_music_held()) {
+        if (input.mouse_moved) sl_music_drag(ctx, ctx->cursor_x);
+        if (input.mouse_left_released) sl_music_release(ctx, ctx->cursor_x);
+        return input.quit_requested ? 1 : 0;
+    }
+
+    // An app held down in the dock or the app manager: the mouse is its own
+    // until it is let go (a click, or a drag to the dock).
+    if (sl_launcher_drag_held()) {
+        if (input.mouse_moved) sl_launcher_drag_move(ctx, ctx->cursor_x, ctx->cursor_y);
+        if (input.mouse_left_released) sl_launcher_handle_release(ctx);
+        return input.quit_requested ? 1 : 0;
+    }
+
     if (input.mouse_moved) {
         sl_launcher_handle_context_hover(ctx);
         sl_launcher_handle_hover(ctx);
@@ -1307,11 +1322,15 @@ int sl_handle_input(sl_ctx_t *ctx) {
             sl_music_handle_click(ctx, ctx->cursor_x, ctx->cursor_y) ||
             sl_notify_handle_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
             sl_drag_stop();
+            // Pressed and let go in the same frame: the release came first.
+            if (input.mouse_left_released && sl_music_held()) sl_music_release(ctx, ctx->cursor_x);
             return 0;
         }
 
         if (sl_launcher_handle_click(ctx, ctx->cursor_x, ctx->cursor_y)) {
             sl_drag_stop();
+            // Pressed and let go in the same frame: the release came first.
+            if (input.mouse_left_released && sl_launcher_drag_held()) sl_launcher_handle_release(ctx);
             return 0;
         }
 

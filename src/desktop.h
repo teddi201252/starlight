@@ -28,6 +28,12 @@ void sl_desk_release(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 int sl_desk_wheel(sl_ctx_t *ctx, uint32_t x, uint32_t y, int32_t delta);   // 1: taken
 // The volume, mute and screen light keys: 1 when taken.
 int sl_desk_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev);
+// The system volume (0..100), and setting it as the volume widget does
+// (save: written to audio.cfg, at the end of a drag).
+int32_t sl_desk_volume_level(void);
+void sl_desk_volume_set_level(sl_ctx_t *ctx, int32_t v, uint8_t save);
+// The pill those keys show at the bottom of the screen, for a moment (a layer).
+void sl_desk_pill_render(sl_ctx_t *ctx);
 // The hand over a widget, or -1.
 int sl_desk_cursor(uint32_t x, uint32_t y);
 

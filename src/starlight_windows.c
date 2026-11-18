@@ -158,6 +158,7 @@ static int32_t g_launcher_ctx_hover_row = -1;
 // Informazioni card; both are fixed when it opens.
 #define SL_LAUNCHER_CTX_ROWS_MAX 16u
 static uint8_t g_launcher_ctx_info = 0u;
+static uint8_t g_launcher_ctx_desk = 0u;   // the desktop's menu (right click on the desktop), not an app's
 static uint32_t g_launcher_ctx_rows = 0u;
 static uint8_t g_launcher_ctx_actions[SL_LAUNCHER_CTX_ROWS_MAX];
 static char g_launcher_info_lines[SL_LAUNCHER_CTX_ROWS_MAX][128];
@@ -886,7 +887,8 @@ static int sl_point_in_rect(uint32_t px, uint32_t py, uint32_t x, uint32_t y, ui
 // A context menu (opaque, old style) was or will be at this rect.
 static void sl_launcher_invalidate_overlay(sl_ctx_t *ctx, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (!ctx || w == 0u || h == 0u) return;
-    sl_dirty_add(ctx, x > 2u ? x - 2u : 0u, y > 2u ? y - 2u : 0u, w + 4u, h + 4u);
+    // with the popup's shadow (the raised card's, past its edges)
+    sl_dirty_add(ctx, x > 24u ? x - 24u : 0u, y > 24u ? y - 24u : 0u, w + 48u, h + 48u);
 }
 
 // ------------------------------------------------------------------- dock
@@ -947,6 +949,21 @@ static struct {
 
 static uint8_t g_dock_hot = 0u;            // the mouse is on the dock: the fin shows
 static size_t g_dock_pressed = (size_t)-1; // item whose tile is pressed
+// An app held down in the dock or the app manager (docs/system-apps-ux-plan.md,
+// Starlight big item 6): let go where it was, a click; moved, it follows the
+// mouse, and let go on the dock it is pinned there (or moved there).
+static struct {
+    uint8_t armed;      // held down: the click comes on the release
+    uint8_t active;     // moved far enough: a drag
+    uint8_t from_mgr;   // taken in the open app manager
+    uint8_t from_dock;  // from a dock tile (the manager open or not): dragged off, it leaves the dock
+    uint8_t movable;    // it may be pinned (not Impostazioni)
+    size_t item;
+    uint32_t sx, sy;    // where it was taken
+    uint32_t x, y;      // the mouse now
+    int32_t slot;       // where it would go among the pinned tiles (-1: not over the dock)
+} g_app_drag;
+#define SL_APP_DRAG_START 8u   // px the mouse moves before a press is a drag
 static uint64_t g_dock_indicators = 0u;    // running/focused bits last drawn
 static uint64_t g_dock_items_sig = 0u;     // the tiles last drawn (which apps, in order)
 static uint8_t g_dock_hover_in_mgr = 0u;   // the hovered item is a manager tile, not a dock one
@@ -1156,6 +1173,8 @@ typedef struct {
     uint32_t tile_y[SL_DOCK_MAX];
     uint8_t has_sep;
     uint32_t sep_y;
+    int32_t gap_at;                 // an empty place among the pinned, for a dragged app (-1: none)
+    uint32_t cell0, cell_h;         // the first tile's top, and a tile with its gap
     uint32_t px, py, pw, ph;        // the dock
     uint32_t ex, ey, ew, eh;        // the app manager
     uint32_t cx, cy, cw, ch;        // now (while it widens or narrows)
@@ -1226,8 +1245,12 @@ static uint32_t sl_lerp_u32(uint32_t a, uint32_t b, uint32_t t) {
     return (uint32_t)(v < 0 ? 0 : v);
 }
 
-static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
+// The dock as it is, or as it shows during a drag: without <hide> (the app
+// being dragged), with an empty place at <gap_at> among the pinned tiles
+// (-1: none; none either when the dock has no room for one more).
+static void sl_dock_layout_ex(const sl_ctx_t *ctx, sl_dock_layout_t *L, size_t hide, int32_t gap_at) {
     peos_memset(L, 0, sizeof(*L));
+    L->gap_at = -1;
     if (!ctx || g_launcher_count == 0u) return;
     uint32_t fh = ctx->fb.height, fw = ctx->fb.width;
 
@@ -1250,6 +1273,19 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
             if (i != settings && g_launcher_items[i].in_dock) pins[npins++] = i;
         }
     }
+    // The app being dragged leaves its place: it follows the mouse.
+    uint8_t hid_pinned = 0u;
+    if (hide != (size_t)-1) {
+        size_t n = 0u;
+        for (size_t p = 0u; p < npins; p++) {
+            if (pins[p] == hide) hid_pinned = p < take ? 1u : 0u;   // past a full dock's end: not shown
+            else pins[n++] = pins[p];
+        }
+        npins = n;
+    }
+    // The empty place for it takes the room of one tile.
+    if (gap_at >= 0 && (hid_pinned || npins < take) && take > 1u) take--;
+    else gap_at = -1;
     // The apps open and not pinned, after the pinned ones, for as long as
     // they are open (a minimized window is found again there). They come
     // first when the dock is full: the last pinned ones give way.
@@ -1260,7 +1296,7 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
     for (int round = 0; round < 4; round++) {
         nopen = 0u;
         for (size_t i = 0u; i < g_launcher_count && nopen < SL_DOCK_MAX; i++) {
-            if (i == settings) continue;
+            if (i == settings || i == hide) continue;
             app_instance_t *app = sl_app_host_instance_peek_at(g_launcher_items[i].slot);
             if (!app || sl_window_index_for_task(app) == (size_t)-1) continue;
             uint8_t pinned = 0u;
@@ -1276,20 +1312,27 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
     for (size_t p = 0u; p < shown_pins; p++) L->item[L->count++] = pins[p];
     L->pinned = L->count;
     for (size_t o = 0u; o < nopen; o++) L->item[L->count++] = open[o];
-    uint8_t tight = L->count > sl_dock_capacity(ctx, settings, SL_DOCK_PAD, SL_DOCK_GAP);
+    if (gap_at > (int32_t)L->pinned) gap_at = (int32_t)L->pinned;
+    size_t extra = gap_at >= 0 ? 1u : 0u;
+    uint8_t tight = L->count + extra > sl_dock_capacity(ctx, settings, SL_DOCK_PAD, SL_DOCK_GAP);
     uint32_t pad = tight ? SL_DOCK_PAD_TIGHT : SL_DOCK_PAD, gap = tight ? SL_DOCK_GAP_TIGHT : SL_DOCK_GAP;
     L->has_sep = (settings != (size_t)-1 && L->count > 0u) ? 1u : 0u;
     if (settings != (size_t)-1) L->item[L->count++] = settings;
     if (L->count == 0u) return;
 
-    uint32_t h = 2u * pad + (uint32_t)L->count * SL_DOCK_TILE + (uint32_t)(L->count - 1u) * gap;
+    size_t cells = L->count + extra;
+    uint32_t h = 2u * pad + (uint32_t)cells * SL_DOCK_TILE + (uint32_t)(cells - 1u) * gap;
     if (L->has_sep) h += 2u + gap;
     L->px = SL_DOCK_X;
     L->pw = SL_DOCK_W;
     L->ph = h;
     L->py = fh > h ? (fh - h) / 2u : 0u;
+    L->gap_at = gap_at;
+    L->cell0 = L->py + pad;
+    L->cell_h = SL_DOCK_TILE + gap;
     uint32_t y = L->py + pad;
     for (size_t k = 0u; k < L->count; k++) {
+        if (gap_at >= 0 && k == (size_t)gap_at) y += SL_DOCK_TILE + gap;   // the empty place
         if (L->has_sep && k == L->count - 1u) {
             L->sep_y = y;
             y += 2u + gap;
@@ -1318,13 +1361,128 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
     L->grid_top = L->gy + 34u + 40u;
     sl_mgr_filter(L);
     // More apps than fit: the grid scrolls (the wheel, or the bar at its right).
-    L->grid_bottom = L->ey + L->eh > L->grid_top + 20u ? L->ey + L->eh - 20u : L->grid_top;
+    L->grid_bottom = L->ey + L->eh > L->grid_top + 52u ? L->ey + L->eh - 52u : L->grid_top;
     uint32_t rows = (uint32_t)((L->mgr_count + L->cols - 1u) / L->cols);
     uint32_t content_h = rows * SL_MGR_ROW_H;
     uint32_t view_h = L->grid_bottom - L->grid_top;
     L->max_scroll = content_h > view_h ? content_h - view_h : 0u;
     if (g_mgr_scroll > L->max_scroll) g_mgr_scroll = L->max_scroll;
     L->scroll = g_mgr_scroll;
+}
+
+// The app being dragged, out of its place in the dock: always when it was
+// taken from the dock; from the app manager, only while it is over the dock.
+static size_t sl_app_drag_hidden(void) {
+    if (!g_app_drag.active || !g_app_drag.movable || g_app_drag.item >= g_launcher_count) return (size_t)-1;
+    return (g_app_drag.from_dock || g_app_drag.slot >= 0) ? g_app_drag.item : (size_t)-1;
+}
+
+// The dock's tiles and its panel slide to their new places (a drag opens or
+// closes an empty place, an app pinned, moved or taken out): from where they
+// were shown to where they go, as <t> goes from 0 to SL_DOCK_ANIM_FULL.
+#define SL_DOCK_MOVE_TWEEN_ID (SL_LAUNCHER_TWEEN_ID + 1u)
+#define SL_DOCK_MOVE_MS 180u
+static struct {
+    uint8_t ready;          // <to> holds the dock as last laid out
+    uint32_t t, last_t;
+    size_t n;
+    size_t item[SL_DOCK_MAX];
+    uint32_t from_y[SL_DOCK_MAX], to_y[SL_DOCK_MAX];
+    uint32_t from_py, from_ph, from_sep, to_py, to_ph, to_sep;
+} g_dock_move;
+
+static void sl_dock_move_apply(sl_dock_layout_t *L) {
+    // Always as the last tick laid it out (its damage), even when the dock
+    // changed since (an app opened): the next tick catches up.
+    if (!g_dock_move.ready) return;
+    uint32_t t = g_dock_move.t > SL_DOCK_ANIM_FULL ? SL_DOCK_ANIM_FULL : g_dock_move.t;
+    size_t n = 0u, pinned = 0u;
+    for (size_t k = 0u; k < L->count; k++) {
+        size_t j = 0u;
+        while (j < g_dock_move.n && g_dock_move.item[j] != L->item[k]) j++;
+        if (j == g_dock_move.n) continue;   // new since the tick: it shows from the next one
+        L->item[n] = L->item[k];
+        L->tile_y[n] = sl_lerp_u32(g_dock_move.from_y[j], g_dock_move.to_y[j], t);
+        if (k < L->pinned) pinned++;
+        n++;
+    }
+    L->count = n;
+    L->pinned = pinned;
+    L->py = sl_lerp_u32(g_dock_move.from_py, g_dock_move.to_py, t);
+    L->ph = sl_lerp_u32(g_dock_move.from_ph, g_dock_move.to_ph, t);
+    if (L->has_sep) L->sep_y = sl_lerp_u32(g_dock_move.from_sep, g_dock_move.to_sep, t);
+    uint32_t w = g_launcher_extra_width;
+    L->cy = sl_lerp_u32(L->py, L->ey, w);
+    L->ch = sl_lerp_u32(L->ph, L->eh, w);
+}
+
+static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
+    int32_t gap = g_app_drag.active && g_app_drag.slot >= 0 ? g_app_drag.slot : -1;
+    sl_dock_layout_ex(ctx, L, sl_app_drag_hidden(), gap);
+    sl_dock_move_apply(L);
+}
+
+// Once a frame: the dock laid out again; if its tiles or its size changed,
+// they slide there from where they are shown now. 1 while they move.
+static int sl_dock_move_tick(const sl_ctx_t *ctx) {
+    sl_dock_layout_t T;
+    int32_t gap = g_app_drag.active && g_app_drag.slot >= 0 ? g_app_drag.slot : -1;
+    sl_dock_layout_ex(ctx, &T, sl_app_drag_hidden(), gap);
+    uint8_t same = g_dock_move.ready && T.count == g_dock_move.n && T.py == g_dock_move.to_py &&
+                   T.ph == g_dock_move.to_ph;
+    for (size_t k = 0u; same && k < T.count; k++) {
+        same = T.item[k] == g_dock_move.item[k] && T.tile_y[k] == g_dock_move.to_y[k];
+    }
+    if (!same) {
+        uint8_t animate = g_dock_move.ready && T.count > 0u && g_dock_move.n > 0u;
+        uint32_t t = g_dock_move.t;
+        uint32_t from_y[SL_DOCK_MAX];
+        for (size_t k = 0u; k < T.count; k++) {
+            from_y[k] = T.tile_y[k];   // a tile new in the dock shows at its place
+            for (size_t j = 0u; animate && j < g_dock_move.n; j++) {
+                if (g_dock_move.item[j] != T.item[k]) continue;
+                from_y[k] = sl_lerp_u32(g_dock_move.from_y[j], g_dock_move.to_y[j], t);
+                break;
+            }
+        }
+        if (animate) {
+            g_dock_move.from_py = sl_lerp_u32(g_dock_move.from_py, g_dock_move.to_py, t);
+            g_dock_move.from_ph = sl_lerp_u32(g_dock_move.from_ph, g_dock_move.to_ph, t);
+            g_dock_move.from_sep = sl_lerp_u32(g_dock_move.from_sep, g_dock_move.to_sep, t);
+        } else {
+            g_dock_move.from_py = T.py;
+            g_dock_move.from_ph = T.ph;
+            g_dock_move.from_sep = T.sep_y;
+        }
+        g_dock_move.n = T.count;
+        for (size_t k = 0u; k < T.count; k++) {
+            g_dock_move.item[k] = T.item[k];
+            g_dock_move.from_y[k] = from_y[k];
+            g_dock_move.to_y[k] = T.tile_y[k];
+        }
+        g_dock_move.to_py = T.py;
+        g_dock_move.to_ph = T.ph;
+        g_dock_move.to_sep = T.sep_y;
+        g_dock_move.ready = 1u;
+        g_dock_move.t = 0u;
+        if (!animate || !sl_tween_to_u32(SL_DOCK_MOVE_TWEEN_ID, &g_dock_move.t, SL_DOCK_ANIM_FULL, SL_DOCK_MOVE_MS,
+                                         SL_TWEEN_EASE_OUT_CUBIC, NULL, NULL)) {
+            sl_tween_set_u32_immediate(&g_dock_move.t, SL_DOCK_ANIM_FULL);
+        }
+    }
+    // A new layout is drawn at once even when <t> stays (an open app's tile
+    // in or out of it): the column again.
+    int moved = !same || g_dock_move.t != g_dock_move.last_t;
+    g_dock_move.last_t = g_dock_move.t;
+    return moved;
+}
+
+// The launcher items changed (a new scan): no slide from the old indices.
+static void sl_dock_move_reset(void) {
+    sl_tween_cancel_id(SL_DOCK_MOVE_TWEEN_ID);
+    g_dock_move.ready = 0u;
+    g_dock_move.n = 0u;
+    g_dock_move.t = g_dock_move.last_t = SL_DOCK_ANIM_FULL;
 }
 
 // Where the header's pieces go: the search field at the right edge of the
@@ -1575,8 +1733,17 @@ static uint64_t sl_dock_indicator_bits(const sl_dock_layout_t *L) {
 
 static void sl_launcher_track_animation_dirty(sl_ctx_t *ctx) {
     if (!ctx || !sl_dock_ready(ctx)) return;
+    int sliding = sl_dock_move_tick(ctx);
     sl_dock_layout_t L;
     sl_dock_layout(ctx, &L);
+    if (sliding) {
+        // The tiles move inside it; a raised one takes its shadow and its
+        // name (right of the fin) along: the dock's whole column.
+        sl_dock_dirty_panel(ctx, &L);
+        uint32_t right = L.px + L.pw + SL_FIN_W + 10u + 48u;
+        if (g_launcher_hover_index < g_launcher_count) right += sl_dock_pill_width(&g_launcher_items[g_launcher_hover_index]);
+        sl_dirty_add_i64(ctx, 0, 0, right, ctx->fb.height);
+    }
 
     sl_window_rect_snapshot_t current = { L.cx, L.cy, L.cw, L.ch, (uint8_t)(L.cw && L.ch) };
     uint8_t changed = current.valid != g_launcher_last_rect.valid ||
@@ -1632,11 +1799,14 @@ static void sl_launcher_context_close(sl_ctx_t *ctx) {
     g_launcher_ctx_h = 0u;
     g_launcher_ctx_hover_row = -1;
     g_launcher_ctx_info = 0u;
+    g_launcher_ctx_desk = 0u;
     g_launcher_ctx_rows = 0u;
 }
 
 // SL_CTX_FULL: "the dock is full" in place of Keep in Dock; it does nothing.
-enum { SL_CTX_OPEN, SL_CTX_SHOW, SL_CTX_CLOSE, SL_CTX_PIN, SL_CTX_UNPIN, SL_CTX_INFO, SL_CTX_FULL };
+// SL_CTX_WALLPAPER, _ARRANGE, _SETTINGS: the desktop's menu.
+enum { SL_CTX_OPEN, SL_CTX_SHOW, SL_CTX_CLOSE, SL_CTX_PIN, SL_CTX_UNPIN, SL_CTX_INFO, SL_CTX_FULL,
+       SL_CTX_WALLPAPER, SL_CTX_ARRANGE, SL_CTX_SETTINGS };
 
 static const char *sl_launcher_context_action_name(uint8_t action) {
     switch (action) {
@@ -1646,6 +1816,9 @@ static const char *sl_launcher_context_action_name(uint8_t action) {
         case SL_CTX_PIN: return sl_tr("apps.ctx.pin");
         case SL_CTX_UNPIN: return sl_tr("apps.ctx.unpin");
         case SL_CTX_FULL: return sl_tr("apps.ctx.dock_full");
+        case SL_CTX_WALLPAPER: return sl_tr("desk.menu.wallpaper");
+        case SL_CTX_ARRANGE: return sl_tr("desk.menu.arrange");
+        case SL_CTX_SETTINGS: return sl_tr("desk.menu.settings");
         default: return sl_tr("apps.ctx.info");
     }
 }
@@ -1688,21 +1861,24 @@ static uint32_t sl_launcher_context_build(const sl_ctx_t *ctx, size_t item_index
     return n;
 }
 
+// The first change starts from what the dock shows.
+static void sl_dock_pins_start(sl_ctx_t *ctx) {
+    if (g_dock_pins_set) return;
+    sl_dock_layout_t L;
+    sl_dock_layout_ex(ctx, &L, (size_t)-1, -1);   // the dock as it is, not as last drawn
+    size_t settings = sl_dock_settings_item();
+    g_dock_pin_count = 0u;
+    for (size_t k = 0u; k < L.pinned; k++) {   // not the open apps after them
+        const sl_launcher_item_t *shown = &g_launcher_items[L.item[k]];
+        if (L.item[k] == settings || shown->bundle_path[0] == '\0') continue;
+        sl_copy_str(g_dock_pins[g_dock_pin_count++], sizeof(g_dock_pins[0]), shown->bundle_path);
+    }
+    g_dock_pins_set = 1u;
+}
+
 static void sl_dock_pin_set(sl_ctx_t *ctx, size_t item_index, uint8_t pin) {
     const char *path = g_launcher_items[item_index].bundle_path;
-    if (!g_dock_pins_set) {
-        // The first change starts from what the dock shows.
-        sl_dock_layout_t L;
-        sl_dock_layout(ctx, &L);
-        size_t settings = sl_dock_settings_item();
-        g_dock_pin_count = 0u;
-        for (size_t k = 0u; k < L.pinned; k++) {   // not the open apps after them
-            const sl_launcher_item_t *shown = &g_launcher_items[L.item[k]];
-            if (L.item[k] == settings || shown->bundle_path[0] == '\0') continue;
-            sl_copy_str(g_dock_pins[g_dock_pin_count++], sizeof(g_dock_pins[0]), shown->bundle_path);
-        }
-        g_dock_pins_set = 1u;
-    }
+    sl_dock_pins_start(ctx);
     size_t at = sl_dock_pin_find(path);
     if (pin && at == (size_t)-1 && g_dock_pin_count < SL_DOCK_MAX) {
         sl_copy_str(g_dock_pins[g_dock_pin_count++], sizeof(g_dock_pins[0]), path);
@@ -1937,6 +2113,59 @@ static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint8_
 
     if (action == SL_CTX_OPEN) return sl_windows_open_launcher_item(ctx, item_index);
     return 0;
+}
+
+// "Ordina finestre": the windows on screen in a staircase from the top left
+// of the desktop, in the order they are stacked, each at its own size; the
+// one in front stays in front. Maximized and minimized ones stay as they are.
+static void sl_windows_arrange(sl_ctx_t *ctx) {
+    if (!ctx || !g_windows) return;
+    uint32_t left = sl_launcher_reserved_left(ctx) + 16u;
+    uint32_t top = sl_windows_top(ctx);
+    uint32_t step_x = 34u, step_y = 30u, k = 0u;
+    for (size_t i = 0u; i < g_window_count; i++) {
+        sl_window_t *w = &g_windows[i];
+        if (w->minimized || w->maximized || sl_window_is_closing(w)) continue;
+        uint32_t x = left + k * step_x, y = top + k * step_y;
+        if (x + w->width > ctx->fb.width || y + w->height > ctx->fb.height) {
+            k = 0u;   // off the screen: a new staircase from the corner
+            x = left;
+            y = top;
+        }
+        if (x + w->width > ctx->fb.width) x = ctx->fb.width > w->width ? ctx->fb.width - w->width : 0u;
+        if (y + w->height > ctx->fb.height) y = ctx->fb.height > w->height ? ctx->fb.height - w->height : 0u;
+        if (x < left - 16u) x = left - 16u;
+        if (y < top) y = top;
+        k++;
+        if (x == w->x && y == w->y) continue;
+        sl_window_dirty_all(ctx, w);   // where it was, shadow included
+        w->x = x;
+        w->y = y;
+        w->force_redraw = 1u;
+        sl_window_mark_activity(w, 0ull);
+        sl_window_dirty_all(ctx, w);
+        sl_windows_remember(w);
+    }
+}
+
+static void sl_desk_menu_activate(sl_ctx_t *ctx, uint8_t action) {
+    size_t settings = sl_launcher_find_id("impostazioni");
+    if (action == SL_CTX_ARRANGE) {
+        printf("starlight: desktop menu: arrange\n");
+        sl_windows_arrange(ctx);
+        return;
+    }
+    if (settings == (size_t)-1) return;
+    if (action == SL_CTX_WALLPAPER) {
+        // Impostazioni on its Theme tab, where the background is chosen.
+        printf("starlight: desktop menu: wallpaper\n");
+        (void)sl_windows_open_app_id_with(ctx, "impostazioni", "tab:theme");
+        return;
+    }
+    if (action == SL_CTX_SETTINGS) {
+        printf("starlight: desktop menu: settings\n");
+        (void)sl_windows_open_launcher_item(ctx, settings);
+    }
 }
 
 void sl_launcher_handle_context_hover(sl_ctx_t *ctx) {
@@ -2476,6 +2705,7 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
     }
 
     sl_launcher_release_items(g_launcher_items, g_launcher_count);
+    sl_dock_move_reset();
     g_launcher_items = next;
     g_launcher_count = next_count;
     g_launcher_cap = count;
@@ -2772,6 +3002,34 @@ int sl_windows_open_app_id(sl_ctx_t *ctx, const char *id) {
     if (i == (size_t)-1) return 0;
     (void)sl_windows_open_launcher_item(ctx, i);
     return 1;
+}
+
+// The app <id>, given <file> once it listens (Impostazioni: "tab:wifi").
+int sl_windows_open_app_id_with(sl_ctx_t *ctx, const char *id, const char *file) {
+    if (!ctx) return 0;
+    size_t i = sl_launcher_find_id(id);
+    if (i == (size_t)-1) return 0;
+    sl_app_host_open_with(g_launcher_items[i].bundle_path, file);
+    return 1;
+}
+
+// The app whose title is <title> (a notification's source), any case.
+int sl_windows_open_app_title(sl_ctx_t *ctx, const char *title) {
+    if (!ctx || !title || !title[0]) return 0;
+    for (size_t i = 0u; i < g_launcher_count; i++) {
+        const char *a = g_launcher_items[i].title, *b = title;
+        for (;; a++, b++) {
+            char x = *a, y = *b;
+            if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+            if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+            if (x != y) break;
+            if (!x) {
+                (void)sl_windows_open_launcher_item(ctx, i);
+                return 1;
+            }
+        }
+    }
+    return 0;
 }
 
 const char *sl_windows_app_title(const char *id) {
@@ -3238,6 +3496,7 @@ void sl_windows_destroy_all(void) {
     g_launcher_ctx_rows = 0u;
     g_dock_pin_count = 0u;
     g_dock_pins_set = 0u;
+    sl_dock_move_reset();
 }
 
 void sl_window_move(sl_window_t *win, uint32_t new_x, uint32_t new_y) {
@@ -3277,6 +3536,171 @@ int sl_launcher_covers_point(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     return sl_point_in_rect(x, y, L.cx, L.cy, L.cw + SL_FIN_W, L.ch);
 }
 
+// Where the app dragged at (x, y) goes among the pinned tiles (the others,
+// not it): the place under the mouse in the dock laid out with an empty
+// place for it. -1: not over the dock.
+static int32_t sl_dock_drop_slot(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    sl_dock_layout_t P;
+    sl_dock_layout_ex(ctx, &P, g_app_drag.item, 0);
+    if (P.count == 0u || x >= P.px + P.pw + 24u) return -1;
+    if (y + 24u < P.py || y >= P.py + P.ph + 24u) return -1;
+    int64_t rel = (int64_t)y - (int64_t)P.cell0 + (int64_t)P.cell_h / 2 - (int64_t)SL_DOCK_TILE / 2;
+    size_t slot = rel <= 0 || P.cell_h == 0u ? 0u : (size_t)(rel / (int64_t)P.cell_h);
+    if (slot > P.pinned) slot = P.pinned;
+    return (int32_t)slot;
+}
+
+// What the drag shows, to be drawn again: the tile under the mouse, its
+// shadow included (a narrower rect left a trail of it behind).
+static void sl_app_drag_dirty(sl_ctx_t *ctx) {
+    if (!g_app_drag.active || g_app_drag.item >= g_launcher_count) return;
+    int64_t x = (int64_t)g_app_drag.x - SL_DOCK_TILE / 2, y = (int64_t)g_app_drag.y - SL_DOCK_TILE / 2;
+    const slsk_entry_t *e = g_launcher_items[g_app_drag.item].tiles[0];
+    if (!e) e = g_dock.hi_pad_ref;
+    sl_dirty_add_i64(ctx, x - 8, y - 8, SL_DOCK_TILE + 16, SL_DOCK_TILE + 16);
+    sl_dirty_sprite(ctx, e, x, y, SL_DOCK_TILE, SL_DOCK_TILE);
+}
+
+static void sl_app_drag_arm(size_t item, uint8_t from_mgr, uint32_t x, uint32_t y) {
+    peos_memset(&g_app_drag, 0, sizeof(g_app_drag));
+    g_app_drag.armed = 1u;
+    g_app_drag.from_mgr = from_mgr;
+    g_app_drag.item = item;
+    g_app_drag.movable = (item != sl_dock_settings_item() && g_launcher_items[item].bundle_path[0]) ? 1u : 0u;
+    g_app_drag.sx = g_app_drag.x = x;
+    g_app_drag.sy = g_app_drag.y = y;
+    g_app_drag.slot = -1;
+}
+
+int sl_launcher_drag_held(void) {
+    return g_app_drag.armed ? 1 : 0;
+}
+
+void sl_launcher_drag_move(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
+    if (!ctx || !g_app_drag.armed) return;
+    if (!g_app_drag.active) {
+        uint32_t dx = x > g_app_drag.sx ? x - g_app_drag.sx : g_app_drag.sx - x;
+        uint32_t dy = y > g_app_drag.sy ? y - g_app_drag.sy : g_app_drag.sy - y;
+        if (!g_app_drag.movable || dx + dy < SL_APP_DRAG_START) return;
+        // Its tile's press and its name go first, while it is still in the
+        // dock (once dragged it is out of the layout, and so out of their damage).
+        if (g_dock_pressed != (size_t)-1) {   // no longer a press on its tile
+            sl_dock_dirty_item(ctx, g_dock_pressed);
+            g_dock_pressed = (size_t)-1;
+        }
+        sl_dock_set_hover_at(ctx, (size_t)-1, 0u);
+        g_app_drag.active = 1u;
+        printf("starlight: dock: dragging %s\n", g_launcher_items[g_app_drag.item].title);
+    }
+    sl_app_drag_dirty(ctx);   // where it was
+    g_app_drag.x = x;
+    g_app_drag.y = y;
+    // The dock opens an empty place there (sl_dock_move_tick slides the tiles).
+    g_app_drag.slot = sl_dock_drop_slot(ctx, x, y);
+    sl_app_drag_dirty(ctx);   // where it is
+}
+
+// Pins <item_index> among the pinned tiles at <slot> (0: first; counted
+// among the others, without it), or moves it there if it was pinned
+// already. 0 when the dock has no room for it.
+static int sl_dock_pin_place(sl_ctx_t *ctx, size_t item_index, size_t slot) {
+    sl_dock_layout_t L, O;
+    sl_dock_layout_ex(ctx, &L, (size_t)-1, -1);
+    size_t settings = sl_dock_settings_item();
+    const char *path = g_launcher_items[item_index].bundle_path;
+    if (item_index == settings || path[0] == '\0') return 1;
+    uint8_t pinned = sl_dock_is_pinned(&L, item_index);
+    if (!pinned && L.pinned >= sl_dock_capacity(ctx, settings, SL_DOCK_PAD_TIGHT, SL_DOCK_GAP_TIGHT)) return 0;
+    sl_dock_pins_start(ctx);
+    // Where: before the other pinned tile at <slot>, or after the last one.
+    sl_dock_layout_ex(ctx, &O, item_index, -1);
+    char anchor[256];
+    anchor[0] = '\0';
+    uint8_t after = 0u;
+    if (slot < O.pinned) {
+        sl_copy_str(anchor, sizeof(anchor), g_launcher_items[O.item[slot]].bundle_path);
+    } else if (O.pinned > 0u) {
+        sl_copy_str(anchor, sizeof(anchor), g_launcher_items[O.item[O.pinned - 1u]].bundle_path);
+        after = 1u;
+    }
+    size_t at = sl_dock_pin_find(path);
+    if (at != (size_t)-1) {
+        for (size_t i = at; i + 1u < g_dock_pin_count; i++) {
+            peos_memcpy(g_dock_pins[i], g_dock_pins[i + 1u], sizeof(g_dock_pins[0]));
+        }
+        g_dock_pin_count--;
+    } else if (g_dock_pin_count >= SL_DOCK_MAX) {
+        return 0;
+    }
+    size_t pos = g_dock_pin_count;
+    size_t a = anchor[0] ? sl_dock_pin_find(anchor) : (size_t)-1;
+    if (a != (size_t)-1) pos = a + after;
+    for (size_t i = g_dock_pin_count; i > pos; i--) {
+        peos_memcpy(g_dock_pins[i], g_dock_pins[i - 1u], sizeof(g_dock_pins[0]));
+    }
+    sl_copy_str(g_dock_pins[pos], sizeof(g_dock_pins[0]), path);
+    g_dock_pin_count++;
+    sl_dock_pins_save();
+    sl_dirty_mark_full();   // the dock may change height
+    return 1;
+}
+
+// The click on a dock tile, on its release: the app in front goes down
+// (minimized), as the dash of other desktops; otherwise it opens or comes up.
+static void sl_dock_tile_click(sl_ctx_t *ctx, size_t index) {
+    app_instance_t *app = sl_app_host_instance_peek_at(g_launcher_items[index].slot);
+    size_t w = app ? sl_window_index_for_task(app) : (size_t)-1;
+    if (w != (size_t)-1 && w == g_focused_window && !g_windows[w].minimized &&
+        !sl_window_is_closing(&g_windows[w])) {
+        printf("starlight: window %s: minimized (dock)\n", g_windows[w].title);
+        (void)sl_windows_title_button_act(ctx, w, SL_WIN_BTN_MIN);
+        return;
+    }
+    (void)sl_windows_open_launcher_item(ctx, index);
+}
+
+static void sl_app_drag_end(sl_ctx_t *ctx) {
+    size_t item = g_app_drag.item;
+    uint8_t active = g_app_drag.active, from_mgr = g_app_drag.from_mgr, from_dock = g_app_drag.from_dock;
+    int32_t slot = g_app_drag.slot;
+    sl_app_drag_dirty(ctx);
+    peos_memset(&g_app_drag, 0, sizeof(g_app_drag));
+    if (g_dock_pressed != (size_t)-1) {
+        sl_dock_dirty_item(ctx, g_dock_pressed);
+        g_dock_pressed = (size_t)-1;
+    }
+    if (item >= g_launcher_count) return;
+    if (!active) {   // a click
+        if (from_mgr) {
+            sl_launcher_toggle(ctx);
+            (void)sl_windows_open_launcher_item(ctx, item);
+        } else {
+            sl_dock_tile_click(ctx, item);
+        }
+        return;
+    }
+    if (slot < 0) {
+        // Taken from the dock and let go away from it: out of the dock (the
+        // context menu's "Tieni fuori"), as long as something stays in it.
+        sl_dock_layout_t L;
+        sl_dock_layout_ex(ctx, &L, (size_t)-1, -1);
+        size_t settings = sl_dock_settings_item();
+        if (from_dock && sl_dock_is_pinned(&L, item) && (settings != (size_t)-1 || L.pinned > 1u)) {
+            sl_dock_pin_set(ctx, item, 0u);
+            printf("starlight: dock: %s taken out (dragged off)\n", g_launcher_items[item].title);
+            return;
+        }
+        printf("starlight: dock: %s let go off the dock\n", g_launcher_items[item].title);
+        return;
+    }
+    if (!sl_dock_pin_place(ctx, item, (size_t)slot)) {
+        printf("starlight: dock: full, %s not pinned\n", g_launcher_items[item].title);
+        sl_notify_post(ctx, sl_tr("notify.system"), sl_tr("apps.ctx.dock_full"));
+        return;
+    }
+    printf("starlight: dock: %s pinned at %d\n", g_launcher_items[item].title, (int)slot);
+}
+
 int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx) return 0;
 
@@ -3296,8 +3720,10 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
                 sl_launcher_info_open(ctx, item_index, ax, ay, 1u);   // the card again, with the details
                 return 1;
             }
+            uint8_t desk = g_launcher_ctx_desk;
             sl_launcher_context_close(ctx);   // before acting: Informazioni opens its own card
-            if (picked) (void)sl_launcher_context_activate(ctx, item_index, action, ax, ay);
+            if (picked && desk) sl_desk_menu_activate(ctx, action);
+            else if (picked) (void)sl_launcher_context_activate(ctx, item_index, action, ax, ay);
             return 1;
         }
         sl_launcher_context_close(ctx);
@@ -3319,9 +3745,11 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
                 sl_launcher_toggle(ctx);
                 return 1;
             }
-            if (sl_dock_hit_tile(&L, x, y, &index) || sl_mgr_hit_tile(&L, x, y, &index)) {
-                sl_launcher_toggle(ctx);
-                (void)sl_windows_open_launcher_item(ctx, index);
+            uint8_t on_dock = (uint8_t)sl_dock_hit_tile(&L, x, y, &index);
+            if (on_dock || sl_mgr_hit_tile(&L, x, y, &index)) {
+                // Opened on the release; dragged to the dock, or (a dock tile) off it.
+                sl_app_drag_arm(index, 1u, x, y);
+                g_app_drag.from_dock = on_dock;
                 return 1;
             }
             sl_mgr_header_t H;
@@ -3348,17 +3776,8 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (sl_dock_hit_tile(&L, x, y, &index)) {
         g_dock_pressed = index;
         sl_dock_dirty_item(ctx, index);
-        // The app in front, clicked again: it goes down (minimized), as the
-        // dash of other desktops; any other click opens or brings it up.
-        app_instance_t *app = sl_app_host_instance_peek_at(g_launcher_items[index].slot);
-        size_t w = app ? sl_window_index_for_task(app) : (size_t)-1;
-        if (w != (size_t)-1 && w == g_focused_window && !g_windows[w].minimized &&
-            !sl_window_is_closing(&g_windows[w])) {
-            printf("starlight: window %s: minimized (dock)\n", g_windows[w].title);
-            (void)sl_windows_title_button_act(ctx, w, SL_WIN_BTN_MIN);
-            return 1;
-        }
-        (void)sl_windows_open_launcher_item(ctx, index);
+        sl_app_drag_arm(index, 0u, x, y);   // the click on the release (sl_dock_tile_click), or a drag
+        g_app_drag.from_dock = 1u;
         return 1;
     }
     return sl_point_in_rect(x, y, L.px, L.py, L.pw, L.ph) ? 1 : 0;
@@ -3512,7 +3931,12 @@ void sl_launcher_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev, uint8_t
 }
 
 void sl_launcher_handle_release(sl_ctx_t *ctx) {
-    if (!ctx || g_dock_pressed == (size_t)-1) return;
+    if (!ctx) return;
+    if (g_app_drag.armed) {
+        sl_app_drag_end(ctx);
+        return;
+    }
+    if (g_dock_pressed == (size_t)-1) return;
     sl_dock_dirty_item(ctx, g_dock_pressed);
     g_dock_pressed = (size_t)-1;
 }
@@ -3527,6 +3951,19 @@ int sl_launcher_handle_right_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (g_launcher_ctx_open) {
         sl_launcher_context_close(ctx);
         if (x < sl_launcher_reserved_left(ctx)) return 1;
+    }
+    // On the desktop itself (no window, not the dock, under the top bar):
+    // its menu (design/starlight-soft-ui, Finestre).
+    if (g_launcher_extra_width == 0u && g_launcher_count > 0u && x >= sl_launcher_reserved_left(ctx) &&
+        y >= sl_windows_top(ctx) && !sl_windows_any_at(x, y)) {
+        static const uint8_t desk_actions[] = { SL_CTX_WALLPAPER, SL_CTX_ARRANGE, SL_CTX_SETTINGS };
+        peos_memcpy(g_launcher_ctx_actions, desk_actions, sizeof(desk_actions));
+        g_launcher_ctx_rows = (uint32_t)sizeof(desk_actions);
+        g_launcher_ctx_info = 0u;
+        sl_launcher_popup_open(ctx, 0u, x, y);
+        g_launcher_ctx_desk = 1u;
+        printf("starlight: desktop menu open\n");
+        return 1;
     }
     return 0;
 }
@@ -3552,7 +3989,10 @@ void sl_launcher_handle_hover(sl_ctx_t *ctx) {
     if (g_launcher_ctx_open) return;
     size_t next = (size_t)-1;
     uint8_t in_mgr = 0u;
-    if (!sl_dock_hit_tile(&L, x, y, &next)) in_mgr = (uint8_t)sl_mgr_hit_tile(&L, x, y, &next);
+    // While an app is dragged no tile is raised (the others slide under it).
+    if (!g_app_drag.active && !sl_dock_hit_tile(&L, x, y, &next)) {
+        in_mgr = (uint8_t)sl_mgr_hit_tile(&L, x, y, &next);
+    }
     sl_dock_set_hover_at(ctx, next, in_mgr);
     if (g_dock_pressed != (size_t)-1 && next != g_dock_pressed) sl_launcher_handle_release(ctx);
 }
@@ -3786,6 +4226,12 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
         sl_text_draw(&in, g_dock.search, (int32_t)L.gx, (int32_t)L.grid_top + g_dock.search->ascent,
                      sl_tr(g_mgr_query[0] ? "apps.none_name" : "apps.none_cat"), SL_DOCK_MUTED);
     }
+    {   // the hint at the bottom (design: App-manager-aperto)
+        uint32_t hy = L.ey + L.eh - 34u;
+        sl_ui_ctx_surface(ctx, SL_UI_SURF_NEON_DOT, L.gx, hy - 5u, 10u, 10u, 5u);
+        sl_text_draw(&in, lf, (int32_t)L.gx + 20, (int32_t)hy + (lf->ascent - lf->descent) / 2,
+                     sl_tr("apps.hint_drag"), SL_DOCK_MUTED);
+    }
     if (saved) sl_clip_set(ctx, scx, scy, scw, sch);
     else sl_clip_clear(ctx);
 }
@@ -3794,6 +4240,12 @@ static void sl_dock_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, vo
     sl_ctx_t *ctx = (sl_ctx_t *)userdata;
     sl_clip_set(ctx, x, y, w, h);
     sl_dock_draw(ctx);
+    if (g_app_drag.active && g_app_drag.item < g_launcher_count) {
+        sl_target_t t = sl_target_from_ctx(ctx);
+        sl_dock_draw_tile(ctx, &t, &g_launcher_items[g_app_drag.item], 0,
+                          (int32_t)g_app_drag.x - (int32_t)SL_DOCK_TILE / 2, (int32_t)g_app_drag.y - (int32_t)SL_DOCK_TILE / 2,
+                          SL_DOCK_TILE);
+    }
     if (g_launcher_ctx_open && g_launcher_ctx_item_index < g_launcher_count &&
         g_launcher_ctx_w > 0u && g_launcher_ctx_h > 0u) {
         uint32_t rows = g_launcher_ctx_rows;
@@ -3816,7 +4268,8 @@ void sl_launcher_render(sl_ctx_t *ctx) {
     sl_dock_layout(ctx, &L);
     if (L.count == 0u) return;
     uint32_t right = L.cx + L.cw + SL_FIN_W + 320u;
-    if (g_launcher_ctx_open && g_launcher_ctx_x + g_launcher_ctx_w + 4u > right) right = g_launcher_ctx_x + g_launcher_ctx_w + 4u;
+    if (g_launcher_ctx_open && g_launcher_ctx_x + g_launcher_ctx_w + 28u > right) right = g_launcher_ctx_x + g_launcher_ctx_w + 28u;
+    if (g_app_drag.active) right = ctx->fb.width;   // the tile follows the mouse anywhere
     if (right > ctx->fb.width) right = ctx->fb.width;
     sl_dirty_for_each_intersection(0u, 0u, right, ctx->fb.height, sl_dock_draw_rect, ctx);
 }

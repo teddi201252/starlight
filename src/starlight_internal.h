@@ -90,6 +90,8 @@ int sl_windows_any_at(uint32_t x, uint32_t y);
 // Open (or bring forward) the app with this title, case aside: 0 if none.
 // Opens the app of the bundle <id>.app ("calendario"): 0 if not installed.
 int sl_windows_open_app_id(sl_ctx_t *ctx, const char *id);
+int sl_windows_open_app_id_with(sl_ctx_t *ctx, const char *id, const char *file);
+int sl_windows_open_app_title(sl_ctx_t *ctx, const char *title);
 // Its title in the chosen language, or NULL.
 const char *sl_windows_app_title(const char *id);
 int sl_windows_title_button_held(sl_ctx_t *ctx, uint32_t x, uint32_t y);
@@ -122,6 +124,9 @@ uint32_t sl_launcher_reserved_left(const sl_ctx_t *ctx);
 int sl_launcher_covers_point(const sl_ctx_t *ctx, uint32_t x, uint32_t y);
 // The left button came up: a pressed dock tile pops back.
 void sl_launcher_handle_release(sl_ctx_t *ctx);
+// An app held down in the dock or the app manager (a click on its release, or a drag).
+int sl_launcher_drag_held(void);
+void sl_launcher_drag_move(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 // Redraw the dock (a badge changed).
 void sl_launcher_mark_dirty(sl_ctx_t *ctx);
 

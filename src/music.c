@@ -59,7 +59,9 @@ static struct {
     uint8_t super_down;
     const slsk_font_t *f13, *f14, *f18, *mono11;
     const slsk_entry_t *play20, *pause20, *prev18, *next18, *play16, *pause16, *prev16, *next16, *vol18;
+    uint8_t vol_drag;   // the volume bar held down: it follows the mouse
 } g_mus = { .watch = -1 };
+
 
 static int sl_mus_assets(sl_ctx_t *ctx) {
     if (g_mus.f13) return 1;
@@ -295,6 +297,19 @@ int sl_music_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev) {
     return 1;
 }
 
+// The volume bar of the open card: the system's volume, as the top bar's
+// (same icon, same thing; docs/system-apps-ux-plan.md, Starlight big item
+// 10). Orfeus keeps its own in its window.
+static void sl_mus_volume_at(sl_ctx_t *ctx, uint32_t x, uint8_t save) {
+    int32_t ox, ow;
+    sl_mus_open_rect(&ox, &ow);
+    int32_t bx = POP_PAD + 28, bw = ox - 12 - bx;
+    int32_t d = (int32_t)x - (int32_t)g_mus.px - bx;
+    if (d < 0) d = 0;
+    if (d > bw) d = bw;
+    sl_desk_volume_set_level(ctx, bw > 0 ? d * 100 / bw : 0, save);
+}
+
 int sl_music_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx) return 0;
     if (g_mus.pill_shown && y < SL_DESK_BAR_HEIGHT && (int32_t)x >= g_mus.pill_x && (int32_t)x < g_mus.pill_x + g_mus.pill_w) {
@@ -316,11 +331,8 @@ int sl_music_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
         (void)sl_windows_open_app_bundle_path(ctx, SL_MUS_ORFEUS);
         return 1;
     } else if (sl_mus_in(x, y, POP_PAD + 28, POP_VOL_Y, ox - 8 - POP_PAD - 28, 32)) {
-        int32_t bx = POP_PAD + 28, bw = ox - 12 - bx;
-        int32_t d = (int32_t)x - (int32_t)g_mus.px - bx;
-        if (d < 0) d = 0;
-        if (d > bw) d = bw;
-        sl_mus_call(MUSIC_OP_VOLUME, bw > 0 ? (uint32_t)(d * 100 / bw) : 0u);
+        g_mus.vol_drag = 1u;   // until it is let go (sl_music_release)
+        sl_mus_volume_at(ctx, x, 0u);
     } else if (sl_mus_in(x, y, POP_PAD, POP_PROG_Y - 8, (int32_t)SL_MUS_W - 2 * POP_PAD, 16) && g_mus.st.dur_ms) {
         int32_t d = (int32_t)x - (int32_t)g_mus.px - POP_PAD;
         uint64_t ms = g_mus.st.dur_ms * (uint64_t)(d < 0 ? 0 : d) / (SL_MUS_W - 2u * POP_PAD);
@@ -329,6 +341,23 @@ int sl_music_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     }
     sl_mus_dirty_card(ctx);
     return 1;
+}
+
+uint8_t sl_music_held(void) {
+    return g_mus.vol_drag;
+}
+
+void sl_music_drag(sl_ctx_t *ctx, uint32_t x) {
+    if (!ctx || !g_mus.vol_drag) return;
+    sl_mus_volume_at(ctx, x, 0u);
+    sl_mus_dirty_card(ctx);
+}
+
+void sl_music_release(sl_ctx_t *ctx, uint32_t x) {
+    if (!ctx || !g_mus.vol_drag) return;
+    g_mus.vol_drag = 0u;
+    sl_mus_volume_at(ctx, x, 1u);   // kept for the next start
+    sl_mus_dirty_card(ctx);
 }
 
 int sl_music_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
@@ -504,7 +533,7 @@ static void sl_mus_draw_card(sl_ctx_t *ctx, sl_target_t *t) {
     int32_t vx = x + POP_PAD + 28, vw = x + ox - 12 - vx;
     if (vw > 8) {
         sl_mus_surface(t, &k_mus_track, vx, vy - 2, (uint32_t)vw, 4u, 2u);
-        uint32_t vf = (uint32_t)vw * g_mus.st.volume / 100u;
+        uint32_t vf = (uint32_t)vw * (uint32_t)sl_desk_volume_level() / 100u;
         if (vf >= 4u) sl_mus_surface(t, &k_mus_vol, vx, vy - 2, vf, 4u, 2u);
     }
     sl_mus_surface(t, &k_mus_button, x + ox, y + POP_VOL_Y, (uint32_t)ow, 32u, 16u);

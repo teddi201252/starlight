@@ -17,6 +17,9 @@ int sl_app_host_slot_configure(size_t index, const char *title, const char *exec
 int sl_app_host_slot_set_bundle(size_t index, const char *bundle_dir);
 /* The language SLUI apps get ("@SLUI HOST LANG"); running ones are told at once. */
 void sl_app_host_set_language(const char *code);
+// Opens the app of <bundle_path> (or brings it in front) and gives it <file>
+// as an OPEN_FILE once it listens: what another app's OPEN_FILE does.
+void sl_app_host_open_with(const char *bundle_path, const char *file);
 /* Limits the rights of the app started in this slot (call after slot_configure). */
 int sl_app_host_slot_restrict_caps(size_t index, uint64_t caps_mask);
 /* Limits the filesystem the app may touch (call after slot_configure). */

@@ -1352,6 +1352,14 @@ static const char *const k_fmenu_keys[SL_UI_FMENU_COUNT] = {
     "field.undo", "field.redo", "field.cut", "field.copy", "field.paste",
     "field.paste_from", "field.delete", "field.select_all",
 };
+// Each option's key, at the right of its row, so that it is learnt
+// (docs/system-apps-ux-plan.md, Starlight big item 9); NULL: none.
+static const char *const k_fmenu_shortcut[SL_UI_FMENU_COUNT] = {
+    "Caps+Z", "Caps+Y", "Caps+D", "Caps+A", "Caps+S", NULL, NULL, NULL,
+};
+static const char *const k_fmenu_shortcut_key[SL_UI_FMENU_COUNT] = {   // the translated ones
+    NULL, NULL, NULL, NULL, NULL, "field.key.caps_hold", "field.key.delete", NULL,
+};
 
 void sl_ui_free(sl_ui_ctx_t *ui) {
     if (!ui || !ui->undo) return;
@@ -1406,6 +1414,16 @@ static void sl_ui_field_menu_label(uint32_t i, char *out, size_t cap, void *user
         if (n > cap - 1u - o) n = cap - 1u - o;
         memcpy(out + o, t, n);
         out[o + n] = '\0';
+        // "label\tkey": the menu draws the key at the right (context_menu_renderer.c)
+        const char *key = k_fmenu_shortcut[i] ? k_fmenu_shortcut[i]
+                          : k_fmenu_shortcut_key[i] ? sl_tr(k_fmenu_shortcut_key[i]) : NULL;
+        if (key) {
+            size_t used = o + n, kn = strlen(key);
+            if (used + 1u + kn < cap) {
+                out[used] = '\t';
+                memcpy(out + used + 1u, key, kn + 1u);
+            }
+        }
         return;
     }
     const char *app = NULL;
@@ -1434,14 +1452,20 @@ static void sl_ui_field_menu_close(sl_ui_ctx_t *ui) {
 static void sl_ui_field_menu_layout(sl_ui_ctx_t *ui) {
     const char *app = NULL;
     uint32_t count = sl_ui_field_menu_count(ui, &app);
-    uint32_t row_h = 20u, widest = 0u;   // as an app's context menu
+    uint32_t row_h = 20u, widest = 0u, widest_key = 0u;   // as an app's context menu
     for (uint32_t i = 0u; i < count; i++) {
         char label[128];
         sl_ui_field_menu_label(i, label, sizeof(label), ui);
+        char *tab = strchr(label, '\t');
+        if (tab) {
+            *tab = '\0';
+            uint32_t kw = sl_ui_ctx_text_width(ui->ctx, tab + 1);
+            if (kw > widest_key) widest_key = kw;
+        }
         uint32_t w = sl_ui_ctx_text_width(ui->ctx, label[0] == '~' ? label + 1 : label);
         if (w > widest) widest = w;
     }
-    uint32_t w = widest + 36u, h = count * row_h + 2u;
+    uint32_t w = widest + 36u + (widest_key ? widest_key + 28u : 0u), h = count * row_h + 2u;
     if (w < 160u) w = 160u;
     uint32_t x = ui->field_menu_anchor_x, y = ui->field_menu_anchor_y;
     if (ui->win) {

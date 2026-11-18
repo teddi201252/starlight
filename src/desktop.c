@@ -1040,9 +1040,12 @@ static void sl_desk_tips_hello(sl_ctx_t *ctx) {
     sl_notify_post(ctx, app, text);
 }
 
+static void sl_desk_pill_tick(sl_ctx_t *ctx);
+
 void sl_desk_tick(sl_ctx_t *ctx) {
     if (!ctx || !ctx->desk_frame || g_desk.ready != 1u) return;
     sl_desk_tips_hello(ctx);
+    sl_desk_pill_tick(ctx);
     int64_t minute = sl_desk_local_seconds(ctx) / 60;
     uint8_t ip[4], has_ip;
     int32_t volume;
@@ -1243,6 +1246,104 @@ static void sl_desk_volume_save(void) {
     (void)peos_fclose(fd);
 }
 
+// ------------------------------------------------------------------- pill
+// The pill at the bottom of the screen (docs/system-apps-ux-plan.md,
+// Starlight big item 8): the volume or the screen's light after one of their
+// keys, with its level, "muted", or that the light cannot be changed here.
+// It shows for a moment and goes; nothing is drawn while it is away.
+#define SL_PILL_W 320u
+#define SL_PILL_H 56u
+#define SL_PILL_SHOW_NS 1500000000ull
+enum { SL_PILL_VOLUME, SL_PILL_LIGHT };
+static struct {
+    uint8_t shown;
+    uint8_t kind;
+    int32_t level;   // 0..100; -1: the light cannot be changed
+    uint8_t muted;
+    uint64_t until;
+} g_pill;
+
+static void sl_desk_pill_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y) {
+    *x = ctx->fb.width > SL_PILL_W ? (ctx->fb.width - SL_PILL_W) / 2u : 0u;
+    *y = ctx->fb.height > SL_PILL_H + 64u ? ctx->fb.height - SL_PILL_H - 64u : 0u;
+}
+
+static void sl_desk_pill_dirty(sl_ctx_t *ctx) {
+    uint32_t x, y;
+    sl_desk_pill_rect(ctx, &x, &y);
+    uint32_t dx = x > 24u ? x - 24u : 0u, dy = y > 24u ? y - 24u : 0u;
+    sl_dirty_add(ctx, dx, dy, SL_PILL_W + 48u, SL_PILL_H + 48u);
+}
+
+static void sl_desk_pill_show(sl_ctx_t *ctx, uint8_t kind, int32_t level, uint8_t muted) {
+    if (g_pill.shown) sl_desk_pill_dirty(ctx);
+    g_pill.shown = 1u;
+    g_pill.kind = kind;
+    g_pill.level = level;
+    g_pill.muted = muted;
+    g_pill.until = peos_time_ns() + SL_PILL_SHOW_NS;
+    sl_desk_pill_dirty(ctx);
+    printf("starlight: pill %s %d%s\n", kind == SL_PILL_VOLUME ? "volume" : "light", (int)level, muted ? " muted" : "");
+}
+
+static void sl_desk_pill_tick(sl_ctx_t *ctx) {
+    if (!g_pill.shown || peos_time_ns() < g_pill.until) return;
+    g_pill.shown = 0u;
+    sl_desk_pill_dirty(ctx);
+}
+
+static void sl_desk_pill_draw_rect(uint32_t cx, uint32_t cy, uint32_t cw, uint32_t ch, void *userdata) {
+    sl_ctx_t *ctx = (sl_ctx_t *)userdata;
+    sl_clip_set(ctx, cx, cy, cw, ch);
+    sl_target_t t = sl_target_from_ctx(ctx);
+    uint32_t x, y;
+    sl_desk_pill_rect(ctx, &x, &y);
+    sl_ui_ctx_surface(ctx, SL_UI_SURF_NIGHT, x, y, SL_PILL_W, SL_PILL_H, SL_PILL_H / 2u);
+    static const uint8_t ink[3] = { 0xE8, 0xF4, 0xFF }, muted[3] = { 0x9F, 0xB4, 0xD8 };
+    const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
+    const slsk_font_t *f = g_desk.bar;
+    int32_t base = (int32_t)(y + SL_PILL_H / 2u) + (f->ascent - f->descent) / 2;
+    int32_t lx = (int32_t)x + 26;
+    const char *label = sl_tr(g_pill.kind == SL_PILL_VOLUME ? "desk.pill.volume" : "desk.pill.light");
+    if (g_pill.kind == SL_PILL_VOLUME && g_desk.volume) {
+        lx = sl_desk_mask(ctx, &t, g_desk.volume, lx, (int32_t)(y + SL_PILL_H / 2u), ink) + 10;
+    }
+    int32_t after = sl_text_draw(&t, f, lx, base, label, ink[0], ink[1], ink[2]) + 16;
+    char right[48];
+    if (g_pill.level < 0) snprintf(right, sizeof(right), "%s", sl_tr("desk.pill.no_light"));
+    else if (g_pill.muted) snprintf(right, sizeof(right), "%s", sl_tr("desk.pill.muted"));
+    else snprintf(right, sizeof(right), "%d%%", (int)g_pill.level);
+    int32_t rw = (int32_t)sl_text_width(f, right);
+    int32_t rx = (int32_t)(x + SL_PILL_W) - 26 - rw;
+    sl_text_draw(&t, f, rx, base, right, muted[0], muted[1], muted[2]);
+    // The track between the label and the number, filled to the level.
+    int32_t tx0 = after, tx1 = rx - 16;
+    if (g_pill.level >= 0 && tx1 > tx0 + 20) {
+        uint32_t tw = (uint32_t)(tx1 - tx0), ty = y + SL_PILL_H / 2u - 3u;
+        sl_fill_rect(ctx, (uint32_t)tx0, ty, tw, 6u, 0x23, 0x2B, 0x45);
+        uint32_t fill = g_pill.muted ? 0u : tw * (uint32_t)g_pill.level / 100u;
+        if (fill) sl_fill_rect(ctx, (uint32_t)tx0, ty, fill, 6u, n->r, n->g, n->b);
+    }
+    sl_clip_clear(ctx);
+}
+
+void sl_desk_pill_render(sl_ctx_t *ctx) {
+    if (!ctx || !g_pill.shown || g_desk.ready != 1u || !g_desk.bar) return;
+    uint32_t x, y;
+    sl_desk_pill_rect(ctx, &x, &y);
+    sl_dirty_for_each_intersection(x, y, SL_PILL_W, SL_PILL_H, sl_desk_pill_draw_rect, ctx);
+}
+
+int32_t sl_desk_volume_level(void) {
+    return sl_desk_volume_now();
+}
+
+void sl_desk_volume_set_level(sl_ctx_t *ctx, int32_t v, uint8_t save) {
+    g_desk.unmute_volume = -1;   // a level chosen by hand
+    sl_desk_set_volume(ctx, v);
+    if (save) sl_desk_volume_save();
+}
+
 // The laptop's keys (the Touch Bar's on a MacBook, the media keys of a
 // keyboard): the volume, mute, the screen's light. Taken here, wherever the
 // focus is.
@@ -1257,6 +1358,7 @@ int sl_desk_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev) {
                 g_desk.unmute_volume = -1;
             }
             sl_desk_volume_step(ctx, ev->code == PEOS_KEY_VOLUME_UP ? 1 : -1);
+            sl_desk_pill_show(ctx, SL_PILL_VOLUME, sl_desk_volume_now(), 0u);
         }
         return 1;
     case PEOS_KEY_MUTE:
@@ -1269,6 +1371,8 @@ int sl_desk_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev) {
                 sl_desk_set_volume(ctx, 0);
             }
             sl_desk_volume_save();
+            sl_desk_pill_show(ctx, SL_PILL_VOLUME, g_desk.unmute_volume >= 0 ? g_desk.unmute_volume : sl_desk_volume_now(),
+                              g_desk.unmute_volume >= 0 ? 1u : 0u);
         }
         return 1;
     case PEOS_KEY_LIGHT_UP:
@@ -1281,6 +1385,11 @@ int sl_desk_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev) {
                 if (v < 0) v = 0;
                 if (v > (int64_t)PEOS_BACKLIGHT_MAX) v = PEOS_BACKLIGHT_MAX;
                 (void)peos_backlight_set((uint32_t)v);
+                int64_t got = peos_backlight_get();
+                if (got < 0) got = v;
+                sl_desk_pill_show(ctx, SL_PILL_LIGHT, (int32_t)(got * 100 / (int64_t)PEOS_BACKLIGHT_MAX), 0u);
+            } else {
+                sl_desk_pill_show(ctx, SL_PILL_LIGHT, -1, 0u);   // no light to change here (a VM)
             }
         }
         return 1;
@@ -1300,7 +1409,10 @@ static void sl_desk_activate(sl_ctx_t *ctx, int id) {
         return;
     }
     if (!w->app) return;
-    if (!sl_windows_open_app_id(ctx, w->app)) {
+    // The network widget: Impostazioni on its Wi-Fi tab, not the first one.
+    int opened = id == SL_DW_NET ? sl_windows_open_app_id_with(ctx, w->app, "tab:wifi")
+                                 : sl_windows_open_app_id(ctx, w->app);
+    if (!opened) {
         char msg[96];
         snprintf(msg, sizeof(msg), sl_tr("desk.not_installed"), w->app_name ? sl_tr(w->app_name) : w->app);
         sl_notify_post(ctx, sl_tr("notify.system"), msg);
