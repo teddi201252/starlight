@@ -34,6 +34,7 @@ typedef struct {
     uint8_t swallow_a;
     uint8_t swallow_s;
     uint8_t swallow_z, swallow_y;     // Caps+Z, Caps+Y: undo and redo (0.14.0)
+    uint8_t swallow_d;                // Caps+D: cut
 } sl_actionmod_tracker_t;
 
 typedef struct {
@@ -112,6 +113,7 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             g_actionmod.swallow_s = 0u;
             g_actionmod.swallow_z = 0u;
             g_actionmod.swallow_y = 0u;
+            g_actionmod.swallow_d = 0u;
         } else {
             // Released before the clipboard opened, alone: a tap, however
             // long (between the tap and the hold time it did nothing).
@@ -126,6 +128,7 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             g_actionmod.swallow_s = 0u;
             g_actionmod.swallow_z = 0u;
             g_actionmod.swallow_y = 0u;
+            g_actionmod.swallow_d = 0u;
         }
         return 1u;
     }
@@ -151,6 +154,18 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             return 0u;
         } else {
             g_actionmod.swallow_s = 0u;
+        }
+        return 1u;
+    }
+    if (code == PEOS_KEY_D) {
+        if (ev->pressed) {
+            out->clipboard_cmds |= SL_CLIP_CMD_CUT;
+            g_actionmod.state = SL_ACTIONMOD_CHORD_USED;
+            g_actionmod.swallow_d = 1u;
+        } else if (!g_actionmod.swallow_d) {
+            return 0u;
+        } else {
+            g_actionmod.swallow_d = 0u;
         }
         return 1u;
     }

@@ -1551,7 +1551,8 @@ static uint8_t sl_ui_field_menu_pass(sl_ui_ctx_t *ui, uint32_t id, int hovered, 
     }
     if (ui->clipboard_cmds & SL_CLIP_CMD_UNDO) what = SL_UI_FMENU_UNDO;
     if (ui->clipboard_cmds & SL_CLIP_CMD_REDO) what = SL_UI_FMENU_REDO;
-    ui->clipboard_cmds &= ~(uint32_t)(SL_CLIP_CMD_UNDO | SL_CLIP_CMD_REDO);
+    if (ui->clipboard_cmds & SL_CLIP_CMD_CUT) what = SL_UI_FMENU_CUT;   // Caps+D
+    ui->clipboard_cmds &= ~(uint32_t)(SL_CLIP_CMD_UNDO | SL_CLIP_CMD_REDO | SL_CLIP_CMD_CUT);
     uint32_t a = 0u, b = 0u;
     uint8_t sel = sl_ui_selection_range(ui, id, &a, &b);
     switch (what) {
@@ -2666,8 +2667,11 @@ uint8_t sl_ui_list_item(sl_ui_ctx_t *ui, uint32_t id,
         sl_ui_text_tok(ui, x + 14u, sub_y, subtitle,
                        enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
     }
-    sl_ui_text_tok(ui, x + w - 18u, sl_ui_text_center_y(ui, y, h), ">",
-                   enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
+    // The arrow says "opens something": not on a row whose text the app
+    // draws itself (no title: a file in a list, columns of its own).
+    if (title[0])
+        sl_ui_text_tok(ui, x + w - 18u, sl_ui_text_center_y(ui, y, h), ">",
+                       enabled ? SL_UI_COLOR_TEXT_SECONDARY : SL_UI_COLOR_TEXT_DISABLED);
 
     if (!enabled && active) ui->active_id = 0u;
     return changed;

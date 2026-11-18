@@ -146,6 +146,7 @@ typedef enum {
     ORBIT_UI_CMD_TEXT_MENU = 31, // TEXT_MENU field options: the app's options in a field's menu (value: the field)
     ORBIT_UI_CMD_TEXT_HINT = 32, // TEXT_HINT field text: shown in the empty field (value: the field)
     ORBIT_UI_CMD_TEXT_SECRET = 33, // TEXT_SECRET field: a password field, asterisks (value: the field)
+    ORBIT_UI_CMD_TOOLTIP = 34,   // TOOLTIP id text: a tip under the control id when the mouse rests on it
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -344,6 +345,18 @@ typedef struct {
     // large 4): a card says so, with Reopen and Close; what it wrote is in
     // the log (every line of an app goes there).
     uint8_t crashed;
+    // Work not saved (SLUI SDK 1.0.18, "HOST CLOSE_GUARD"): closing the window
+    // asks the app (EVENT CLOSE_REQUEST) instead of ending it. An app that does
+    // not answer (no frame) within ORBIT_CLOSE_FORCE_NS is closed at the next try.
+    uint8_t close_guard;
+    // The tip of the control under the mouse (SLUI SDK 1.0.18, TOOLTIP):
+    // shown after ORBIT_TIP_DELAY_NS still on it, at tip[] in the body.
+    uint32_t tip_hover;
+    uint64_t tip_since_ns;
+    uint8_t tip_shown, tip_off;
+    int32_t tip[4];
+    uint8_t close_answered;
+    uint64_t close_req_ns;
     uint32_t crash_btn_y, crash_reopen_x, crash_close_x, crash_btn_w;
     uint8_t veil_changed;       // a VEIL came or went: all of the window to the screen (next tick)
     uint8_t body_changed;       // a select or menu opened or closed while drawing: the body again (next tick)
@@ -1813,6 +1826,7 @@ static uint8_t orbit_ui_cmd_reach(sl_ui_ctx_t *ui, const orbit_ui_cmd_t *cmd, in
     case ORBIT_UI_CMD_TEXT_MENU:
     case ORBIT_UI_CMD_TEXT_HINT:
     case ORBIT_UI_CMD_TEXT_SECRET:
+    case ORBIT_UI_CMD_TOOLTIP:
         return 0u;
     default:
         if (cmd->w == 0u || cmd->h == 0u) return 0u;
@@ -1954,6 +1968,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         shell->ui.staged_count = 0u;
         shell->ui.cmd_limit_reached = 0u;
         shell->ui.committed = 1u;
+        shell->close_answered = 1u;   // alive: a close request is being answered
         if (part) shell->pixels.quiet_line = 1u;   // the window in part
         orbit_ui_warn_duplicate_ids(shell);
         return 1;
@@ -2069,6 +2084,15 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         // OPEN_FILE <bundle> <file> (SLUI SDK 1.0.12): both escaped, the
         // bundle's spaces as "\\ ", so its first plain space parts them. The
         // app is opened, and told the file when ready.
+        if (orbit_token_is(host_tok, host_len, "CLOSE_GUARD")) {   // "HOST CLOSE_GUARD 0|1"
+            uint32_t on = 0u;
+            if (!orbit_parse_u32(&p, &on)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "close_guard_invalid_args");
+                return 1;
+            }
+            shell->close_guard = on ? 1u : 0u;
+            return 1;
+        }
         if (orbit_token_is(host_tok, host_len, "OPEN_FILE")) {
             p = orbit_skip_spaces(p);
             const char *sep = NULL;
@@ -2486,6 +2510,18 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             return 1;
         }
         cmd->id = 0u;
+        return 1;
+    }
+    if (orbit_token_is(cmd_tok, cmd_len, "TOOLTIP")) {   // SLUI SDK 1.0.18
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TOOLTIP);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->value)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "tooltip_invalid_args");
+            return 1;
+        }
+        cmd->id = 0u;
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "tooltip_alloc_failed");
         return 1;
     }
     if (orbit_token_is(cmd_tok, cmd_len, "TEXT_HINT")) {   // SLUI SDK 1.0.14
@@ -3138,6 +3174,8 @@ void sl_app_host_set_prespawn(int (*fn)(size_t index)) {
 
 static int orbit_spawn_process(orbit_shell_t *shell) {
     if (!shell) return 0;
+    shell->close_guard = 0u;   // a new run starts with nothing to save
+    shell->close_req_ns = 0u;
     // Its manifest read again (an app.ini edited since the catalog scan),
     // then the slot's settings into the shell
     if (g_orbit_prespawn && shell->slot_index < g_orbit_slot_count) {
@@ -3264,6 +3302,92 @@ static void orbit_stop_process(orbit_shell_t *shell) {
     // reopened app got no RESIZE: the same size as the last one sent).
     orbit_ui_storage_free(&shell->ui);
     peos_memset(&shell->ui, 0, sizeof(shell->ui));
+}
+
+#define ORBIT_TIP_DELAY_NS 600000000ull
+
+static const char *orbit_tooltip_text(const orbit_shell_t *shell, uint32_t id) {
+    if (!id || !shell->ui.cmds) return NULL;
+    for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *c = &shell->ui.cmds[i];
+        if (c->type == ORBIT_UI_CMD_TOOLTIP && c->value == id && c->text && c->text[0]) return c->text;
+    }
+    return NULL;
+}
+
+static void orbit_tip_hide(sl_ctx_t *ctx, orbit_shell_t *shell) {
+    if (!shell->tip_shown) return;
+    shell->tip_shown = 0u;
+    orbit_damage_add(&shell->pixels, shell->tip[0], shell->tip[1], shell->tip[2], shell->tip[3]);
+    sl_windows_mark_app_pixels(ctx, shell);
+}
+
+// Every Starlight frame (sl_app_host_tick): the tip appears after a moment on
+// a control that has one, and goes when the mouse leaves it or presses.
+static void orbit_tip_tick(sl_ctx_t *ctx, orbit_shell_t *shell, uint64_t now) {
+    uint32_t id = (shell->ui.enabled && shell->ui.committed) ? shell->ui.hover_cmd_id : 0u;
+    if (id != shell->tip_hover) {
+        orbit_tip_hide(ctx, shell);
+        shell->tip_hover = id;
+        shell->tip_since_ns = now;
+        shell->tip_off = 0u;
+    }
+    if (shell->ui.mouse_down || shell->ui.mouse_r_down) {   // a click: no tip until the mouse leaves
+        orbit_tip_hide(ctx, shell);
+        shell->tip_off = 1u;
+    }
+    if (shell->tip_shown || shell->tip_off || !id || now - shell->tip_since_ns < ORBIT_TIP_DELAY_NS) return;
+    const char *text = orbit_tooltip_text(shell, id);
+    if (!text) return;
+    const slsk_entry_t *e = sl_skin_find(&ctx->skin, "ui-13");
+    if (!e) return;
+    const slsk_font_t *f = sl_skin_font(&ctx->skin, e);
+    const orbit_ui_cmd_t *c = NULL;
+    for (size_t i = 0u; i < shell->ui.cmd_count; i++)
+        if (shell->ui.cmds[i].id == id && shell->ui.cmds[i].w && shell->ui.cmds[i].h) c = &shell->ui.cmds[i];
+    if (!c) return;
+    int32_t bw = (int32_t)shell->ui.sent_body_w, bh = (int32_t)shell->ui.sent_body_h;
+    int32_t w = (int32_t)sl_text_width(f, text) + 24, h = 28;
+    if (bw > 8 && w > bw - 8) w = bw - 8;
+    int32_t x = (int32_t)c->x + (int32_t)c->w / 2 - w / 2, y = (int32_t)(c->y + c->h) + 6;
+    if (y + h > bh - 2) y = (int32_t)c->y - 6 - h;   // no room under it: above
+    if (x + w > bw - 4) x = bw - 4 - w;
+    if (x < 4) x = 4;
+    if (y < 2) y = 2;
+    shell->tip[0] = x, shell->tip[1] = y, shell->tip[2] = x + w, shell->tip[3] = y + h;
+    shell->tip_shown = 1u;
+    orbit_damage_add(&shell->pixels, shell->tip[0], shell->tip[1], shell->tip[2], shell->tip[3]);
+    sl_windows_mark_app_pixels(ctx, shell);
+}
+
+static void orbit_tip_draw(sl_ctx_t *ctx, const orbit_shell_t *shell, uint32_t body_x, uint32_t body_y) {
+    if (!shell->tip_shown) return;
+    const char *text = orbit_tooltip_text(shell, shell->tip_hover);
+    const slsk_entry_t *e = sl_skin_find(&ctx->skin, "ui-13");
+    if (!text || !e) return;
+    const slsk_font_t *f = sl_skin_font(&ctx->skin, e);
+    uint32_t x = body_x + (uint32_t)shell->tip[0], y = body_y + (uint32_t)shell->tip[1];
+    uint32_t w = (uint32_t)(shell->tip[2] - shell->tip[0]), h = (uint32_t)(shell->tip[3] - shell->tip[1]);
+    sl_ui_ctx_surface(ctx, SL_UI_SURF_NIGHT, x, y, w, h, h / 2u);
+    sl_target_t t = sl_target_from_ctx(ctx);
+    int32_t tw = (int32_t)sl_text_width(f, text);
+    sl_text_draw(&t, f, (int32_t)(x + w / 2u) - tw / 2, (int32_t)y + (int32_t)h / 2 + (f->px * 36 + 50) / 100, text, 0xE8, 0xF4,
+                 0xFF);
+}
+
+#define ORBIT_CLOSE_FORCE_NS 3000000000ull
+
+static int orbit_on_close_request(void *userdata) {
+    orbit_shell_t *shell = (orbit_shell_t *)userdata;
+    if (!shell || !shell->close_guard || shell->child_pid <= 0 || shell->child_stdin_fd < 0) return 0;
+    uint64_t now = peos_time_ns();
+    // asked before and no frame since, for a while: the app does not answer
+    if (shell->close_req_ns && !shell->close_answered && now - shell->close_req_ns > ORBIT_CLOSE_FORCE_NS) return 0;
+    static const char line[] = "@SLUI EVENT CLOSE_REQUEST\n";
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, line, sizeof(line) - 1u);
+    shell->close_req_ns = now;
+    shell->close_answered = 0u;
+    return 1;
 }
 
 static void orbit_on_close(void *userdata) {
@@ -3499,8 +3623,9 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
             if (shell->ui.clipboard_cmds & SL_CLIP_CMD_PASTE) orbit_send_ui_event_clipcmd(shell, "paste");
             if (shell->ui.clipboard_cmds & SL_CLIP_CMD_UNDO) orbit_send_ui_event_clipcmd(shell, "undo");
             if (shell->ui.clipboard_cmds & SL_CLIP_CMD_REDO) orbit_send_ui_event_clipcmd(shell, "redo");
+            if (shell->ui.clipboard_cmds & SL_CLIP_CMD_CUT) orbit_send_ui_event_clipcmd(shell, "cut");
             shell->ui.clipboard_cmds &= ~(uint32_t)(SL_CLIP_CMD_COPY | SL_CLIP_CMD_PASTE | SL_CLIP_CMD_UNDO |
-                                                    SL_CLIP_CMD_REDO);
+                                                    SL_CLIP_CMD_REDO | SL_CLIP_CMD_CUT);
         }
         shell->caps_lock_on = frame->caps_lock_on;
         if (!event && shell->crashed && shell->child_pid <= 0 && frame->mouse_left_pressed && shell->crash_btn_w) {
@@ -4387,6 +4512,7 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_TEXT_MENU:
         case ORBIT_UI_CMD_TEXT_HINT:
         case ORBIT_UI_CMD_TEXT_SECRET:
+        case ORBIT_UI_CMD_TOOLTIP:
         case ORBIT_UI_CMD_SCROLL_V:
         case ORBIT_UI_CMD_PIXELS: {   // the app's own pixels: the pointer it asked for
             static const int k_kinds[4] = { SL_CUR_ARROW, SL_CUR_HAND, SL_CUR_TEXT, SL_CUR_NONE };
@@ -5511,7 +5637,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             } else if (cmd->type == ORBIT_UI_CMD_GRAD2D) {
                 orbit_draw_grad2d(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->grad);
             } else if (cmd->type == ORBIT_UI_CMD_CONTEXT_MENU || cmd->type == ORBIT_UI_CMD_TEXT_MENU ||
-                       cmd->type == ORBIT_UI_CMD_TEXT_HINT || cmd->type == ORBIT_UI_CMD_TEXT_SECRET) {
+                       cmd->type == ORBIT_UI_CMD_TEXT_HINT || cmd->type == ORBIT_UI_CMD_TEXT_SECRET ||
+                       cmd->type == ORBIT_UI_CMD_TOOLTIP) {
                 // Registration-only control: rendered by host overlay on right click.
             } else if (cmd->type == ORBIT_UI_CMD_IMAGE_FILE) {
                 if (!cmd->image_loaded && !cmd->image_failed) {
@@ -5586,6 +5713,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                                      &label_src);
             }
         }
+        orbit_tip_draw(ctx, shell, body_x, body_y);   // over the controls, as a menu
         sl_clip_clear(ctx);
 
         // A veil covers the title bar and frame too: when it comes or goes,
@@ -5803,6 +5931,7 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
             g_orbit_cfg[i].open_pending = 0u;
             orbit_send_ui_event_open_file(shell, g_orbit_cfg[i].open_file);
         }
+        orbit_tip_tick(ctx, shell, now);
         if (shell->next_poll_ns > now) continue;
         uint8_t changed = orbit_poll_output(shell);
         shell->next_poll_ns = now + orbit_poll_interval_ns(shell, changed);
@@ -5887,6 +6016,7 @@ static int orbit_slots_ensure(size_t needed) {
         app->on_input = orbit_on_input;
         app->on_render = orbit_on_render;
         app->on_close = orbit_on_close;
+        app->on_close_request = orbit_on_close_request;
         app->userdata = shell;
         g_orbit[index] = shell;
         g_orbit_app[index] = app;

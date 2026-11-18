@@ -10,6 +10,9 @@ typedef void (*sl_app_on_input_fn)(sl_ctx_t *ctx, const sl_input_frame_t *frame,
                                    const peos_input_event_t *event, void *userdata);
 typedef void (*sl_app_on_render_fn)(sl_ctx_t *ctx, const sl_window_t *win, void *userdata);
 typedef void (*sl_app_on_close_fn)(void *userdata);
+// Asked before a window starts closing (its button, Caps+W, the dock): 1 when
+// the app takes it over (work not saved: it asks the user), and the window stays.
+typedef int (*sl_app_on_close_request_fn)(void *userdata);
 
 // Soft UI frame (design/starlight-soft-ui, tavola Finestre): a raised body
 // with radius 32, a 40 px title bar 18 px from the top, the app's body
@@ -44,6 +47,7 @@ struct app_instance {
     sl_app_on_input_fn on_input;
     sl_app_on_render_fn on_render;
     sl_app_on_close_fn on_close;
+    sl_app_on_close_request_fn on_close_request;   // may be NULL
     void *userdata;
 };
 

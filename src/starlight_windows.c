@@ -1822,6 +1822,8 @@ static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint8_
             return 1;
         }
         if (action == SL_CTX_CLOSE) {
+            app_instance_t *t = g_windows[existing].task;
+            if (t && t->on_close_request && t->on_close_request(t->userdata)) return 1;   // the app asks first
             if (!sl_window_is_closing(&g_windows[existing])) {
                 sl_window_rect_snapshot_t closing = sl_window_snapshot_index(existing);
                 sl_anim_start_close(g_windows[existing].task, (int32_t)g_windows[existing].y);
@@ -2750,6 +2752,8 @@ static int sl_windows_title_button_act(sl_ctx_t *ctx, size_t idx, int b) {
     sl_window_rect_snapshot_t before = sl_window_snapshot_index(idx);
     sl_windows_mark_focused_activity();
     if (b == SL_WIN_BTN_CLOSE) {
+        if (win->task && win->task->on_close_request && win->task->on_close_request(win->task->userdata))
+            return 1;   // work not saved: the app asks first
         sl_anim_start_close(win->task, (int32_t)win->y);
         sl_dirty_add_snapshot(ctx, &before);
         return 1;
