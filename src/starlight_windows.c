@@ -1731,7 +1731,10 @@ static void sl_launcher_context_label_cb(uint32_t option_index, char *out, size_
     out[0] = '\0';
     if (option_index >= g_launcher_ctx_rows) return;
     if (g_launcher_ctx_info) sl_copy_str(out, out_cap, g_launcher_info_lines[option_index]);
-    else sl_copy_str(out, out_cap, sl_launcher_context_action_name(g_launcher_ctx_actions[option_index]));
+    else if (g_launcher_ctx_actions[option_index] == SL_CTX_FULL && out_cap > 1u) {
+        out[0] = '~';   // drawn off: it says why, it does nothing (context_menu_renderer.c)
+        sl_copy_str(out + 1, out_cap - 1u, sl_launcher_context_action_name(SL_CTX_FULL));
+    } else sl_copy_str(out, out_cap, sl_launcher_context_action_name(g_launcher_ctx_actions[option_index]));
 }
 
 // Opens the popup (menu or card) whose rows are already in place, as wide as

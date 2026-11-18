@@ -257,10 +257,19 @@ int sl_sysmenu_cursor(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     return sm_in(x, y, sm_menu_x(ctx), SM_TOP, SM_W, sm_menu_h()) ? SL_CUR_ARROW : -1;
 }
 
+static int sm_is(uint16_t code, uint16_t ext) {
+    return code == ext || code == (uint16_t)(ext & 0xFFu);   // with or without the E0 prefix
+}
+
+// The keys (docs/system-apps-ux-plan.md, Starlight 10): in the menu the
+// arrows choose a row and Enter opens it; in a dialog the arrows choose a
+// button, Enter presses the one lit (Cancel at first: powering off and
+// restarting lose work not saved), Esc cancels.
 int sl_sysmenu_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev) {
     if (!ctx || !ev || (!g_sm.open && !g_sm.dialog)) return 0;
     if (!ev->pressed) return g_sm.dialog ? 1 : 0;
-    if (ev->code == PEOS_KEY_ESC) {
+    uint16_t c = ev->code;
+    if (c == PEOS_KEY_ESC) {
         if (g_sm.dialog) sm_set_dialog(ctx, SM_NONE);
         else {
             sm_dirty_menu(ctx);
@@ -268,13 +277,45 @@ int sl_sysmenu_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev) {
         }
         return 1;
     }
-    if (ev->code == PEOS_KEY_ENTER && g_sm.dialog) {
-        uint8_t d = g_sm.dialog;
-        sm_set_dialog(ctx, SM_NONE);
-        if (d == SM_ASK_REBOOT || d == SM_ASK_OFF) sm_power(ctx, d == SM_ASK_REBOOT);
+    if (g_sm.dialog) {
+        uint32_t dx, dy, dw, dh;
+        sm_dialog_rect(ctx, &dx, &dy, &dw, &dh);
+        if (g_sm.dialog == SM_ABOUT) {
+            if (c == PEOS_KEY_ENTER) sm_set_dialog(ctx, SM_NONE);
+            return 1;
+        }
+        if (sm_is(c, PEOS_KEY_LEFT) || sm_is(c, PEOS_KEY_RIGHT) || c == PEOS_KEY_TAB) {
+            g_sm.btn_hover = (int8_t)(g_sm.btn_hover == 0 ? 1 : 0);
+            sl_dirty_add(ctx, dx, dy, dw, dh);
+            return 1;
+        }
+        if (c == PEOS_KEY_ENTER) {
+            uint8_t d = g_sm.dialog;
+            int confirm = g_sm.btn_hover == 1;
+            sm_set_dialog(ctx, SM_NONE);
+            if (confirm && (d == SM_ASK_REBOOT || d == SM_ASK_OFF)) sm_power(ctx, d == SM_ASK_REBOOT);
+            return 1;
+        }
+        return 1;   // a dialog keeps the keys from the apps
+    }
+    if (sm_is(c, PEOS_KEY_DOWN) || sm_is(c, PEOS_KEY_UP)) {
+        int down = sm_is(c, PEOS_KEY_DOWN);
+        int h = g_sm.hover;
+        if (h < 0) h = down ? 0 : SM_ITEMS - 1;
+        else h = (h + (down ? 1 : SM_ITEMS - 1)) % SM_ITEMS;
+        g_sm.hover = (int8_t)h;
+        sm_dirty_menu(ctx);
         return 1;
     }
-    return g_sm.dialog ? 1 : 0;   // a dialog keeps the keys from the apps
+    if (c == PEOS_KEY_ENTER) {
+        int row = g_sm.hover < 0 ? SM_ITEM_ABOUT : g_sm.hover;
+        if (row == SM_ITEM_ABOUT) sm_set_dialog(ctx, SM_ABOUT);
+        else if (row == SM_ITEM_REBOOT) sm_set_dialog(ctx, SM_ASK_REBOOT);
+        else sm_set_dialog(ctx, SM_ASK_OFF);
+        g_sm.btn_hover = 0;   // Cancel lit: Enter does not power off by itself
+        return 1;
+    }
+    return 0;
 }
 
 // ------------------------------------------------------------------ drawing

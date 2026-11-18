@@ -947,7 +947,7 @@ static int64_t sl_desk_local_seconds(const sl_ctx_t *ctx) {
 
 static void sl_desk_now(const sl_ctx_t *ctx, struct tm *out) {
     time_t local = (time_t)sl_desk_local_seconds(ctx);
-    *out = *localtime(&local);
+    *out = *gmtime(&local);   // already local: only the fields
 }
 
 void sl_desk_local_hhmm(const sl_ctx_t *ctx, char *out, size_t cap) {

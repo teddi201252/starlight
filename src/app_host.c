@@ -7,6 +7,9 @@
 #include "ui_sdk.h"
 #include "clipboard.h"
 #include "render/image_decode.h"
+#include "render/blit.h"
+#include "render/pixels.h"
+#include "render/skin.h"
 #include "peos/orbitfb.h"
 #include "peos/capability.h"
 #include "peos/lang.h"
@@ -337,6 +340,11 @@ typedef struct {
     int64_t child_pid;
     orbit_pixels_t pixels;
     uint8_t ended;              // the app was ended from outside: close its window
+    // An app that ended with an error (docs/system-apps-ux-plan.md, Starlight
+    // large 4): a card says so, with Reopen and Close; what it wrote is in
+    // the log (every line of an app goes there).
+    uint8_t crashed;
+    uint32_t crash_btn_y, crash_reopen_x, crash_close_x, crash_btn_w;
     uint8_t veil_changed;       // a VEIL came or went: all of the window to the screen (next tick)
     uint8_t body_changed;       // a select or menu opened or closed while drawing: the body again (next tick)
     int64_t child_stdin_fd;
@@ -1670,6 +1678,25 @@ static void orbit_send_ui_event_char(orbit_shell_t *shell, uint32_t cp) {
     char msg[48];
     int n = snprintf(msg, sizeof(msg), "@SLUI EVENT CHAR %u\n", (unsigned)cp);
     if (n > 0) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
+}
+
+// Enter or the space while the focus ring shows a control that presses
+// (a button, a list's row, a swatch, a toggle, a select): the keyboard's
+// navigation presses it (orbit_ui_apply_keyboard_navigation), the key is
+// not the app's.
+static void orbit_crash_reopen(orbit_shell_t *shell);
+
+static int orbit_ui_enter_presses_focus(const orbit_shell_t *shell, uint16_t code) {
+    if (code != PEOS_KEY_ENTER && code != PEOS_KEY_SPACE) return 0;
+    if (!shell->ui.keyboard_nav_active || !shell->ui.cmds) return 0;
+    if (shell->pixels.focused && shell->ui.ui.focused_id == 0u) return 0;   // the pixels have the keyboard
+    for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *c = &shell->ui.cmds[i];
+        if (c->id != shell->ui.nav_focus_id || c->id == 0u) continue;
+        return c->type == ORBIT_UI_CMD_BUTTON || c->type == ORBIT_UI_CMD_LIST_ITEM || c->type == ORBIT_UI_CMD_SWATCH ||
+               c->type == ORBIT_UI_CMD_TOGGLE || c->type == ORBIT_UI_CMD_SELECT;
+    }
+    return 0;
 }
 
 static void orbit_send_ui_event_key(orbit_shell_t *shell, const char *kind, uint16_t code, uint32_t mods) {
@@ -3287,6 +3314,10 @@ static uint8_t orbit_poll_output(orbit_shell_t *shell) {
             // its own menu) or from outside (SYS_PROC_KILL: 137); after an
             // error it stays, with what the app wrote and Enter to restart.
             if (app && (status == 0 || status == 137)) shell->ended = 1u;
+            else if (app) {
+                shell->crashed = 1u;
+                printf("[STARLIGHT] %s ended with an error (status %d): its lines above\n", shell->title, status);
+            }
             changed = 1u;
         }
     }
@@ -3472,7 +3503,13 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
                                                     SL_CLIP_CMD_REDO);
         }
         shell->caps_lock_on = frame->caps_lock_on;
-        if (!event && orbit_is_text_terminal(shell)) orbit_terminal_mouse(ctx, shell, frame);
+        if (!event && shell->crashed && shell->child_pid <= 0 && frame->mouse_left_pressed && shell->crash_btn_w) {
+            uint32_t mx = ctx->cursor_x, my = ctx->cursor_y;
+            if (my >= shell->crash_btn_y && my < shell->crash_btn_y + 44u) {
+                if (mx >= shell->crash_reopen_x && mx < shell->crash_reopen_x + shell->crash_btn_w) orbit_crash_reopen(shell);
+                else if (mx >= shell->crash_close_x && mx < shell->crash_close_x + shell->crash_btn_w) shell->ended = 1u;
+            }
+        } else if (!event && orbit_is_text_terminal(shell)) orbit_terminal_mouse(ctx, shell, frame);
         if (!event && shell->ui.enabled && shell->ui.committed) orbit_pixels_mouse(ctx, shell, frame);
     }
 
@@ -3496,7 +3533,12 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
     if (shell->ui.enabled && shell->ui.committed) {
         uint8_t was_down = shell->ui.key_down[key_ix];
         uint32_t mods = orbit_mod_mask(shell);
-        if (event->pressed) {
+        if (event->pressed && orbit_ui_enter_presses_focus(shell, code)) {
+            // Enter or the space on the control the focus ring shows: that
+            // control is pressed (keyboard navigation, below), and the app
+            // does not also get the key (2026-11-18: in a confirmation,
+            // Enter on "Cancel" also ran the dialog's Enter = OK)
+        } else if (event->pressed) {
             if (was_down) orbit_send_ui_event_key(shell, "KEY_REPEAT", code, mods);
             else orbit_send_ui_event_key(shell, "KEY_DOWN", code, mods);
             shell->ui.key_down[key_ix] = 1u;
@@ -3573,10 +3615,17 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         return;
     }
 
+    // The card of an app ended with an error: Enter reopens it, Esc closes
+    // the window, other keys do nothing.
+    if (shell->crashed && shell->child_pid <= 0) {
+        if (code == PEOS_KEY_ENTER) orbit_crash_reopen(shell);
+        else if (code == PEOS_KEY_ESC) shell->ended = 1u;
+        return;
+    }
     if (code == PEOS_KEY_ENTER) {
         if (shell->child_pid <= 0) {
             if (!orbit_spawn_process(shell)) {
-                orbit_push_line(shell, "failed to start /bin/orbit");
+                orbit_push_line(shell, sl_tr("host.start_failed"));
             }
         } else {
             orbit_send_input(shell, "\n", 1u);
@@ -4871,6 +4920,54 @@ static void orbit_draw_surface(sl_ctx_t *ctx, const orbit_shell_t *shell,
     }
 }
 
+// The card of an app that ended with an error: the title, what to do, two
+// buttons (Reopen, the main one, and Close). Drawn on the window's night.
+static void orbit_crash_text(const sl_target_t *t, const slsk_font_t *f, int32_t x, int32_t y, const char *s,
+                             sl_ui_color_token_t tok) {
+    const sl_ui_color_t *c = sl_ui_runtime_color(tok);
+    sl_text_draw(t, f, x, y + (f->px * 72 + 50) / 100, s, c->r, c->g, c->b);
+}
+
+static void orbit_draw_crash_card(sl_ctx_t *ctx, orbit_shell_t *shell, uint32_t bx, uint32_t by, uint32_t bw,
+                                  uint32_t bh) {
+    const slsk_entry_t *et = sl_skin_find(&ctx->skin, "ui-22-mid"), *eb = sl_skin_find(&ctx->skin, "ui-15");
+    if (!et || !eb) return;
+    const slsk_font_t *ft = sl_skin_font(&ctx->skin, et), *fb = sl_skin_font(&ctx->skin, eb);
+    sl_target_t t = sl_target_from_ctx(ctx);
+    char title[160];
+    snprintf(title, sizeof(title), sl_tr("host.crashed_title"), shell->title);
+    const char *msg = sl_tr("host.crashed_msg");
+    uint32_t w = bw > 520u ? 460u : (bw > 60u ? bw - 40u : bw), h = 200u;
+    if (h > bh) h = bh;
+    uint32_t x = bx + (bw - w) / 2u, y = by + (bh > h ? (bh - h) / 2u : 0u);
+    sl_ui_ctx_surface(ctx, SL_UI_SURF_RAISED, x, y, w, h, 28u);
+    orbit_crash_text(&t, ft, (int32_t)x + 28, (int32_t)y + 26, title, SL_UI_COLOR_TEXT_PRIMARY);
+    orbit_crash_text(&t, fb, (int32_t)x + 28, (int32_t)y + 72, msg, SL_UI_COLOR_TEXT_SECONDARY);
+    uint32_t btn_w = 132u, gap = 12u;
+    if (2u * btn_w + gap + 56u > w) btn_w = (w - 56u - gap) / 2u;
+    shell->crash_btn_w = btn_w;
+    shell->crash_btn_y = y + h - 28u - 44u;
+    shell->crash_reopen_x = x + w - 28u - btn_w;
+    shell->crash_close_x = shell->crash_reopen_x - gap - btn_w;
+    const char *close = sl_tr("host.crashed_close"), *reopen = sl_tr("host.crashed_reopen");
+    sl_ui_ctx_surface(ctx, SL_UI_SURF_RAISED_HI, shell->crash_close_x, shell->crash_btn_y, btn_w, 44u, 22u);
+    orbit_crash_text(&t, fb, (int32_t)(shell->crash_close_x + btn_w / 2u) - (int32_t)sl_text_width(fb, close) / 2,
+                     (int32_t)shell->crash_btn_y + 14, close, SL_UI_COLOR_TEXT_PRIMARY);
+    sl_ui_ctx_surface(ctx, SL_UI_SURF_NIGHT, shell->crash_reopen_x, shell->crash_btn_y, btn_w, 44u, 22u);
+    orbit_crash_text(&t, fb, (int32_t)(shell->crash_reopen_x + btn_w / 2u) - (int32_t)sl_text_width(fb, reopen) / 2,
+                     (int32_t)shell->crash_btn_y + 14, reopen, SL_UI_COLOR_NEON);
+}
+
+// Reopen: the app again, in the same window; Close: the window goes.
+static void orbit_crash_reopen(orbit_shell_t *shell) {
+    shell->crashed = 0u;
+    orbit_lines_free(shell);   // a clean start: what it wrote is in the log
+    if (!orbit_spawn_process(shell)) {
+        orbit_push_line(shell, sl_tr("host.start_failed"));
+    }
+    shell->pixels.other_line = 1u;
+}
+
 static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdata) {
     orbit_shell_t *shell = (orbit_shell_t *)userdata;
     if (!ctx || !win || !shell) return;
@@ -4905,6 +5002,10 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
 
     if (shell->surface.active) {
         orbit_draw_surface(ctx, shell, body_x, body_y, body_w, body_h);
+        return;
+    }
+    if (shell->crashed && shell->child_pid <= 0) {
+        orbit_draw_crash_card(ctx, shell, body_x, body_y, body_w, body_h);
         return;
     }
 

@@ -1707,6 +1707,21 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
             ui->text_select_focus_pos = len;
             continue;
         }
+        if (events[i].code == PEOS_KEY_DELETE) {   // Canc: the character at the right (E0 53: not the keypad's '.')
+            if (sl_ui_text_delete_selection(ui, id, text, &len, &ui->text_caret_pos)) {
+                changed = 1u;
+            } else if (ui->text_caret_pos < len) {
+                uint32_t next = sl_ui_utf8_next_pos(text, ui->text_caret_pos, len);
+                uint32_t removed = next - ui->text_caret_pos;
+                for (uint32_t j = ui->text_caret_pos; j + removed <= len; j++) {
+                    text[j] = text[j + removed];
+                }
+                len -= removed;
+                sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
+                changed = 1u;
+            }
+            continue;
+        }
         if (code == PEOS_KEY_BACKSPACE) {
             if (sl_ui_text_delete_selection(ui, id, text, &len, &ui->text_caret_pos)) {
                 changed = 1u;
@@ -2151,6 +2166,21 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             continue;
         }
 
+        if (events[i].code == PEOS_KEY_DELETE) {   // Canc: the character at the right (E0 53: not the keypad's '.')
+            if (sl_ui_text_delete_selection(ui, id, text, &len, &ui->text_caret_pos)) {
+                changed = 1u;
+            } else if (ui->text_caret_pos < len) {
+                uint32_t next = sl_ui_utf8_next_pos(text, ui->text_caret_pos, len);
+                uint32_t removed = next - ui->text_caret_pos;
+                for (uint32_t j = ui->text_caret_pos; j + removed <= len; j++) {
+                    text[j] = text[j + removed];
+                }
+                len -= removed;
+                sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
+                changed = 1u;
+            }
+            continue;
+        }
         if (code == PEOS_KEY_BACKSPACE) {
             uint32_t old_len = len;
             if (!sl_ui_text_delete_selection(ui, id, text, &len, &ui->text_caret_pos)) {
