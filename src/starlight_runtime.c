@@ -1169,6 +1169,15 @@ int sl_handle_input(sl_ctx_t *ctx) {
         return input.quit_requested ? 1 : 0;
     }
 
+    // Caps with a key, for the windows (not while one is dragged or resized
+    // by the mouse: the mouse finishes first).
+    if (input.window_cmds && !g_drag_active && !sl_windows_resizing()) {
+        if (input.window_cmds & SL_WIN_CMD_MANAGER) sl_launcher_key_toggle(ctx);
+        if (input.window_cmds & SL_WIN_CMD_NEXT) sl_windows_key_next(ctx);
+        if (input.window_cmds & SL_WIN_CMD_MIN) sl_windows_key_minimize(ctx);
+        if (input.window_cmds & SL_WIN_CMD_CLOSE) sl_windows_key_close(ctx);
+    }
+
     // A window being resized by an edge owns the mouse until it is let go.
     if (sl_windows_resizing()) {
         if (input.mouse_moved) sl_windows_resize_move(ctx, ctx->cursor_x, ctx->cursor_y);

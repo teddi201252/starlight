@@ -20,8 +20,16 @@ typedef struct {
     int32_t mouse_wheel_x;
     int32_t mouse_wheel_y;
     uint32_t clipboard_cmds;
+    uint32_t window_cmds;           // SL_WIN_CMD_*: Caps with a key, for the windows
     peos_input_event_t key_events[16];
 } sl_input_frame_t;
+
+// Caps with a key, for the windows (docs/system-apps-ux-plan.md, phase 4;
+// the user's choice of 2026-11-18: Caps for the clipboard and the windows).
+#define SL_WIN_CMD_NEXT          (1u << 0)   // Caps+Tab: the next window up, a minimized one too
+#define SL_WIN_CMD_CLOSE         (1u << 1)   // Caps+W: close the window in front (the app may ask first)
+#define SL_WIN_CMD_MIN           (1u << 2)   // Caps+M: minimize it
+#define SL_WIN_CMD_MANAGER       (1u << 3)   // Caps+Space: open or close the app manager
 
 #define SL_CLIP_CMD_COPY         (1u << 0)
 #define SL_CLIP_CMD_PASTE        (1u << 1)

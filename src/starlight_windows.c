@@ -77,6 +77,8 @@ typedef struct {
     // dock=yes: among the apps the dock shows before anything is pinned;
     // any other app is in the app manager only, until the user pins it.
     uint8_t in_dock;
+    char version[24];               // app.ini version= and author=: the app's card
+    char author[96];
 } sl_app_bundle_t;
 
 // The app manager's filters (tavola App manager aperto): every app, or one
@@ -154,11 +156,12 @@ static uint32_t g_launcher_ctx_h = 0u;
 static int32_t g_launcher_ctx_hover_row = -1;
 // The popup lists either the actions of the menu or the lines of the
 // Informazioni card; both are fixed when it opens.
-#define SL_LAUNCHER_CTX_ROWS_MAX 8u
+#define SL_LAUNCHER_CTX_ROWS_MAX 16u
 static uint8_t g_launcher_ctx_info = 0u;
 static uint32_t g_launcher_ctx_rows = 0u;
 static uint8_t g_launcher_ctx_actions[SL_LAUNCHER_CTX_ROWS_MAX];
 static char g_launcher_info_lines[SL_LAUNCHER_CTX_ROWS_MAX][128];
+static int32_t g_launcher_info_details_row = -1;   // the card's "Details" row (-1: none, details shown)
 static uint8_t g_launcher_expanded = 0u;
 static uint32_t g_launcher_extra_width = 0u;
 static sl_window_rect_snapshot_t g_launcher_last_rect;
@@ -559,6 +562,10 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
             out->fixed_size = (strcmp(val, "0") == 0 || strcmp(val, "no") == 0) ? 1u : 0u;
         } else if (strcmp(key, "dock") == 0) {
             out->in_dock = (strcmp(val, "1") == 0 || strcmp(val, "yes") == 0) ? 1u : 0u;
+        } else if (strcmp(key, "version") == 0) {
+            sl_copy_str(out->version, sizeof(out->version), val);
+        } else if (strcmp(key, "author") == 0) {
+            sl_copy_str(out->author, sizeof(out->author), val);
         } else if (strcmp(key, "width") == 0) {
             (void)sl_parse_u32(val, &out->width);
         } else if (strcmp(key, "height") == 0) {
@@ -941,6 +948,7 @@ static struct {
 static uint8_t g_dock_hot = 0u;            // the mouse is on the dock: the fin shows
 static size_t g_dock_pressed = (size_t)-1; // item whose tile is pressed
 static uint64_t g_dock_indicators = 0u;    // running/focused bits last drawn
+static uint64_t g_dock_items_sig = 0u;     // the tiles last drawn (which apps, in order)
 static uint8_t g_dock_hover_in_mgr = 0u;   // the hovered item is a manager tile, not a dock one
 
 static int sl_dock_ready(const sl_ctx_t *ctx) {
@@ -1143,6 +1151,7 @@ static size_t sl_dock_capacity(const sl_ctx_t *ctx, size_t settings, uint32_t pa
 
 typedef struct {
     size_t count;                   // tiles in the dock
+    size_t pinned;                  // the first ones: the pinned apps (then the open ones, then Impostazioni)
     size_t item[SL_DOCK_MAX];       // launcher item of each
     uint32_t tile_y[SL_DOCK_MAX];
     uint8_t has_sep;
@@ -1227,19 +1236,46 @@ static void sl_dock_layout(const sl_ctx_t *ctx, sl_dock_layout_t *L) {
     size_t settings = sl_dock_settings_item();
     // As many as fit packed tight; the design's spacing if they fit with it.
     size_t take = sl_dock_capacity(ctx, settings, SL_DOCK_PAD_TIGHT, SL_DOCK_GAP_TIGHT);
+    size_t pins[SL_DOCK_MAX], npins = 0u;
     if (g_dock_pins_set) {
-        for (size_t p = 0u; p < g_dock_pin_count && L->count < take; p++) {
+        for (size_t p = 0u; p < g_dock_pin_count && npins < SL_DOCK_MAX; p++) {
             size_t i = sl_launcher_find_bundle(g_dock_pins[p]);
-            if (i != (size_t)-1 && i != settings) L->item[L->count++] = i;
+            if (i != (size_t)-1 && i != settings) pins[npins++] = i;
         }
     }
     // No pins yet, or none of them left and nothing else to show: the apps
     // that asked to be there (dock=yes), in order.
-    if (!g_dock_pins_set || (L->count == 0u && settings == (size_t)-1)) {
-        for (size_t i = 0u; i < g_launcher_count && L->count < take; i++) {
-            if (i != settings && g_launcher_items[i].in_dock) L->item[L->count++] = i;
+    if (!g_dock_pins_set || (npins == 0u && settings == (size_t)-1)) {
+        for (size_t i = 0u; i < g_launcher_count && npins < SL_DOCK_MAX; i++) {
+            if (i != settings && g_launcher_items[i].in_dock) pins[npins++] = i;
         }
     }
+    // The apps open and not pinned, after the pinned ones, for as long as
+    // they are open (a minimized window is found again there). They come
+    // first when the dock is full: the last pinned ones give way.
+    // An open app counts as shown only when its pinned tile fits; one pinned
+    // but past the end of a full dock gets an open tile too. The two depend
+    // on each other: a few rounds settle them.
+    size_t open[SL_DOCK_MAX], nopen = 0u, shown_pins = npins < take ? npins : take;
+    for (int round = 0; round < 4; round++) {
+        nopen = 0u;
+        for (size_t i = 0u; i < g_launcher_count && nopen < SL_DOCK_MAX; i++) {
+            if (i == settings) continue;
+            app_instance_t *app = sl_app_host_instance_peek_at(g_launcher_items[i].slot);
+            if (!app || sl_window_index_for_task(app) == (size_t)-1) continue;
+            uint8_t pinned = 0u;
+            for (size_t p = 0u; p < shown_pins && !pinned; p++) pinned = pins[p] == i ? 1u : 0u;
+            if (!pinned) open[nopen++] = i;
+        }
+        if (nopen > take) nopen = take;
+        size_t fit = take - nopen;
+        size_t next = npins < fit ? npins : fit;
+        if (next == shown_pins) break;
+        shown_pins = next;
+    }
+    for (size_t p = 0u; p < shown_pins; p++) L->item[L->count++] = pins[p];
+    L->pinned = L->count;
+    for (size_t o = 0u; o < nopen; o++) L->item[L->count++] = open[o];
     uint8_t tight = L->count > sl_dock_capacity(ctx, settings, SL_DOCK_PAD, SL_DOCK_GAP);
     uint32_t pad = tight ? SL_DOCK_PAD_TIGHT : SL_DOCK_PAD, gap = tight ? SL_DOCK_GAP_TIGHT : SL_DOCK_GAP;
     L->has_sep = (settings != (size_t)-1 && L->count > 0u) ? 1u : 0u;
@@ -1562,6 +1598,18 @@ static void sl_launcher_track_animation_dirty(sl_ctx_t *ctx) {
         g_launcher_last_rect = current;
     }
 
+    // The tiles themselves: an app opened or closed changes the open apps'
+    // tiles, even when the dock keeps its height.
+    uint64_t sig = 1469598103934665603ull;
+    for (size_t k = 0u; k < L.count; k++) sig = (sig ^ (uint64_t)(L.item[k] + 1u)) * 1099511628211ull;
+    if (sig != g_dock_items_sig) {
+        g_dock_items_sig = sig;
+        sl_dock_dirty_panel(ctx, &L);
+        size_t settings = sl_dock_settings_item();
+        size_t open = L.count - L.pinned - (settings != (size_t)-1 && L.count > L.pinned ? 1u : 0u);
+        printf("starlight: dock: %u pinned + %u open\n", (unsigned)L.pinned, (unsigned)open);
+    }
+
     uint64_t bits = sl_dock_indicator_bits(&L);
     if (bits != g_dock_indicators) {
         g_dock_indicators = bits;
@@ -1605,7 +1653,7 @@ static const char *sl_launcher_context_action_name(uint8_t action) {
 // Pinned: listed in dock.cfg or, until it exists, shown in the dock.
 static uint8_t sl_dock_is_pinned(const sl_dock_layout_t *L, size_t item_index) {
     if (g_dock_pins_set) return sl_dock_pin_find(g_launcher_items[item_index].bundle_path) != (size_t)-1;
-    for (size_t k = 0u; k < L->count; k++) {
+    for (size_t k = 0u; k < L->pinned; k++) {   // an open app's own tile is not a pin
         if (L->item[k] == item_index) return 1u;
     }
     return 0u;
@@ -1626,7 +1674,7 @@ static uint32_t sl_launcher_context_build(const sl_ctx_t *ctx, size_t item_index
     if (item->bundle_path[0] != '\0' && item_index != settings) {
         sl_dock_layout_t L;
         sl_dock_layout(ctx, &L);
-        size_t shown = L.count - (settings != (size_t)-1 && L.count > 0u ? 1u : 0u);
+        size_t shown = L.pinned;   // the open apps' tiles do not take a pin's place
         if (sl_dock_is_pinned(&L, item_index)) {
             // Without Impostazioni the last tile stays: the dock never empties.
             if (settings != (size_t)-1 || shown > 1u) out[n++] = SL_CTX_UNPIN;
@@ -1648,7 +1696,7 @@ static void sl_dock_pin_set(sl_ctx_t *ctx, size_t item_index, uint8_t pin) {
         sl_dock_layout(ctx, &L);
         size_t settings = sl_dock_settings_item();
         g_dock_pin_count = 0u;
-        for (size_t k = 0u; k < L.count; k++) {
+        for (size_t k = 0u; k < L.pinned; k++) {   // not the open apps after them
             const sl_launcher_item_t *shown = &g_launcher_items[L.item[k]];
             if (L.item[k] == settings || shown->bundle_path[0] == '\0') continue;
             sl_copy_str(g_dock_pins[g_dock_pin_count++], sizeof(g_dock_pins[0]), shown->bundle_path);
@@ -1680,7 +1728,7 @@ static void sl_launcher_info_append(uint32_t *n, const char *fmt, ...) {
 }
 
 // The lines of the Informazioni card, read from the app's manifest.
-static uint32_t sl_launcher_info_build(size_t item_index) {
+static uint32_t sl_launcher_info_build(size_t item_index, uint8_t details) {
     const sl_launcher_item_t *item = &g_launcher_items[item_index];
     sl_app_bundle_t app;
     peos_memset(&app, 0, sizeof(app));
@@ -1693,7 +1741,58 @@ static uint32_t sl_launcher_info_build(size_t item_index) {
     }
 
     uint32_t n = 0u;
+    app_instance_t *inst = sl_app_host_instance_peek_at(item->slot);
+    const char *state = sl_tr((inst && sl_window_index_for_task(inst) != (size_t)-1) ? "apps.info.open" : "apps.info.closed");
     sl_launcher_info_append(&n, "%s", item->title);
+    g_launcher_info_details_row = -1;
+    if (!details) {
+        // The summary (docs/system-apps-ux-plan.md, question 20): who made
+        // it, what it is, and what it may do in plain words; the technical
+        // data under "Details".
+        if (have && app.version[0] && app.author[0]) {
+            sl_launcher_info_append(&n, sl_tr("apps.info.version_by"), app.version, app.author);
+        } else if (have && app.version[0]) {
+            sl_launcher_info_append(&n, sl_tr("apps.info.version"), app.version);
+        } else if (have && app.author[0]) {
+            sl_launcher_info_append(&n, sl_tr("apps.info.by"), app.author);
+        } else if (strncmp(item->bundle_path, "/system/apps/", 13) == 0) {
+            sl_launcher_info_append(&n, "%s", sl_tr("apps.info.system_app"));
+        }
+        if (item->category != SL_CAT_ALL && item->category < SL_CAT_COUNT) {
+            sl_launcher_info_append(&n, sl_tr("apps.info.category"), g_mgr_cat_labels(item->category));
+        }
+        sl_launcher_info_append(&n, sl_tr("apps.info.state"), state);
+        if (have) {
+            uint32_t ncaps = 0u;
+            for (size_t i = 0u; i < sizeof(peos_cap_names) / sizeof(peos_cap_names[0]); i++) {
+                if (app.caps_mask & peos_cap_names[i].mask) ncaps++;
+            }
+            if (ncaps == 0u) {
+                sl_launcher_info_append(&n, "%s", sl_tr("apps.info.can_nothing"));
+            } else {
+                sl_launcher_info_append(&n, "%s", sl_tr("apps.info.can"));
+                // One row each, as far as they fit with "Details" under them.
+                uint32_t room = SL_LAUNCHER_CTX_ROWS_MAX > n + 1u ? SL_LAUNCHER_CTX_ROWS_MAX - n - 1u : 0u;
+                uint32_t shown = 0u;
+                for (size_t i = 0u; i < sizeof(peos_cap_names) / sizeof(peos_cap_names[0]); i++) {
+                    if (!(app.caps_mask & peos_cap_names[i].mask)) continue;
+                    if (shown + 1u == room && ncaps > room) {
+                        sl_launcher_info_append(&n, sl_tr("apps.info.can_more"), (unsigned)(ncaps - shown));
+                        break;
+                    }
+                    char key[32];
+                    snprintf(key, sizeof(key), "apps.cap.%s", peos_cap_names[i].name);
+                    sl_launcher_info_append(&n, "  \xC2\xB7 %s", sl_tr(key));
+                    shown++;
+                }
+            }
+        }
+        if (n < SL_LAUNCHER_CTX_ROWS_MAX) {
+            g_launcher_info_details_row = (int32_t)n;
+            sl_launcher_info_append(&n, "%s", sl_tr("apps.info.details"));
+        }
+        return n;
+    }
     if (item->bundle_path[0] != '\0') sl_launcher_info_append(&n, sl_tr("apps.info.bundle"), item->bundle_path);
     if (have) {
         sl_launcher_info_append(&n, sl_tr("apps.info.program"), app.exec);
@@ -1719,9 +1818,7 @@ static uint32_t sl_launcher_info_build(size_t item_index) {
         sl_launcher_info_append(&n, sl_tr("apps.info.folders"), len ? list : sl_tr("apps.info.none_folders"));
         sl_launcher_info_append(&n, sl_tr("apps.info.window"), (unsigned)app.width, (unsigned)app.height);
     }
-    app_instance_t *inst = sl_app_host_instance_peek_at(item->slot);
-    sl_launcher_info_append(&n, sl_tr("apps.info.state"),
-                            sl_tr((inst && sl_window_index_for_task(inst) != (size_t)-1) ? "apps.info.open" : "apps.info.closed"));
+    sl_launcher_info_append(&n, sl_tr("apps.info.state"), state);
     return n;
 }
 
@@ -1785,10 +1882,11 @@ static void sl_launcher_context_open(sl_ctx_t *ctx, size_t item_index, uint32_t 
     sl_launcher_popup_open(ctx, item_index, anchor_x, anchor_y);
 }
 
-static void sl_launcher_info_open(sl_ctx_t *ctx, size_t item_index, uint32_t anchor_x, uint32_t anchor_y) {
+static void sl_launcher_info_open(sl_ctx_t *ctx, size_t item_index, uint32_t anchor_x, uint32_t anchor_y,
+                                  uint8_t details) {
     if (!ctx || item_index >= g_launcher_count) return;
     sl_launcher_context_close(ctx);
-    g_launcher_ctx_rows = sl_launcher_info_build(item_index);
+    g_launcher_ctx_rows = sl_launcher_info_build(item_index, details);
     g_launcher_ctx_info = 1u;
     sl_launcher_popup_open(ctx, item_index, anchor_x, anchor_y);
 }
@@ -1803,7 +1901,7 @@ static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint8_
         return 1;
     }
     if (action == SL_CTX_INFO) {
-        sl_launcher_info_open(ctx, item_index, anchor_x, anchor_y);
+        sl_launcher_info_open(ctx, item_index, anchor_x, anchor_y, 0u);
         return 1;
     }
     app_instance_t *app = sl_app_host_instance_peek_at(item->slot);
@@ -1814,6 +1912,8 @@ static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint8_
     if (existing != (size_t)-1) {
         if (action == SL_CTX_SHOW || action == SL_CTX_OPEN) {
             sl_window_rect_snapshot_t prev_focus = sl_window_snapshot_index(g_focused_window);
+            g_windows[existing].minimized = 0u;   // "Show" brings a minimized window back too
+            g_windows[existing].force_redraw = 1u;
             sl_window_rect_snapshot_t target = sl_window_snapshot_index(existing);
             sl_focus_window(existing);
             sl_windows_mark_focused_activity();
@@ -1842,7 +1942,7 @@ static int sl_launcher_context_activate(sl_ctx_t *ctx, size_t item_index, uint8_
 void sl_launcher_handle_context_hover(sl_ctx_t *ctx) {
     if (!ctx || !g_launcher_ctx_open || g_launcher_ctx_item_index >= g_launcher_count) return;
     if (g_launcher_ctx_w == 0u || g_launcher_ctx_h == 0u) return;
-    if (g_launcher_ctx_info) return;   // the card has nothing to pick
+    if (g_launcher_ctx_info && g_launcher_info_details_row < 0) return;   // the card has nothing to pick
     uint32_t action_count = g_launcher_ctx_rows;
     if (action_count == 0u) return;
 
@@ -1855,6 +1955,7 @@ void sl_launcher_handle_context_hover(sl_ctx_t *ctx) {
             if (row < action_count) next_row = (int32_t)row;
         }
     }
+    if (g_launcher_ctx_info && next_row != g_launcher_info_details_row) next_row = -1;   // only Details
     if (next_row == g_launcher_ctx_hover_row) return;
     g_launcher_ctx_hover_row = next_row;
     sl_launcher_invalidate_overlay(ctx, g_launcher_ctx_x, g_launcher_ctx_y,
@@ -2192,6 +2293,7 @@ static int sl_windows_open_launcher_item_try(sl_ctx_t *ctx, size_t launcher_inde
     size_t existing = sl_window_index_for_task(app);
     if (existing != (size_t)-1) {
         sl_window_rect_snapshot_t prev_focus = sl_window_snapshot_index(g_focused_window);
+        if (g_windows[existing].minimized) printf("starlight: window %s: back (dock)\n", g_windows[existing].title);
         g_windows[existing].minimized = 0u;   // the dock brings a minimized window back
         g_windows[existing].force_redraw = 1u;
         sl_window_rect_snapshot_t target = sl_window_snapshot_index(existing);
@@ -2734,6 +2836,57 @@ void sl_windows_toggle_maximize(sl_ctx_t *ctx) {
     (void)sl_windows_title_button_act(ctx, g_focused_window, SL_WIN_BTN_MAX);
 }
 
+// The windows from the keyboard (docs/system-apps-ux-plan.md, phase 4: Caps
+// with a key). Each acts as its mouse twin does.
+
+// Caps+Tab: the window at the bottom of the stack comes up, a minimized one
+// too; pressed again and again it goes through all of them.
+void sl_windows_key_next(sl_ctx_t *ctx) {
+    if (!ctx || !g_windows || g_window_count == 0u) return;
+    size_t pick = (size_t)-1;
+    for (size_t i = 0u; i < g_window_count; i++) {   // the lowest one not closing
+        if (!sl_window_is_closing(&g_windows[i])) { pick = i; break; }
+    }
+    if (pick == (size_t)-1) return;
+    if (pick == g_focused_window && !g_windows[pick].minimized) return;   // the only one, already in front
+    sl_window_rect_snapshot_t prev_focus = sl_window_snapshot_index(g_focused_window);
+    g_windows[pick].minimized = 0u;
+    g_windows[pick].force_redraw = 1u;
+    sl_focus_window(pick);
+    printf("starlight: window %s: in front (Caps+Tab)\n", g_windows[g_focused_window].title);
+    sl_windows_mark_focused_activity();
+    sl_dirty_add_snapshot(ctx, &prev_focus);
+    sl_window_rect_snapshot_t now = sl_window_snapshot_index(g_focused_window);
+    sl_dirty_add_snapshot(ctx, &now);
+}
+
+// Caps+W: the window in front closes, as with its X (an app with work not
+// saved asks first).
+void sl_windows_key_close(sl_ctx_t *ctx) {
+    if (!ctx || !g_windows || g_focused_window >= g_window_count) return;
+    if (g_windows[g_focused_window].minimized || sl_window_is_closing(&g_windows[g_focused_window])) return;
+    printf("starlight: window %s: close (Caps+W)\n", g_windows[g_focused_window].title);
+    (void)sl_windows_title_button_act(ctx, g_focused_window, SL_WIN_BTN_CLOSE);
+}
+
+// Caps+M: the window in front is minimized (the dock brings it back).
+void sl_windows_key_minimize(sl_ctx_t *ctx) {
+    if (!ctx || !g_windows || g_focused_window >= g_window_count) return;
+    if (g_windows[g_focused_window].minimized || sl_window_is_closing(&g_windows[g_focused_window])) return;
+    printf("starlight: window %s: minimized (Caps+M)\n", g_windows[g_focused_window].title);
+    (void)sl_windows_title_button_act(ctx, g_focused_window, SL_WIN_BTN_MIN);
+}
+
+// Caps+Space: the app manager opens (its search takes what is typed next), or closes.
+void sl_launcher_key_toggle(sl_ctx_t *ctx) {
+    if (!ctx || !sl_dock_ready(ctx)) return;
+    sl_launcher_toggle(ctx);
+    printf("starlight: app manager %s (Caps+Space)\n", g_launcher_expanded ? "open" : "closed");
+    sl_dock_layout_t L;
+    sl_dock_layout(ctx, &L);
+    sl_dock_dirty_panel(ctx, &L);
+}
+
 int sl_windows_title_button_release(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx || !g_title_press_active) return 0;
     int pressed = g_title_press_btn;
@@ -3137,6 +3290,12 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
             uint8_t action = picked ? g_launcher_ctx_actions[row] : 0u;
             size_t item_index = g_launcher_ctx_item_index;
             uint32_t ax = g_launcher_ctx_x, ay = g_launcher_ctx_y;
+            if (g_launcher_ctx_info && g_launcher_info_details_row >= 0 &&
+                row == (uint32_t)g_launcher_info_details_row) {
+                printf("starlight: app card %s: details\n", g_launcher_items[item_index].title);
+                sl_launcher_info_open(ctx, item_index, ax, ay, 1u);   // the card again, with the details
+                return 1;
+            }
             sl_launcher_context_close(ctx);   // before acting: Informazioni opens its own card
             if (picked) (void)sl_launcher_context_activate(ctx, item_index, action, ax, ay);
             return 1;
@@ -3189,6 +3348,16 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (sl_dock_hit_tile(&L, x, y, &index)) {
         g_dock_pressed = index;
         sl_dock_dirty_item(ctx, index);
+        // The app in front, clicked again: it goes down (minimized), as the
+        // dash of other desktops; any other click opens or brings it up.
+        app_instance_t *app = sl_app_host_instance_peek_at(g_launcher_items[index].slot);
+        size_t w = app ? sl_window_index_for_task(app) : (size_t)-1;
+        if (w != (size_t)-1 && w == g_focused_window && !g_windows[w].minimized &&
+            !sl_window_is_closing(&g_windows[w])) {
+            printf("starlight: window %s: minimized (dock)\n", g_windows[w].title);
+            (void)sl_windows_title_button_act(ctx, w, SL_WIN_BTN_MIN);
+            return 1;
+        }
         (void)sl_windows_open_launcher_item(ctx, index);
         return 1;
     }
@@ -3198,7 +3367,10 @@ int sl_launcher_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
 int sl_launcher_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx || g_dock.ready != 1u) return -1;
     if (g_launcher_ctx_open && sl_point_in_rect(x, y, g_launcher_ctx_x, g_launcher_ctx_y, g_launcher_ctx_w, g_launcher_ctx_h)) {
-        return g_launcher_ctx_info ? SL_CUR_ARROW : SL_CUR_HAND;
+        if (!g_launcher_ctx_info) return SL_CUR_HAND;
+        uint32_t row = y >= g_launcher_ctx_y + 1u ? (y - g_launcher_ctx_y - 1u) / SL_LAUNCHER_CTX_ROW_H : 0u;
+        return g_launcher_info_details_row >= 0 && row == (uint32_t)g_launcher_info_details_row ? SL_CUR_HAND
+                                                                                               : SL_CUR_ARROW;
     }
     sl_dock_layout_t L;
     sl_dock_layout(ctx, &L);
@@ -3628,7 +3800,7 @@ static void sl_dock_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, vo
         if (rows > 0u) {
             sl_context_menu_draw(ctx, g_launcher_ctx_x, g_launcher_ctx_y, g_launcher_ctx_w, g_launcher_ctx_h,
                                  SL_LAUNCHER_CTX_ROW_H, rows, 0u, rows,
-                                 g_launcher_ctx_info ? -1 : g_launcher_ctx_hover_row,
+                                 g_launcher_ctx_hover_row,
                                  0u, sl_launcher_context_label_cb, NULL);
         }
     }

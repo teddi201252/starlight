@@ -80,6 +80,11 @@ void sl_windows_resize_release(sl_ctx_t *ctx);
 // Remember where a window is (windows.cfg): it opens there again.
 void sl_windows_remember(const sl_window_t *win);
 void sl_windows_toggle_maximize(sl_ctx_t *ctx);
+// The windows from the keyboard (Caps+Tab, Caps+W, Caps+M, Caps+Space).
+void sl_windows_key_next(sl_ctx_t *ctx);
+void sl_windows_key_close(sl_ctx_t *ctx);
+void sl_windows_key_minimize(sl_ctx_t *ctx);
+void sl_launcher_key_toggle(sl_ctx_t *ctx);
 // A window (not minimized) covers x,y.
 int sl_windows_any_at(uint32_t x, uint32_t y);
 // Open (or bring forward) the app with this title, case aside: 0 if none.

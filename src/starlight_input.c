@@ -35,6 +35,7 @@ typedef struct {
     uint8_t swallow_s;
     uint8_t swallow_z, swallow_y;     // Caps+Z, Caps+Y: undo and redo (0.14.0)
     uint8_t swallow_d;                // Caps+D: cut
+    uint8_t swallow_win;              // Caps+Tab/W/M/Space: their releases (bit per key)
 } sl_actionmod_tracker_t;
 
 typedef struct {
@@ -114,6 +115,7 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             g_actionmod.swallow_z = 0u;
             g_actionmod.swallow_y = 0u;
             g_actionmod.swallow_d = 0u;
+            g_actionmod.swallow_win = 0u;
         } else {
             // Released before the clipboard opened, alone: a tap, however
             // long (between the tap and the hold time it did nothing).
@@ -129,6 +131,7 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             g_actionmod.swallow_z = 0u;
             g_actionmod.swallow_y = 0u;
             g_actionmod.swallow_d = 0u;
+            g_actionmod.swallow_win = 0u;
         }
         return 1u;
     }
@@ -166,6 +169,24 @@ static uint8_t sl_actionmod_filter_event(sl_input_frame_t *out,
             return 0u;
         } else {
             g_actionmod.swallow_d = 0u;
+        }
+        return 1u;
+    }
+    // The windows: Caps+Tab, Caps+W, Caps+M, Caps+Space (their releases are
+    // swallowed too, so the app never sees half a key).
+    if (code == PEOS_KEY_TAB || code == PEOS_KEY_W || code == PEOS_KEY_M || code == PEOS_KEY_SPACE) {
+        uint8_t bit = code == PEOS_KEY_TAB ? 1u : code == PEOS_KEY_W ? 2u : code == PEOS_KEY_M ? 4u : 8u;
+        if (ev->pressed) {
+            out->window_cmds |= code == PEOS_KEY_TAB ? SL_WIN_CMD_NEXT
+                              : code == PEOS_KEY_W   ? SL_WIN_CMD_CLOSE
+                              : code == PEOS_KEY_M   ? SL_WIN_CMD_MIN
+                                                     : SL_WIN_CMD_MANAGER;
+            g_actionmod.state = SL_ACTIONMOD_CHORD_USED;
+            g_actionmod.swallow_win |= bit;
+        } else if (!(g_actionmod.swallow_win & bit)) {
+            return 0u;
+        } else {
+            g_actionmod.swallow_win &= (uint8_t)~bit;
         }
         return 1u;
     }
