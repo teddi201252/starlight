@@ -1099,6 +1099,101 @@ static int orbit_fb_handle_line(orbit_shell_t *shell, const char *line) {
     return 1;
 }
 
+// Pictures of the apps (IMAGE_FILE): decoded once, made the size they are
+// shown at, and kept (the last ORBIT_IMG_CACHE). An app sends its frame
+// again at every step of a scroll: a folder of wallpapers was decoded whole
+// at every one of them (phase 3, "Choose a file").
+#define ORBIT_IMG_CACHE 64u
+typedef struct {
+    char path[256];
+    uint32_t w, h;          // the size asked
+    uint64_t mtime_ns;      // the file's, when it was read
+    uint64_t used;
+    uint8_t failed;
+    sl_image_t img;         // w x h (or smaller, when the file is)
+} orbit_img_entry_t;
+static orbit_img_entry_t g_img_cache[ORBIT_IMG_CACHE];
+static uint64_t g_img_tick;
+
+// src (its best level not smaller than w x h) averaged down to w x h.
+static int orbit_img_shrink(const sl_image_t *src, uint32_t w, uint32_t h, sl_image_t *out) {
+    const uint8_t *data = src->data;
+    uint32_t sw = src->width, sh = src->height, ss = src->stride;
+    for (uint32_t i = 0u; i < src->mip_count && i < SL_IMAGE_MIP_MAX; i++) {   // a smaller start, as big as needed
+        if (src->mip_width[i] < w || src->mip_height[i] < h || !src->mip_data[i]) break;
+        data = src->mip_data[i], sw = src->mip_width[i], sh = src->mip_height[i], ss = src->mip_stride[i];
+    }
+    if (w > sw) w = sw;
+    if (h > sh) h = sh;
+    if (!data || !w || !h || ss < sw * 4u) return 0;
+    uint8_t *px = (uint8_t *)malloc((size_t)w * h * 4u);
+    if (!px) return 0;
+    for (uint32_t y = 0u; y < h; y++) {
+        uint32_t y0 = (uint32_t)((uint64_t)y * sh / h), y1 = (uint32_t)((uint64_t)(y + 1u) * sh / h);
+        if (y1 <= y0) y1 = y0 + 1u;
+        for (uint32_t x = 0u; x < w; x++) {
+            uint32_t x0 = (uint32_t)((uint64_t)x * sw / w), x1 = (uint32_t)((uint64_t)(x + 1u) * sw / w);
+            if (x1 <= x0) x1 = x0 + 1u;
+            uint32_t acc[4] = { 0u, 0u, 0u, 0u }, n = 0u;
+            for (uint32_t yy = y0; yy < y1; yy++) {
+                const uint8_t *row = data + (size_t)yy * ss + (size_t)x0 * 4u;
+                for (uint32_t xx = x0; xx < x1; xx++, row += 4) {
+                    acc[0] += row[0], acc[1] += row[1], acc[2] += row[2], acc[3] += row[3];
+                    n++;
+                }
+            }
+            uint8_t *d = px + ((size_t)y * w + x) * 4u;
+            for (int c = 0; c < 4; c++) d[c] = (uint8_t)(acc[c] / n);
+        }
+    }
+    peos_memset(out, 0, sizeof(*out));
+    out->width = w;
+    out->height = h;
+    out->channels = 4u;
+    out->stride = w * 4u;
+    out->data = px;
+    return 1;
+}
+
+// The picture of path at w x h: from the cache, or read now. NULL if it cannot be read.
+static const sl_image_t *orbit_img_get(const char *path, uint32_t w, uint32_t h, int *failed_now) {
+    *failed_now = 0;
+    if (!path || !path[0] || !w || !h || strlen(path) >= sizeof(g_img_cache[0].path)) return NULL;
+    peos_stat_t st;
+    uint64_t mtime = (int64_t)peos_stat(path, strlen(path), &st, sizeof(st)) >= 0 ? st.mtime_ns : 0u;
+    orbit_img_entry_t *slot = &g_img_cache[0];
+    for (uint32_t i = 0u; i < ORBIT_IMG_CACHE; i++) {
+        orbit_img_entry_t *e = &g_img_cache[i];
+        if (e->path[0] && e->w == w && e->h == h && !strcmp(e->path, path) && e->mtime_ns == mtime) {
+            e->used = ++g_img_tick;
+            return e->failed ? NULL : &e->img;
+        }
+        if (!e->path[0] || e->used < slot->used) slot = e;   // a free one, or the oldest
+    }
+    for (uint32_t i = 0u; i < ORBIT_IMG_CACHE; i++)   // a free slot before an old one
+        if (!g_img_cache[i].path[0]) {
+            slot = &g_img_cache[i];
+            break;
+        }
+    if (slot->img.data) sl_image_free(&slot->img);
+    peos_memset(slot, 0, sizeof(*slot));
+    snprintf(slot->path, sizeof(slot->path), "%s", path);
+    slot->w = w, slot->h = h, slot->mtime_ns = mtime, slot->used = ++g_img_tick;
+    sl_image_t full;
+    peos_memset(&full, 0, sizeof(full));
+    if (!sl_decode_image_file(path, &full)) {
+        slot->failed = 1u;
+        *failed_now = 1;
+        return NULL;
+    }
+    if (!orbit_img_shrink(&full, w, h, &slot->img)) {
+        slot->img = full;   // could not shrink it: as it is
+        return &slot->img;
+    }
+    sl_image_free(&full);
+    return &slot->img;
+}
+
 static void orbit_ui_cmd_release(orbit_ui_cmd_t *cmd) {
     if (!cmd) return;
     orbit_cmd_text_free(cmd);
@@ -5641,17 +5736,10 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                        cmd->type == ORBIT_UI_CMD_TOOLTIP) {
                 // Registration-only control: rendered by host overlay on right click.
             } else if (cmd->type == ORBIT_UI_CMD_IMAGE_FILE) {
-                if (!cmd->image_loaded && !cmd->image_failed) {
-                    if (cmd->text && sl_decode_image_file(cmd->text, &cmd->image)) {
-                        cmd->image_loaded = 1u;
-                    } else {
-                        cmd->image_failed = 1u;
-                        orbit_send_ui_error(shell, ORBIT_SLUI_ERR_IMAGE_FILE, "image_file_decode_failed");
-                    }
-                }
-                if (cmd->image_loaded && cmd->image.data) {
-                    sl_ui_image(&shell->ui.ui, x, y, cmd->w, cmd->h, &cmd->image);
-                }
+                int failed_now = 0;
+                const sl_image_t *img = orbit_img_get(cmd->text, cmd->w, cmd->h, &failed_now);
+                if (failed_now) orbit_send_ui_error(shell, ORBIT_SLUI_ERR_IMAGE_FILE, "image_file_decode_failed");
+                if (img && img->data) sl_ui_image(&shell->ui.ui, x, y, cmd->w, cmd->h, img);
             }
 
             if (draw_nav_focus &&
