@@ -79,6 +79,10 @@ typedef struct {
     // dock=yes: among the apps the dock shows before anything is pinned;
     // any other app is in the app manager only, until the user pins it.
     uint8_t in_dock;
+    // hidden=yes: not in the app manager nor its search (a window another
+    // program opens, as File operations or Welcome); it still shows in the
+    // dock while it runs.
+    uint8_t hidden;
     char version[24];               // app.ini version= and author=: the app's card
     char author[96];
 } sl_app_bundle_t;
@@ -107,6 +111,7 @@ typedef struct {
     uint32_t min_width, min_height, max_width, max_height;   // app.ini, body (0: none)
     uint8_t fixed_size;
     uint8_t in_dock;                // app.ini dock=yes
+    uint8_t hidden;                 // app.ini hidden=yes: not in the app manager
     uint64_t signature;
     app_instance_t *instance;
     // Dock and app manager tiles (render/slsk.h), resolved on first draw.
@@ -565,6 +570,8 @@ static int sl_load_app_bundle(const char *manifest_path, const char *bundle_dir,
             out->fixed_size = (strcmp(val, "0") == 0 || strcmp(val, "no") == 0) ? 1u : 0u;
         } else if (strcmp(key, "dock") == 0) {
             out->in_dock = (strcmp(val, "1") == 0 || strcmp(val, "yes") == 0) ? 1u : 0u;
+        } else if (strcmp(key, "hidden") == 0) {
+            out->hidden = (strcmp(val, "1") == 0 || strcmp(val, "yes") == 0) ? 1u : 0u;
         } else if (strcmp(key, "version") == 0) {
             sl_copy_str(out->version, sizeof(out->version), val);
         } else if (strcmp(key, "author") == 0) {
@@ -641,6 +648,7 @@ static uint64_t sl_catalog_signature(const sl_scanned_app_t *entry) {
     hash = sl_catalog_hash_bytes(hash, &entry->app.category, sizeof(entry->app.category));
     hash = sl_catalog_hash_bytes(hash, &entry->app.min_width, sizeof(entry->app.min_width) * 4u);
     hash = sl_catalog_hash_bytes(hash, &entry->app.fixed_size, sizeof(entry->app.fixed_size));
+    hash = sl_catalog_hash_bytes(hash, &entry->app.hidden, sizeof(entry->app.hidden));
     return sl_catalog_hash_bytes(hash, &entry->app.height, sizeof(entry->app.height));
 }
 
@@ -860,6 +868,7 @@ static int sl_launcher_add_item(size_t slot, const sl_app_bundle_t *app,
     item->max_height = app->max_height;
     item->fixed_size = app->fixed_size;
     item->in_dock = app->in_dock;
+    item->hidden = app->hidden;
     item->instance = NULL;
     item->icon_loaded = 0u;
     item->icon_failed = 0u;
@@ -1235,6 +1244,7 @@ static void sl_mgr_filter(sl_dock_layout_t *L) {
     L->mgr_count = 0u;
     for (size_t i = 0u; i < g_launcher_count && L->mgr_count < SL_MGR_ITEMS_MAX; i++) {
         const sl_launcher_item_t *item = &g_launcher_items[i];
+        if (item->hidden) continue;
         // A search looks in every category (the chosen one stays for later).
         if (!g_mgr_query[0] && g_mgr_cat != SL_CAT_ALL && item->category != g_mgr_cat) continue;
         if (!sl_mgr_matches(item, g_mgr_query)) continue;
@@ -2699,6 +2709,7 @@ static int sl_launcher_reconcile_catalog(sl_ctx_t *ctx,
         item->max_height = entry->app.max_height;
         item->fixed_size = entry->app.fixed_size;
         item->in_dock = entry->app.in_dock;
+        item->hidden = entry->app.hidden;
         item->signature = entry->signature;
         item->instance = sl_app_host_instance_peek_at(slot);
         sl_copy_str(item->title, sizeof(item->title), entry->app.title);
@@ -4211,8 +4222,10 @@ static void sl_mgr_draw(sl_ctx_t *ctx, const sl_dock_layout_t *Lp, const sl_targ
     sl_mgr_header(&L, &H);
     if (H.show_count) {
         char count[64];
-        if (L.mgr_count == g_launcher_count) snprintf(count, sizeof(count), sl_tr_n("apps.count_all", (uint32_t)g_launcher_count), (unsigned)g_launcher_count);
-        else snprintf(count, sizeof(count), sl_tr("apps.count_some"), (unsigned)L.mgr_count, (unsigned)g_launcher_count);
+        size_t shown = 0u;   // the apps the manager can show (not hidden=yes)
+        for (size_t i = 0u; i < g_launcher_count; i++) shown += g_launcher_items[i].hidden ? 0u : 1u;
+        if (L.mgr_count == shown) snprintf(count, sizeof(count), sl_tr_n("apps.count_all", (uint32_t)shown), (unsigned)shown);
+        else snprintf(count, sizeof(count), sl_tr("apps.count_some"), (unsigned)L.mgr_count, (unsigned)shown);
         sl_text_draw(&in, g_dock.label, end + 14, base, count, SL_DOCK_MUTED);
     }
 
