@@ -537,6 +537,7 @@ static void sl_write_default_starlight_config(void) {
     (void)fprintf(f, "clipboard_manager_hold_ms=400\n");
     (void)fprintf(f, "clipboard_feedback_audio=1\n");
     (void)fprintf(f, "clipboard_feedback_visual=1\n");
+    (void)fprintf(f, "start_sound=1\n");
     (void)fprintf(f, "graphics_perf=0\n");
     (void)fprintf(f, "show_performance=0\n");
     (void)fprintf(f, "timezone=Europe/Rome\n");
@@ -653,6 +654,7 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->clipboard_manager_hold_ms = SL_CLIPBOARD_MANAGER_HOLD_MS_DEFAULT;
     ctx->clipboard_feedback_audio_enabled = SL_CLIPBOARD_FEEDBACK_AUDIO_DEFAULT;
     ctx->clipboard_feedback_visual_enabled = SL_CLIPBOARD_FEEDBACK_VISUAL_DEFAULT;
+    ctx->start_sound = 1u;
     ctx->graphics_perf_enabled = 0u;
     ctx->show_perf = 0u;
     ctx->timezone = (uint8_t)peos_tz_find(PEOS_TZ_DEFAULT);
@@ -748,6 +750,9 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     if (sl_parse_u32(val, &n)) {
                         ctx->clipboard_feedback_audio_enabled = n ? 1u : 0u;
                     }
+                } else if (strcmp(key, "start_sound") == 0) {
+                    uint32_t n = 0;
+                    if (sl_parse_u32(val, &n)) ctx->start_sound = n ? 1u : 0u;
                 } else if (strcmp(key, "clipboard_feedback_visual") == 0) {
                     uint32_t n = 0;
                     if (sl_parse_u32(val, &n)) {

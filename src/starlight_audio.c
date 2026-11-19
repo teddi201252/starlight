@@ -7,7 +7,7 @@ static Mix_Music *g_startup_music = NULL;
 static Mix_Music *g_copy_effect_music = NULL;
 static int g_audio_open = 0;
 
-void sl_audio_init(void) {
+void sl_audio_init(uint8_t start_sound) {
     if (Mix_OpenAudio(44100, AUDIO_S16SYS, 2, 1024) != 0) {
         fprintf(stderr, "starlight: Mix_OpenAudio failed: %s\n", Mix_GetError());
         return;
@@ -28,7 +28,8 @@ void sl_audio_init(void) {
                 SL_RESOURCE_COPYEFF_WAV, Mix_GetError());
     }
 
-    if (g_startup_music && Mix_PlayMusic(g_startup_music, 0) != 0) {
+    printf("starlight: start sound %s\n", start_sound ? "on" : "off");
+    if (start_sound && g_startup_music && Mix_PlayMusic(g_startup_music, 0) != 0) {
         fprintf(stderr, "starlight: Mix_PlayMusic failed: %s\n", Mix_GetError());
     }
 }

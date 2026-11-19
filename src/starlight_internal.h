@@ -25,7 +25,7 @@ typedef enum {
     SL_CUR_COUNT
 } sl_cursor_kind_t;
 
-void sl_audio_init(void);
+void sl_audio_init(uint8_t start_sound);   // start_sound: play start.wav now (Settings, Audio)
 void sl_audio_shutdown(void);
 void sl_audio_play_copy_effect(void);
 

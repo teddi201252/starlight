@@ -59,6 +59,7 @@ typedef struct {
     uint32_t keyboard_repeat_rate_hz;
     uint32_t clipboard_manager_hold_ms;
     uint8_t clipboard_feedback_audio_enabled;
+    uint8_t start_sound;            // settings.cfg start_sound: start.wav when the desktop shows
     uint8_t clipboard_feedback_visual_enabled;
     uint8_t graphics_perf_enabled;
     uint8_t check_damage;          // --check-damage: each frame checked against one composed whole

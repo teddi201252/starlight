@@ -3,6 +3,7 @@
 #include "perf_stats.h"
 #include "desktop.h"
 #include "notify.h"
+#include "stick.h"
 #include "music.h"
 #include "sysmenu.h"
 #include "render/pixels.h"
@@ -162,7 +163,7 @@ int main(int argc, char **argv) {
         }
     }
     sl_cursor_init(&ctx);   // again, now that the skin (and its cursors) is there
-    sl_audio_init();
+    sl_audio_init(ctx.start_sound);
     peos_puts("starlight: minimal skeleton running\n");
     if (ctx.fb_direct) {
         peos_puts("starlight: renderer mode = fbmap zero-copy\n");
@@ -255,6 +256,7 @@ int main(int argc, char **argv) {
             sl_perf_add_desk(peos_time_ns() - d0);
         }
         sl_notify_tick(&ctx);
+        sl_stick_tick(&ctx);   // a stick mounted: Curiosity on it, if asked
         sl_music_tick(&ctx);
         sl_fps_tick(&ctx);
 
