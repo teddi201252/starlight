@@ -365,6 +365,15 @@ int sl_keyboard_layout_load(const char *name_or_path) {
 }
 
 size_t sl_keyboard_translate(uint16_t keycode, uint32_t mods, char *out, size_t out_cap) {
+    // An extended key (E0 xx: the arrows, Home, Delete, the keypad's Enter)
+    // writes nothing: its low byte is another key's position (E0 48, up, is
+    // the keypad's 8). Only the keypad's / writes, the same in every layout.
+    if ((keycode & 0xFF00u) == 0xE000u) {
+        if (!out || out_cap < 2u) return 0u;
+        out[0] = keycode == 0xE035u ? '/' : '\0';
+        out[1] = '\0';
+        return out[0] ? 1u : 0u;
+    }
     uint16_t code = sl_keymap_norm_keycode(keycode);
     uint8_t shift = (mods & SL_KEYMOD_SHIFT) ? 1u : 0u;
     uint8_t altgr = (mods & SL_KEYMOD_ALTGR) ? 1u : 0u;
@@ -405,7 +414,7 @@ size_t sl_keyboard_translate_event(const peos_input_event_t *event,
     }
     if (effective_shift) mods |= SL_KEYMOD_SHIFT;
     if (altgr_down) mods |= SL_KEYMOD_ALTGR;
-    return sl_keyboard_translate(code, mods, out, out_cap);
+    return sl_keyboard_translate(event->code, mods, out, out_cap);   // the whole code: E0 keys write nothing
 }
 
 uint8_t sl_keyboard_event_is_altgr(const peos_input_event_t *event) {
