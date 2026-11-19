@@ -205,6 +205,7 @@ const sl_ui_color_t *sl_ui_runtime_color(sl_ui_color_token_t token);
 uint8_t sl_ui_outline_alpha(const sl_ui_color_t *outline, const sl_ui_color_t *dark, const sl_ui_color_t *light);
 uint8_t sl_ui_runtime_night(void);
 uint32_t sl_ui_runtime_version(void);
+void sl_ui_runtime_touch(void);   // the version moves on (the skin baked again)
 void sl_ui_theme_apply(sl_ui_ctx_t *ui, const sl_ui_theme_t *theme);
 void sl_ui_theme_reset(sl_ui_ctx_t *ui);
 void sl_ui_theme_set_accent(sl_ui_ctx_t *ui, uint8_t r, uint8_t g, uint8_t b);

@@ -140,6 +140,13 @@ void sl_ui_theme_runtime_set(const sl_ui_theme_t *theme) {
     if (g_runtime_theme_version == 0u) g_runtime_theme_version = 1u;
 }
 
+// The theme's colours did not change but what is drawn with them did (the
+// skin baked again from them): everything that kept something looks again.
+void sl_ui_runtime_touch(void) {
+    g_runtime_theme_version++;
+    if (g_runtime_theme_version == 0u) g_runtime_theme_version = 1u;
+}
+
 void sl_ui_theme_runtime_get(sl_ui_theme_t *out) {
     if (!out) return;
     if (!g_runtime_theme_initialized) {

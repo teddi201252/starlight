@@ -59,7 +59,13 @@ typedef struct {
     int radius, height;
 } skb_entry_t;
 
+// A coverage mask by name (for "shape"): the tool's own entries, or the
+// main skin's in Starlight. NULL if there is none.
+typedef const uint8_t *(*skb_mask_fn)(void *user, const char *name, int *w, int *h);
+
 typedef struct {
+    skb_mask_fn mask;           // how "shape" finds its mask
+    void *mask_user;
     skb_rgb_t ground;           // what opaque sprites are composed on
     skb_var_t vars[SKB_MAX_VARS];
     int var_count;
@@ -86,7 +92,8 @@ int skb_var_set(skb_t *s, const char *name, skb_rgb_t rgb, float alpha, int over
 int skb_color(skb_t *s, const char *text, skb_rgb_t *out, float *alpha);
 
 // One recipe line already split in tokens, if it is one of the lines that
-// are about colours: color, ground, style, surface, tilebase. 1 done, 0 not
+// are about colours: color, ground, style, surface, tilebase, shape (with
+// s->mask). 1 done, 0 not
 // one of these (the caller's), -1 wrong (s->error).
 int skb_recipe_line(skb_t *s, char **tok, int n);
 const skb_style_t *skb_find_style(const skb_t *s, const char *name);
@@ -108,6 +115,13 @@ int skb_surface(skb_t *s, const char *name, const skb_style_t *st, int radius, i
 // An empty tile ("SET-blank"); the tool's tiles with an icon draw it over.
 int skb_tile(skb_t *s, const char *name, const skb_style_t *st, int size, int radius, int alpha,
              void (*icon)(skb_canvas_t *c, float x, float y, void *user), void *user);
+
+// A shape from a coverage mask (sw x sh) with STYLE: its outer shadows cast
+// by the mask, filled with the style's fill, its outline (none along the
+// open sides, where the shape goes on in what it is drawn against);
+// premultiplied.
+enum { SKB_OPEN_LEFT = 1, SKB_OPEN_RIGHT = 2, SKB_OPEN_TOP = 4, SKB_OPEN_BOTTOM = 8 };
+int skb_shape(skb_t *s, const char *name, const skb_style_t *st, const uint8_t *cov, int sw, int sh, int open);
 
 // The whole file (header, table, data) in one malloc'd buffer: its size, 0
 // when there is no memory.

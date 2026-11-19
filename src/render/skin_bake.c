@@ -555,6 +555,87 @@ int skb_tile(skb_t *s, const char *name, const skb_style_t *st, int size, int ra
     return 0;
 }
 
+// A shape from a coverage mask: what a CSS drop-shadow does with an SVG's
+// alpha (the app manager's fin), the fill and the outline from the style.
+int skb_shape(skb_t *s, const char *name, const skb_style_t *st, const uint8_t *cov, int sw, int sh, int open) {
+    int pad[4];
+    skb_style_pads(st, pad);
+    int w = pad[0] + sw + pad[2], h = pad[1] + sh + pad[3];
+    size_t n = (size_t)w * h;
+    float *shape = calloc(n, sizeof(float));
+    float *m = calloc(n, sizeof(float));
+    skb_canvas_t c = skb_canvas_new(w, h);
+    if (!shape || !m || !c.px) {
+        free(shape);
+        free(m);
+        free(c.px);
+        fail(s, "out of memory", name);
+        return -1;
+    }
+    for (int y = 0; y < sh; y++) {
+        for (int x = 0; x < sw; x++) shape[(size_t)(y + pad[1]) * w + x + pad[0]] = cov[(size_t)y * sw + x] / 255.0f;
+    }
+    for (int i = st->outer_count - 1; i >= 0; i--) {
+        const skb_shadow_t *sd = &st->outer[i];
+        if (sd->alpha <= 0.0f) continue;   // a transparent one (the theme's)
+        int dx = roundi(sd->dx), dy = roundi(sd->dy);
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int sx = x - dx, sy = y - dy;
+                m[(size_t)y * w + x] = (sx >= 0 && sy >= 0 && sx < w && sy < h) ? shape[(size_t)sy * w + sx] : 0.0f;
+            }
+        }
+        skb_blur(m, w, h, sd->blur * 0.5f);
+        skb_canvas_paint(&c, m, sd->color, sd->alpha);
+    }
+    skb_canvas_paint(&c, shape, st->fill, 1.0f);
+    if (st->stroke_alpha > 0.0f) {   // the outline: the shape less the shape a pixel thinner
+        // On an open side (SKB_OPEN_*) the shape goes on in what it is drawn
+        // against (the fin in the dock): no outline along it.
+        int x0 = pad[0], y0 = pad[1], x1 = pad[0] + sw - 1, y1 = pad[1] + sh - 1;
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                float v = shape[(size_t)y * w + x], in = v;
+                if (v <= 0.0f) {
+                    m[(size_t)y * w + x] = 0.0f;
+                    continue;
+                }
+                float l = (x == x0 && (open & SKB_OPEN_LEFT)) ? v : x > 0 ? shape[(size_t)y * w + x - 1] : 0.0f;
+                float r = (x == x1 && (open & SKB_OPEN_RIGHT)) ? v : x < w - 1 ? shape[(size_t)y * w + x + 1] : 0.0f;
+                float t = (y == y0 && (open & SKB_OPEN_TOP)) ? v : y > 0 ? shape[(size_t)(y - 1) * w + x] : 0.0f;
+                float b = (y == y1 && (open & SKB_OPEN_BOTTOM)) ? v : y < h - 1 ? shape[(size_t)(y + 1) * w + x] : 0.0f;
+                if (l < in) in = l;
+                if (r < in) in = r;
+                if (t < in) in = t;
+                if (b < in) in = b;
+                m[(size_t)y * w + x] = v - in;
+            }
+        }
+        skb_canvas_paint(&c, m, st->stroke, st->stroke_alpha);
+    }
+    free(m);
+    free(shape);
+    skb_entry_t *en = skb_add_entry(s, name, SLSK_KIND_PREMUL);
+    if (!en) {
+        free(c.px);
+        return -1;
+    }
+    en->e.width = (uint16_t)w;
+    en->e.height = (uint16_t)h;
+    en->e.pad_l = (uint16_t)pad[0];
+    en->e.pad_t = (uint16_t)pad[1];
+    en->e.pad_r = (uint16_t)pad[2];
+    en->e.pad_b = (uint16_t)pad[3];
+    en->data = skb_canvas_bgra(&c);
+    en->e.size = (uint32_t)w * h * 4u;
+    free(c.px);
+    if (!en->data) {
+        fail(s, "out of memory", name);
+        return -1;
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------- the recipe
 
 int skb_recipe_line(skb_t *s, char **tok, int n) {
@@ -624,6 +705,33 @@ int skb_recipe_line(skb_t *s, char **tok, int n) {
             else height = atoi(tok[i]);
         }
         return skb_surface(s, tok[1], st, atoi(tok[3]), height, alpha) == 0 ? 1 : -1;
+    }
+    if (!strcmp(tok[0], "shape") && (n == 4 || n == 5) && s->mask) {   // shape NAME MASK STYLE [open=SIDES]
+        int open = 0;
+        if (n == 5) {
+            if (strncmp(tok[4], "open=", 5) != 0) {
+                fail(s, "unknown shape field", tok[4]);
+                return -1;
+            }
+            for (const char *p = tok[4] + 5; *p; p++) {
+                if (!strncmp(p, "left", 4)) open |= SKB_OPEN_LEFT, p += 3;
+                else if (!strncmp(p, "right", 5)) open |= SKB_OPEN_RIGHT, p += 4;
+                else if (!strncmp(p, "top", 3)) open |= SKB_OPEN_TOP, p += 2;
+                else if (!strncmp(p, "bottom", 6)) open |= SKB_OPEN_BOTTOM, p += 5;
+                else if (*p != ',') {
+                    fail(s, "unknown side", tok[4]);
+                    return -1;
+                }
+            }
+        }
+        const skb_style_t *st = skb_find_style(s, tok[3]);
+        int mw = 0, mh = 0;
+        const uint8_t *cov = s->mask(s->mask_user, tok[2], &mw, &mh);
+        if (!st || !cov) {
+            fail(s, st ? "unknown mask" : "unknown style", st ? tok[2] : tok[3]);
+            return -1;
+        }
+        return skb_shape(s, tok[1], st, cov, mw, mh, open) == 0 ? 1 : -1;
     }
     if (!strcmp(tok[0], "tilebase") && (n == 5 || (n == 6 && !strcmp(tok[5], "alpha")))) {
         // The tile alone, as "SET-blank": the icon comes on top at run time.

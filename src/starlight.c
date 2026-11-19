@@ -256,6 +256,7 @@ int main(int argc, char **argv) {
             sl_desk_tick(&ctx);
             sl_perf_add_desk(peos_time_ns() - d0);
         }
+        sl_skin_colors_tick(&ctx);   // a skin baked on its thread, when it is ready
         sl_notify_tick(&ctx);
         sl_stick_tick(&ctx);   // a stick mounted: Curiosity on it, if asked
         sl_music_tick(&ctx);

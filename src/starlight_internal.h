@@ -38,6 +38,8 @@ void sl_reload_theme(sl_ctx_t *ctx);
 // The skin's surfaces in the theme's colours, baked or from the cache
 // (skin_colors.c, docs/skin-colors-plan.md).
 void sl_skin_colors_apply(sl_ctx_t *ctx);
+// A skin baked on its thread put on when it is done (every frame).
+void sl_skin_colors_tick(sl_ctx_t *ctx);
 int sl_handle_input(sl_ctx_t *ctx);
 void sl_render_full(sl_ctx_t *ctx);
 void sl_render_dirty_background(sl_ctx_t *ctx);
