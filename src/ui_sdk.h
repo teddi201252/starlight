@@ -104,6 +104,16 @@ typedef struct {
     // A password field (SLUI SDK 1.0.16, PeOS 0.16.0): its text drawn as
     // asterisks, never copied to the clipboard; the same user as above.
     uint8_t (*field_secret)(void *user, uint32_t id);
+    // A text area's extras (SLUI SDK 1.0.19, Voyager): SL_UI_TA_* flags of
+    // the app's for it (0: none), and its marks (what a search found): n
+    // ranges of bytes [start, end) in pairs, current the one shown first.
+    // The same user as field_menu_app.
+    uint32_t (*text_area_flags)(void *user, uint32_t id);
+    uint32_t (*text_area_marks)(void *user, uint32_t id, const uint32_t **ranges, uint32_t *current);
+    uint32_t text_area_mark_seen;     // the current mark's start the view was last brought to
+    // A selection the app asked for (TEXT_SELECT): the area takes the
+    // keyboard, selects [start, end) and shows it at its next pass.
+    uint32_t text_area_select_id, text_area_select_start, text_area_select_end;
     struct peos_text_undo *undo;      // the history of the field with the caret (peos/text_undo.h, malloc'd)
     sl_ui_theme_t theme;
     uint8_t theme_initialized;
@@ -274,6 +284,11 @@ uint8_t sl_ui_text_area(sl_ui_ctx_t *ui, uint32_t id,
                         uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                         char *text, uint32_t text_cap,
                         const peos_input_event_t *events, uint8_t event_count);
+// sl_ui_ctx_t.text_area_flags
+#define SL_UI_TA_LINE_NUMBERS 1u   // the lines' numbers in a column on the left
+#define SL_UI_TA_CURRENT_LINE 2u   // the caret's line marked while it has the keyboard
+#define SL_UI_TA_CARET_EVENTS 4u   // the app is told where the caret is (TEXT_CARET)
+
 uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
                               uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                               char *text, uint32_t text_cap,

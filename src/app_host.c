@@ -147,6 +147,8 @@ typedef enum {
     ORBIT_UI_CMD_TEXT_HINT = 32, // TEXT_HINT field text: shown in the empty field (value: the field)
     ORBIT_UI_CMD_TEXT_SECRET = 33, // TEXT_SECRET field: a password field, asterisks (value: the field)
     ORBIT_UI_CMD_TOOLTIP = 34,   // TOOLTIP id text: a tip under the control id when the mouse rests on it
+    ORBIT_UI_CMD_TEXT_OPTS = 35, // TEXT_OPTS id flags: a text area's extras (value: the area, x: SL_UI_TA_*)
+    ORBIT_UI_CMD_TEXT_MARKS = 36, // TEXT_MARKS id current n s e ...: what a search found in it (value: the area)
 } orbit_ui_cmd_type_t;
 
 typedef struct {
@@ -349,6 +351,7 @@ typedef struct {
     // asks the app (EVENT CLOSE_REQUEST) instead of ending it. An app that does
     // not answer (no frame) within ORBIT_CLOSE_FORCE_NS is closed at the next try.
     uint8_t close_guard;
+    uint32_t caret_sent_id, caret_sent_pos, caret_sent_anchor;   // the last TEXT_CARET told
     // The tip of the control under the mouse (SLUI SDK 1.0.18, TOOLTIP):
     // shown after ORBIT_TIP_DELAY_NS still on it, at tip[] in the body.
     uint32_t tip_hover;
@@ -1518,6 +1521,37 @@ static const char *orbit_text_menu_options(void *user, uint32_t id) {
     return NULL;
 }
 
+static uint32_t orbit_text_area_flags(void *user, uint32_t id) {
+    const orbit_shell_t *shell = (const orbit_shell_t *)user;
+    for (size_t i = 0u; shell && shell->ui.cmds && i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+        if (cmd->type == ORBIT_UI_CMD_TEXT_OPTS && cmd->value == id) return cmd->x;
+    }
+    return 0u;
+}
+
+// "current n s e s e ...": at most ORBIT_TEXT_MARKS_MAX ranges.
+#define ORBIT_TEXT_MARKS_MAX 256u
+static uint32_t orbit_text_area_marks(void *user, uint32_t id, const uint32_t **ranges, uint32_t *current) {
+    static uint32_t buf[2u * ORBIT_TEXT_MARKS_MAX];
+    const orbit_shell_t *shell = (const orbit_shell_t *)user;
+    for (size_t i = 0u; shell && shell->ui.cmds && i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+        if (cmd->type != ORBIT_UI_CMD_TEXT_MARKS || cmd->value != id || !cmd->text) continue;
+        const char *q = cmd->text;
+        uint32_t cur = 0u, n = 0u;
+        if (!orbit_parse_u32(&q, &cur) || !orbit_parse_u32(&q, &n)) return 0u;
+        if (n > ORBIT_TEXT_MARKS_MAX) n = ORBIT_TEXT_MARKS_MAX;
+        uint32_t k = 0u;
+        for (; k < n; k++)
+            if (!orbit_parse_u32(&q, &buf[2u * k]) || !orbit_parse_u32(&q, &buf[2u * k + 1u])) break;
+        *ranges = buf;
+        *current = cur;
+        return k;
+    }
+    return 0u;
+}
+
 static const char *orbit_text_hint(void *user, uint32_t id) {
     const orbit_shell_t *shell = (const orbit_shell_t *)user;
     for (size_t i = 0u; shell && shell->ui.cmds && i < shell->ui.cmd_count; i++) {
@@ -1922,6 +1956,8 @@ static uint8_t orbit_ui_cmd_reach(sl_ui_ctx_t *ui, const orbit_ui_cmd_t *cmd, in
     case ORBIT_UI_CMD_TEXT_HINT:
     case ORBIT_UI_CMD_TEXT_SECRET:
     case ORBIT_UI_CMD_TOOLTIP:
+    case ORBIT_UI_CMD_TEXT_OPTS:
+    case ORBIT_UI_CMD_TEXT_MARKS:
         return 0u;
     default:
         if (cmd->w == 0u || cmd->h == 0u) return 0u;
@@ -2179,6 +2215,18 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         // OPEN_FILE <bundle> <file> (SLUI SDK 1.0.12): both escaped, the
         // bundle's spaces as "\\ ", so its first plain space parts them. The
         // app is opened, and told the file when ready.
+        if (orbit_token_is(host_tok, host_len, "TEXT_SELECT")) {   // "HOST TEXT_SELECT id start end" (SLUI SDK 1.0.19)
+            uint32_t id = 0u, a = 0u, b = 0u;
+            if (!orbit_parse_u32(&p, &id) || !orbit_parse_u32(&p, &a) || !orbit_parse_u32(&p, &b)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "text_select_invalid_args");
+                return 1;
+            }
+            shell->ui.ui.text_area_select_id = id;
+            shell->ui.ui.text_area_select_start = a < b ? a : b;
+            shell->ui.ui.text_area_select_end = a < b ? b : a;
+            shell->body_changed = 1u;
+            return 1;
+        }
         if (orbit_token_is(host_tok, host_len, "CLOSE_GUARD")) {   // "HOST CLOSE_GUARD 0|1"
             uint32_t on = 0u;
             if (!orbit_parse_u32(&p, &on)) {
@@ -2605,6 +2653,30 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             return 1;
         }
         cmd->id = 0u;
+        return 1;
+    }
+    // A text area's extras and marks (SLUI SDK 1.0.19, Voyager): said every
+    // frame, after the area, as TEXT_HINT.
+    if (orbit_token_is(cmd_tok, cmd_len, "TEXT_OPTS")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TEXT_OPTS);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->value) || !orbit_parse_u32(&p, &cmd->x)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "text_opts_invalid_args");
+            return 1;
+        }
+        cmd->id = 0u;
+        return 1;
+    }
+    if (orbit_token_is(cmd_tok, cmd_len, "TEXT_MARKS")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TEXT_MARKS);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->value)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "text_marks_invalid_args");
+            return 1;
+        }
+        cmd->id = 0u;
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "text_marks_alloc_failed");
         return 1;
     }
     if (orbit_token_is(cmd_tok, cmd_len, "TOOLTIP")) {   // SLUI SDK 1.0.18
@@ -4608,6 +4680,8 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_TEXT_HINT:
         case ORBIT_UI_CMD_TEXT_SECRET:
         case ORBIT_UI_CMD_TOOLTIP:
+        case ORBIT_UI_CMD_TEXT_OPTS:
+        case ORBIT_UI_CMD_TEXT_MARKS:
         case ORBIT_UI_CMD_SCROLL_V:
         case ORBIT_UI_CMD_PIXELS: {   // the app's own pixels: the pointer it asked for
             static const int k_kinds[4] = { SL_CUR_ARROW, SL_CUR_HAND, SL_CUR_TEXT, SL_CUR_NONE };
@@ -5266,6 +5340,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         shell->ui.ui.field_menu_app_user = shell;
         shell->ui.ui.field_hint = orbit_text_hint;
         shell->ui.ui.field_secret = orbit_text_secret;
+        shell->ui.ui.text_area_flags = orbit_text_area_flags;
+        shell->ui.ui.text_area_marks = orbit_text_area_marks;
         if (shell->ui.mouse_pressed) shell->ui.keyboard_nav_active = 0u;
         sl_ui_set_font_px(&shell->ui.ui, 0u);
         if (shell->ui.theme_override_enabled) {
@@ -5623,6 +5699,21 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                                           en)) {
                     orbit_send_ui_event_text_area(shell, cmd->id, cmd->text);
                 }
+                if ((orbit_text_area_flags(shell, cmd->id) & SL_UI_TA_CARET_EVENTS) &&
+                    shell->ui.ui.text_caret_id == cmd->id) {   // where the caret is, when it moved
+                    uint32_t pos = shell->ui.ui.text_caret_pos;
+                    uint32_t anchor = shell->ui.ui.text_select_id == cmd->id ? shell->ui.ui.text_select_anchor_pos : pos;
+                    if (pos != shell->caret_sent_pos || anchor != shell->caret_sent_anchor ||
+                        cmd->id != shell->caret_sent_id) {
+                        shell->caret_sent_pos = pos;
+                        shell->caret_sent_anchor = anchor;
+                        shell->caret_sent_id = cmd->id;
+                        char msg[80];
+                        int n = snprintf(msg, sizeof(msg), "@SLUI EVENT TEXT_CARET %u %u %u\n", (unsigned)cmd->id,
+                                         (unsigned)pos, (unsigned)anchor);
+                        if (n > 0 && shell->child_stdin_fd >= 0) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
+                    }
+                }
             } else if (cmd->type == ORBIT_UI_CMD_SCROLL_V) {
                 uint32_t prev = cmd->value;
                 uint8_t en = cmd_enabled;
@@ -5733,7 +5824,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 orbit_draw_grad2d(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->grad);
             } else if (cmd->type == ORBIT_UI_CMD_CONTEXT_MENU || cmd->type == ORBIT_UI_CMD_TEXT_MENU ||
                        cmd->type == ORBIT_UI_CMD_TEXT_HINT || cmd->type == ORBIT_UI_CMD_TEXT_SECRET ||
-                       cmd->type == ORBIT_UI_CMD_TOOLTIP) {
+                       cmd->type == ORBIT_UI_CMD_TOOLTIP || cmd->type == ORBIT_UI_CMD_TEXT_OPTS ||
+                       cmd->type == ORBIT_UI_CMD_TEXT_MARKS) {
                 // Registration-only control: rendered by host overlay on right click.
             } else if (cmd->type == ORBIT_UI_CMD_IMAGE_FILE) {
                 int failed_now = 0;

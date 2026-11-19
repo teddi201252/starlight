@@ -512,7 +512,9 @@ static void sl_ui_text_input_copy_point(const sl_ui_ctx_t *ui,
     *out_y = (int32_t)(text_y + (sl_ui_font_h(ui) / 2u));
 }
 
-static void sl_ui_text_area_copy_point(const sl_ui_ctx_t *ui,
+static uint32_t sl_ui_ta_gutter(const sl_ui_ctx_t *ui, uint32_t id, const char *text, uint32_t *digits_out);
+
+static void sl_ui_text_area_copy_point(const sl_ui_ctx_t *ui, uint32_t id,
                                        uint32_t x, uint32_t y,
                                        const char *text,
                                        int32_t *out_x, int32_t *out_y) {
@@ -524,7 +526,7 @@ static void sl_ui_text_area_copy_point(const sl_ui_ctx_t *ui,
     caret_line = sl_ui_text_line_col_at(text, ui->text_caret_pos, &caret_col);
     draw_col = (caret_col > ui->text_area_scroll_col) ? (caret_col - ui->text_area_scroll_col) : 0u;
     draw_line = (caret_line > ui->text_area_scroll_line) ? (caret_line - ui->text_area_scroll_line) : 0u;
-    *out_x = (int32_t)(x + 6u + (draw_col * fw));
+    *out_x = (int32_t)(x + 6u + sl_ui_ta_gutter(ui, id, text, NULL) + (draw_col * fw));
     *out_y = (int32_t)(y + 6u + (draw_line * fh) + (fh / 2u));
 }
 
@@ -2001,15 +2003,37 @@ static uint32_t sl_ui_text_pos_from_line_col(const char *text, uint32_t target_l
     return sl_ui_utf8_advance_cols(text, line_start, line_end, target_col);
 }
 
-static uint32_t sl_ui_text_area_hit_pos(sl_ui_ctx_t *ui,
+static uint32_t sl_ui_text_total_lines(const char *text);
+
+// The flags the app gave this text area (SL_UI_TA_*), and the width of its
+// column of line numbers (0 without): as many digits as the last line has,
+// at least 3, and a cell on each side.
+static uint32_t sl_ui_ta_flags(const sl_ui_ctx_t *ui, uint32_t id) {
+    return ui->text_area_flags ? ui->text_area_flags(ui->field_menu_app_user, id) : 0u;
+}
+
+static uint32_t sl_ui_ta_gutter(const sl_ui_ctx_t *ui, uint32_t id, const char *text, uint32_t *digits_out) {
+    if (!(sl_ui_ta_flags(ui, id) & SL_UI_TA_LINE_NUMBERS)) return 0u;
+    uint32_t n = sl_ui_text_total_lines(text), d = 1u;
+    while (n >= 10u) {
+        n /= 10u;
+        d++;
+    }
+    if (d < 3u) d = 3u;
+    if (digits_out) *digits_out = d;
+    return (d + 2u) * sl_ui_font_w(ui);
+}
+
+static uint32_t sl_ui_text_area_hit_pos(sl_ui_ctx_t *ui, uint32_t id,
                                         uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                         const char *text) {
     uint32_t content_x, content_y, content_w, content_h, fw, fh, vis_cols, vis_lines;
     uint32_t click_row = 0u, click_col = 0u, click_line;
     if (!ui || !text) return 0u;
-    content_x = x + 6u;
+    uint32_t gutter = sl_ui_ta_gutter(ui, id, text, NULL);
+    content_x = x + 6u + gutter;
     content_y = y + 6u;
-    content_w = (w > 12u) ? (w - 12u) : 0u;
+    content_w = (w > 12u + gutter) ? (w - 12u - gutter) : 0u;
     content_h = (h > 12u) ? (h - 12u) : 0u;
     fw = sl_ui_font_w(ui);
     fh = sl_ui_font_h(ui);
@@ -2098,6 +2122,20 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
                               uint8_t enabled) {
     if (!ui || !ui->ctx || !text || text_cap < 2u || w < 24u || h < 24u) return 0u;
 
+    if (ui->text_area_select_id == id && enabled) {   // the app selects (TEXT_SELECT): the keyboard here, it shown
+        uint32_t l = sl_ui_strlen(text), a = ui->text_area_select_start, b = ui->text_area_select_end;
+        if (a > l) a = l;
+        if (b > l) b = l;
+        ui->focused_id = id;
+        ui->text_caret_id = id;
+        ui->text_caret_pos = b;
+        ui->text_select_id = id;
+        ui->text_select_anchor_pos = a;
+        ui->text_select_focus_pos = b;
+        ui->text_area_scroll_owner = id;
+        ui->text_area_select_id = 0u;
+    }
+
     int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
     if (enabled && ui->mouse_pressed) {
         if (hovered) {
@@ -2140,7 +2178,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     uint8_t restored = 0u;
     if (enabled && focused) {
         sl_ui_undo_sync(ui, id, text, ui->text_caret_pos);
-        uint32_t hit = (hovered && ui->mouse_r_pressed) ? sl_ui_text_area_hit_pos(ui, x, y, w, h, text) : ui->text_caret_pos;
+        uint32_t hit = (hovered && ui->mouse_r_pressed) ? sl_ui_text_area_hit_pos(ui, id, x, y, w, h, text) : ui->text_caret_pos;
         changed |= sl_ui_field_menu_pass(ui, id, hovered, hit, text, &len, text_cap, &restored);
     }
     (void)restored;
@@ -2150,7 +2188,7 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
             int32_t fx = 0, fy = 0;
             if (sl_ui_selection_range(ui, id, &sel_start, &sel_end) &&
                 sl_ui_clipboard_copy_selection(ui, id, text)) {
-                sl_ui_text_area_copy_point(ui, x, y, text, &fx, &fy);
+                sl_ui_text_area_copy_point(ui, id, x, y, text, &fx, &fy);
                 sl_ui_clipboard_notify_copy_feedback(ui, text, sel_start, sel_end, fx, fy);
             }
             ui->clipboard_cmds &= ~SL_CLIP_CMD_COPY;
@@ -2326,15 +2364,21 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     else if (hovered) state = SL_UI_STATE_HOVER;
     sl_ui_surface(ui, state == SL_UI_STATE_DISABLED ? SL_UI_SURF_FLAT : SL_UI_SURF_INSET, x, y, w, h, 14u);
 
-    uint32_t content_x = x + 6u;
+    uint32_t ta_flags = sl_ui_ta_flags(ui, id), digits = 0u;
+    uint32_t gutter = sl_ui_ta_gutter(ui, id, text, &digits);
+    uint32_t content_x = x + 6u + gutter;
     uint32_t content_y = y + 6u;
-    uint32_t content_w = (w > 12u) ? (w - 12u) : 0u;
+    uint32_t content_w = (w > 12u + gutter) ? (w - 12u - gutter) : 0u;
     uint32_t content_h = (h > 12u) ? (h - 12u) : 0u;
     uint32_t fw = sl_ui_font_w(ui);
     uint32_t fh = sl_ui_font_h(ui);
     uint32_t vis_cols = content_w / fw;
     uint32_t vis_lines = content_h / fh;
     if (vis_cols == 0u || vis_lines == 0u) return changed;
+    if (gutter) {   // the column of the numbers, a hair darker than the well, a line at its edge
+        const sl_ui_color_t *bd = sl_ui_theme_color(ui, SL_UI_COLOR_BORDER);
+        sl_fill_rect_a(ui->ctx, x + 6u + gutter - fw / 2u, y + 8u, 1u, h > 16u ? h - 16u : h, bd->r, bd->g, bd->b, 160u);
+    }
 
     if (ui->text_area_scroll_owner != id && (focused || hovered)) {   // the scroll was another field's
         ui->text_area_scroll_owner = id;
@@ -2349,13 +2393,13 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     if (ui->text_area_scroll_col > max_scroll_col) ui->text_area_scroll_col = max_scroll_col;
 
     if (enabled && ui->mouse_pressed && hovered) {
-        ui->text_caret_pos = sl_ui_text_area_hit_pos(ui, x, y, w, h, text);
+        ui->text_caret_pos = sl_ui_text_area_hit_pos(ui, id, x, y, w, h, text);
         if (ui->text_caret_pos > len) ui->text_caret_pos = len;
         sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
     }
     if (enabled && ui->active_id == id && ui->mouse_down) {
         uint32_t old_pos = ui->text_caret_pos;
-        uint32_t new_pos = sl_ui_text_area_hit_pos(ui, x, y, w, h, text);
+        uint32_t new_pos = sl_ui_text_area_hit_pos(ui, id, x, y, w, h, text);
         if (new_pos > len) new_pos = len;
         sl_ui_move_caret(ui, id, old_pos, new_pos, 1u);
     }
@@ -2402,6 +2446,24 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         }
     }
     ui->text_area_caret_seen = area_caret_pos;
+    // The marks (what a search found): the view goes to the current one when it changes.
+    const uint32_t *marks = NULL;
+    uint32_t nmarks = 0u, mark_cur = 0u;
+    if (ui->text_area_marks) nmarks = ui->text_area_marks(ui->field_menu_app_user, id, &marks, &mark_cur);
+    if (nmarks && mark_cur < nmarks && marks) {
+        uint32_t ms = marks[2u * mark_cur];
+        if (ms != ui->text_area_mark_seen) {
+            uint32_t mcol = 0u, mline = sl_ui_text_line_col_at(text, ms > len ? len : ms, &mcol);
+            if (mline < ui->text_area_scroll_line || mline >= ui->text_area_scroll_line + vis_lines)
+                ui->text_area_scroll_line = mline > vis_lines / 2u ? mline - vis_lines / 2u : 0u;
+            if (mcol < ui->text_area_scroll_col || mcol >= ui->text_area_scroll_col + vis_cols)
+                ui->text_area_scroll_col = mcol > vis_cols / 2u ? mcol - vis_cols / 2u : 0u;
+            if (ui->text_area_scroll_line > max_scroll) ui->text_area_scroll_line = max_scroll;
+            ui->text_area_mark_seen = ms;
+        }
+    } else {
+        ui->text_area_mark_seen = UINT32_MAX;
+    }
     if (ui->text_area_scroll_col > max_scroll_col) ui->text_area_scroll_col = max_scroll_col;
 
     uint32_t line_idx = 0u;
@@ -2441,6 +2503,36 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
         }
 
         draw_buf[dn] = '\0';
+
+        if (gutter) {   // the line's number, right-aligned; the caret's line darker
+            char num[12];
+            uint32_t v = line_idx + 1u, k = 0u;
+            char rev[12];
+            while (v && k < sizeof(rev)) rev[k++] = (char)('0' + v % 10u), v /= 10u;
+            for (uint32_t q = 0u; q < k; q++) num[q] = rev[k - 1u - q];
+            num[k] = '\0';
+            uint32_t nx = x + 6u + (digits > k ? digits - k : 0u) * fw;
+            sl_ui_text_cells(ui, nx, ly, num, line_idx == caret_line && focused ? SL_UI_COLOR_TEXT_PRIMARY
+                                                                                : SL_UI_COLOR_TEXT_SECONDARY);
+        }
+        if ((ta_flags & SL_UI_TA_CURRENT_LINE) && focused && line_idx == caret_line) {
+            const sl_ui_color_t *nc = sl_ui_theme_color(ui, SL_UI_COLOR_NEON);
+            sl_fill_rect_a(ui->ctx, content_x - 4u, ly, vis_cols * fw + 4u, fh, nc->r, nc->g, nc->b, 30u);
+        }
+        for (uint32_t k = 0u; k < nmarks && marks; k++) {   // what was found: the current one stronger
+            uint32_t ms = marks[2u * k], me = marks[2u * k + 1u];
+            if (me <= start || ms >= end || me <= ms) continue;
+            uint32_t a = ms > start ? ms : start, b = me < end ? me : end;
+            uint32_t c0 = sl_ui_utf8_count_between(text, start, a), c1 = sl_ui_utf8_count_between(text, start, b);
+            if (c1 <= ui->text_area_scroll_col) continue;
+            c0 = c0 > ui->text_area_scroll_col ? c0 - ui->text_area_scroll_col : 0u;
+            c1 -= ui->text_area_scroll_col;
+            if (c0 >= vis_cols) continue;
+            if (c1 > vis_cols) c1 = vis_cols;
+            const sl_ui_color_t *nc = sl_ui_theme_color(ui, SL_UI_COLOR_NEON);
+            sl_fill_rect_a(ui->ctx, content_x + c0 * fw, ly, (c1 - c0) * fw, fh, nc->r, nc->g, nc->b,
+                           k == mark_cur ? 170u : 70u);
+        }
 
         {
             uint32_t sel_start = 0u, sel_end = 0u;
