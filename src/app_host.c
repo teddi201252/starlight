@@ -3830,6 +3830,7 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
             // control is pressed (keyboard navigation, below), and the app
             // does not also get the key (2026-11-18: in a confirmation,
             // Enter on "Cancel" also ran the dialog's Enter = OK)
+            shell->ui.key_down[key_ix] = 1u;   // its repeats are repeats (they press nothing)
         } else if (event->pressed) {
             if (was_down) orbit_send_ui_event_key(shell, "KEY_REPEAT", code, mods);
             else orbit_send_ui_event_key(shell, "KEY_DOWN", code, mods);
@@ -3839,7 +3840,12 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
             shell->ui.key_down[key_ix] = 0u;
         }
         if (shell->ui.key_event_count < 16u) {
-            shell->ui.key_events[shell->ui.key_event_count++] = *event;
+            peos_input_event_t *kept = &shell->ui.key_events[shell->ui.key_event_count++];
+            *kept = *event;
+            // a key held down: the navigation does not press again on it
+            // (2026-11-19: Enter held a moment in a slow QEMU created a folder,
+            // then pressed the focused "back" twice)
+            kept->reserved = (event->pressed && was_down) ? 1u : 0u;
         }
         // Typing on the pixels, or in an app without pixels, while no control
         // has the keyboard: the characters (SLUI SDK 1.0.11).
@@ -4458,6 +4464,7 @@ static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
             // Only a control the ring shows: before Tab or the arrows the
             // focus is not seen, and Enter is the app's (= in Calculator).
             if (!shell->ui.keyboard_nav_active) continue;
+            if (ev->reserved) continue;   // held down: pressed once, not at every repeat
             if (cmd->type == ORBIT_UI_CMD_BUTTON || cmd->type == ORBIT_UI_CMD_LIST_ITEM ||
                 cmd->type == ORBIT_UI_CMD_SWATCH) {
                 orbit_send_ui_event_button(shell, cmd->id);
