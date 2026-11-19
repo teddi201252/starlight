@@ -1633,8 +1633,24 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
                                uint8_t enabled) {
     if (!ui || !ui->ctx || !text || text_cap < 2u || w < 16u || h < 12u) return 0u;
 
+    uint8_t app_selected = 0u;
+    if (ui->text_area_select_id == id && enabled) {   // the app selects (TEXT_SELECT): a field too (Ctrl+L)
+        uint32_t l = sl_ui_strlen(text), a = ui->text_area_select_start, b = ui->text_area_select_end;
+        if (a > l) a = l;
+        if (b > l) b = l;
+        ui->focused_id = id;
+        ui->text_caret_id = id;
+        ui->text_caret_pos = b;
+        ui->text_input_scroll_col = 0u;
+        ui->text_select_id = id;
+        ui->text_select_anchor_pos = a;
+        ui->text_select_focus_pos = b;
+        ui->text_area_select_id = 0u;
+        app_selected = 1u;
+    }
+
     int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
-    if (enabled && ui->mouse_pressed) {
+    if (enabled && ui->mouse_pressed && !app_selected) {
         if (hovered) {
             ui->focused_id = id;
             ui->active_id = id;
