@@ -6,6 +6,7 @@
 #include "i18n.h"
 #include "ui_sdk.h"
 #include "clipboard.h"
+#include "file_drag.h"
 #include "render/image_decode.h"
 #include "render/blit.h"
 #include "render/pixels.h"
@@ -477,6 +478,26 @@ static void orbit_send_ui_event_open_file(orbit_shell_t *shell, const char *path
     (void)peos_fwrite((uint64_t)shell->child_stdin_fd, prefix, peos_strlen(prefix));
     for (size_t i = 0u; path[i]; i++) {
         char c = path[i];
+        if (c == '\\') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\\\", 2u);
+        else if (c == '\n') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\n", 2u);
+        else if (c == '\r') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\r", 2u);
+        else if (c == '\t') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\t", 2u);
+        else (void)peos_fwrite((uint64_t)shell->child_stdin_fd, &c, 1u);
+    }
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\n", 1u);
+}
+
+// DROP_FILE i n x y path: a file dragged here from another app (SLUI SDK 1.0.21).
+static void orbit_send_ui_event_drop_file(orbit_shell_t *shell, uint32_t i, uint32_t n, uint32_t x, uint32_t y,
+                                          const char *path) {
+    if (!shell || shell->child_stdin_fd < 0 || !path) return;
+    char head[80];
+    int hn = snprintf(head, sizeof(head), "@SLUI EVENT DROP_FILE %u %u %u %u ", (unsigned)i, (unsigned)n, (unsigned)x,
+                      (unsigned)y);
+    if (hn <= 0) return;
+    (void)peos_fwrite((uint64_t)shell->child_stdin_fd, head, (size_t)hn);
+    for (size_t k = 0u; path[k]; k++) {
+        char c = path[k];
         if (c == '\\') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\\\", 2u);
         else if (c == '\n') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\n", 2u);
         else if (c == '\r') (void)peos_fwrite((uint64_t)shell->child_stdin_fd, "\\r", 2u);
@@ -1828,9 +1849,24 @@ static void orbit_send_ui_event_char(orbit_shell_t *shell, uint32_t cp) {
 // not the app's.
 static void orbit_crash_reopen(orbit_shell_t *shell);
 
+// A text field has the keyboard (clicked into), not the control the focus
+// ring is on: Enter and the space are the field's, so the app's.
+static int orbit_ui_field_has_keys(const orbit_shell_t *shell) {
+    uint32_t id = shell->ui.ui.focused_id;
+    if (!id || id == shell->ui.nav_focus_id || !shell->ui.cmds) return 0;
+    for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *c = &shell->ui.cmds[i];
+        if (c->id == id) return c->type == ORBIT_UI_CMD_TEXT_INPUT || c->type == ORBIT_UI_CMD_TEXT_AREA;
+    }
+    return 0;
+}
+
 static int orbit_ui_enter_presses_focus(const orbit_shell_t *shell, uint16_t code) {
     if (code != PEOS_KEY_ENTER && code != PEOS_KEY_SPACE) return 0;
     if (!shell->ui.keyboard_nav_active || !shell->ui.cmds) return 0;
+    // 2026-11-19 (Curiosity): the ring on "..." and the path typed in its
+    // field: Enter opened the menu, not the path.
+    if (orbit_ui_field_has_keys(shell)) return 0;
     if (shell->pixels.focused && shell->ui.ui.focused_id == 0u) return 0;   // the pixels have the keyboard
     for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
         const orbit_ui_cmd_t *c = &shell->ui.cmds[i];
@@ -2225,6 +2261,14 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             shell->ui.ui.text_area_select_start = a < b ? a : b;
             shell->ui.ui.text_area_select_end = a < b ? b : a;
             shell->body_changed = 1u;
+            return 1;
+        }
+        if (orbit_token_is(host_tok, host_len, "DRAG_FILE")) {   // "HOST DRAG_FILE <path>" (SLUI SDK 1.0.21)
+            char path[256];
+            p = orbit_skip_spaces(p);
+            orbit_copy_unescaped(path, sizeof(path), p ? p : "");
+            shell->pixels.quiet_line = 1u;
+            sl_file_drag_add(shell, path);
             return 1;
         }
         if (orbit_token_is(host_tok, host_len, "CLOSE_GUARD")) {   // "HOST CLOSE_GUARD 0|1"
@@ -3825,6 +3869,9 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
     if (shell->ui.enabled && shell->ui.committed) {
         uint8_t was_down = shell->ui.key_down[key_ix];
         uint32_t mods = orbit_mod_mask(shell);
+        // The keycode is the same for the keypad's 8 and the arrow up (0x48):
+        // SLUI_MOD_KEYPAD tells them apart (SLUI SDK 1.0.21).
+        if (sl_keyboard_code_is_keypad(event->code)) mods |= (1u << 4);   // SLUI_MOD_KEYPAD
         if (event->pressed && orbit_ui_enter_presses_focus(shell, code)) {
             // Enter or the space on the control the focus ring shows: that
             // control is pressed (keyboard navigation, below), and the app
@@ -3918,6 +3965,11 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
     if (shell->crashed && shell->child_pid <= 0) {
         if (code == PEOS_KEY_ENTER) orbit_crash_reopen(shell);
         else if (code == PEOS_KEY_ESC) shell->ended = 1u;
+        return;
+    }
+    // Tab: Orbit completes the name (the keymaps have no text for it).
+    if (code == PEOS_KEY_TAB) {
+        if (shell->child_pid > 0) orbit_send_input(shell, "\t", 1u);
         return;
     }
     if (code == PEOS_KEY_ENTER) {
@@ -4021,7 +4073,7 @@ static int orbit_context_find_zone_by_id(const orbit_shell_t *shell, uint32_t id
     return 0;
 }
 
-static void orbit_context_compute_popup(const orbit_shell_t *shell, const orbit_ui_cmd_t *zone,
+static void orbit_context_compute_popup(sl_ctx_t *ctx, const orbit_shell_t *shell, const orbit_ui_cmd_t *zone,
                                         uint32_t body_x, uint32_t body_y, uint32_t body_w, uint32_t body_h,
                                         uint32_t anchor_x, uint32_t anchor_y,
                                         uint32_t *out_x, uint32_t *out_y, uint32_t *out_w, uint32_t *out_h,
@@ -4032,17 +4084,25 @@ static void orbit_context_compute_popup(const orbit_shell_t *shell, const orbit_
     uint32_t desired_items = (option_count < 10u) ? option_count : 10u;
     if (desired_items == 0u) desired_items = 1u;
 
-    uint32_t cell_w = sl_text_cell_w();
-    if (cell_w == 0u) cell_w = 8u;
-    uint32_t max_label_chars = 0u;
+    // Each option measured in the menu's font: "label\tkey" is the label,
+    // 24 px, the key at the right (the keys sat against the labels:
+    // "Copy 11 itemsCaps+A", 2026-11-19).
+    uint32_t widest = 0u;
     for (uint32_t i = 0u; i < option_count; i++) {
         char opt_text[128];
-        uint32_t n = 0u;
         orbit_select_option_text(zone->text, i, opt_text, sizeof(opt_text));
-        while (opt_text[n]) n++;
-        if (n > max_label_chars) max_label_chars = n;
+        char *label = opt_text[0] == '~' ? opt_text + 1 : opt_text;
+        char *tab = strchr(label, '\t');
+        uint32_t w = 0u;
+        if (tab) {
+            *tab = '\0';
+            w = sl_ui_ctx_text_width(ctx, label) + 24u + sl_ui_ctx_text_width(ctx, tab + 1);
+        } else {
+            w = sl_ui_ctx_text_width(ctx, label);
+        }
+        if (w > widest) widest = w;
     }
-    uint32_t popup_w = 16u + (max_label_chars * cell_w) + 16u;
+    uint32_t popup_w = 12u + widest + 14u;   // the margins sl_context_menu_draw leaves
     if (option_count > desired_items) popup_w += 8u; // room for scrollbar when needed
     if (popup_w < 120u) popup_w = 120u;
     if (popup_w > 420u) popup_w = 420u;
@@ -4349,6 +4409,8 @@ static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
         peos_input_event_t *ev = &shell->ui.key_events[i];
         uint16_t code = orbit_norm_keycode(ev->code);
         if (code == PEOS_KEY_LSHIFT || code == PEOS_KEY_RSHIFT) continue;
+        // The keypad's digits move no focus (its 8 is not the arrow up); its Enter presses.
+        if (code != PEOS_KEY_ENTER && sl_keyboard_code_is_keypad(ev->code)) continue;
         if (!ev->pressed) continue;
 
         if (code == PEOS_KEY_TAB) {
@@ -4464,6 +4526,7 @@ static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
             // Only a control the ring shows: before Tab or the arrows the
             // focus is not seen, and Enter is the app's (= in Calculator).
             if (!shell->ui.keyboard_nav_active) continue;
+            if (orbit_ui_field_has_keys(shell)) continue;   // a field typed in: the key is the app's
             if (ev->reserved) continue;   // held down: pressed once, not at every repeat
             if (cmd->type == ORBIT_UI_CMD_BUTTON || cmd->type == ORBIT_UI_CMD_LIST_ITEM ||
                 cmd->type == ORBIT_UI_CMD_SWATCH) {
@@ -5405,7 +5468,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 orbit_ui_cmd_t *zone = &shell->ui.cmds[zone_idx];
                 uint32_t max_start = 0u;
                 uint32_t visible_items = 0u;
-                orbit_context_compute_popup(shell, zone,
+                orbit_context_compute_popup(ctx, shell, zone,
                                             body_x, body_y, body_w, body_h,
                                             shell->ui.context_open_anchor_x,
                                             shell->ui.context_open_anchor_y,
@@ -6080,6 +6143,39 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
     }
 }
 
+void sl_app_host_wake(void) {
+    uint64_t now = sl_frame_time_ns();
+    if (g_orbit_reap_count) sl_wake_at(now + 100000000ull);   // reaped again in a while
+    // Asked by a line read this frame: done at the next one.
+    if (g_reload_display_requested || g_reload_theme_requested || g_open_app_requested) sl_wake_at(now + 1000000ull);
+    for (size_t i = 0u; i < g_orbit_slot_count; i++) {
+        const orbit_shell_t *shell = g_orbit[i];
+        if (!shell || !shell->initialized) continue;
+        if (shell->child_pid > 0 && shell->child_stdout_fd >= 0) sl_wake_fd(shell->child_stdout_fd);
+        if (shell->body_changed || shell->veil_changed || shell->ended ||
+            (g_orbit_cfg[i].open_pending && shell->ui.enabled)) sl_wake_at(now + 1000000ull);
+        if (shell->tip_hover && !shell->tip_shown && !shell->tip_off) sl_wake_at(shell->tip_since_ns + ORBIT_TIP_DELAY_NS);
+        if (shell->ui.resize_pending) sl_wake_at(shell->ui.resize_sent_ns + SL_RESIZE_EVENT_NS);
+    }
+}
+
+int sl_app_host_fullscreen(const void *userdata) {
+    const orbit_shell_t *shell = (const orbit_shell_t *)userdata;
+    return (shell && shell->initialized && shell->child_pid > 0 && shell->surface.active) ? 1 : 0;
+}
+
+int sl_app_host_blinks(const void *userdata) {
+    const orbit_shell_t *shell = (const orbit_shell_t *)userdata;
+    if (!shell || !shell->initialized) return 0;
+    if (!shell->ui.enabled) return 1;   // the terminal's prompt
+    uint32_t id = shell->ui.ui.focused_id;
+    for (size_t i = 0u; id && i < shell->ui.cmd_count; i++) {
+        const orbit_ui_cmd_t *cmd = &shell->ui.cmds[i];
+        if (cmd->id == id) return cmd->type == ORBIT_UI_CMD_TEXT_INPUT || cmd->type == ORBIT_UI_CMD_TEXT_AREA;
+    }
+    return 0;
+}
+
 void sl_app_host_tick(sl_ctx_t *ctx) {
     if (!ctx) return;
     if (g_orbit_reap_count) orbit_reap_pending();
@@ -6119,7 +6215,8 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
             orbit_send_ui_event_open_file(shell, g_orbit_cfg[i].open_file);
         }
         orbit_tip_tick(ctx, shell, now);
-        if (shell->next_poll_ns > now) continue;
+        // Read at most every few ms, but at once when its output woke the desktop.
+        if (shell->next_poll_ns > now && !sl_wake_fd_ready(shell->child_stdout_fd)) continue;
         uint8_t changed = orbit_poll_output(shell);
         shell->next_poll_ns = now + orbit_poll_interval_ns(shell, changed);
 
@@ -6273,6 +6370,17 @@ int sl_app_host_slot_set_bundle(size_t index, const char *bundle_dir) {
         orbit_cfg_apply_to_shell(index);
     }
     return 1;
+}
+
+int sl_app_host_takes_files(const void *userdata) {
+    const orbit_shell_t *shell = (const orbit_shell_t *)userdata;
+    return (shell && shell->ui.enabled && shell->child_pid > 0 && shell->child_stdin_fd >= 0) ? 1 : 0;
+}
+
+void sl_app_host_drop_file(void *userdata, uint32_t i, uint32_t n, uint32_t x, uint32_t y, const char *path) {
+    orbit_shell_t *shell = (orbit_shell_t *)userdata;
+    if (!sl_app_host_takes_files(shell)) return;
+    orbit_send_ui_event_drop_file(shell, i, n, x, y, path);
 }
 
 void sl_app_host_open_with(const char *bundle_path, const char *file) {

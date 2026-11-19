@@ -27,7 +27,9 @@
 #define SM_BTN_H 44u
 
 enum { SM_ITEM_ABOUT = 0, SM_ITEM_REBOOT, SM_ITEM_OFF, SM_ITEMS };
-enum { SM_NONE = 0, SM_ASK_REBOOT, SM_ASK_OFF, SM_ABOUT };
+// SM_BUSY_*: Spegni or Riavvia while PeOS is being installed (the user's
+// design "Spegni", 2026-11-19): not now, or at the end.
+enum { SM_NONE = 0, SM_ASK_REBOOT, SM_ASK_OFF, SM_ABOUT, SM_BUSY_REBOOT, SM_BUSY_OFF };
 
 static const char *const k_items[SM_ITEMS] = { "menu.about", "menu.restart", "menu.shutdown" };
 
@@ -40,7 +42,20 @@ static struct {
     uint8_t live_known;
     char version[32], starlight[32], commit[24], built[16];
     const slsk_font_t *row_f, *title_f, *text_f, *mono_f, *big_f;
+    uint8_t after;              // power off (1) or restart (2) when the installation ends
+    uint64_t next_check;        // when to look at it again (once a second, only while waiting)
 } g_sm = { .hover = -1, .btn_hover = -1 };
+
+#define SM_INSTALL_CHECK_NS 1000000000ull
+
+static int sm_busy(uint8_t d) { return d == SM_BUSY_REBOOT || d == SM_BUSY_OFF; }
+
+// An installation is writing a disk now.
+static int sm_installing(void) {
+    peos_install_progress_t p;
+    memset(&p, 0, sizeof(p));
+    return peos_install_get_progress(&p) == 0 && p.status == PEOS_INSTALL_STATUS_BUSY;
+}
 
 // ----------------------------------------------------------------- places
 
@@ -65,7 +80,7 @@ static void sm_dialog_size(uint32_t *w, uint32_t *h) {
         *h = 382u;
     } else {
         *w = 480u;
-        *h = g_sm.live ? 230u : 206u;
+        *h = (g_sm.live || sm_busy(g_sm.dialog)) ? 230u : 206u;
     }
 }
 
@@ -80,7 +95,7 @@ static void sm_dialog_rect(const sl_ctx_t *ctx, uint32_t *x, uint32_t *y, uint32
 static void sm_button_rect(const sl_ctx_t *ctx, int which, uint32_t *bx, uint32_t *by, uint32_t *bw) {
     uint32_t x, y, w, h;
     sm_dialog_rect(ctx, &x, &y, &w, &h);
-    uint32_t cw = 120u, kw = 110u;
+    uint32_t cw = 120u, kw = sm_busy(g_sm.dialog) ? 190u : 110u;
     *by = y + h - 28u - SM_BTN_H;
     *bw = which ? cw : kw;
     *bx = which ? x + w - 30u - cw : x + w - 30u - cw - 14u - kw;
@@ -190,7 +205,7 @@ static void sm_set_dialog(sl_ctx_t *ctx, uint8_t dialog) {
 }
 
 // Every app is asked to close (as with its close button), then the machine.
-static void sm_power(sl_ctx_t *ctx, int reboot) {
+static void sm_power_now(sl_ctx_t *ctx, int reboot) {
     printf("[STARLIGHT] %s requested\n", reboot ? "reboot" : "power off");
     sl_windows_destroy_all();
     if (reboot) (void)peos_reboot();
@@ -198,6 +213,41 @@ static void sm_power(sl_ctx_t *ctx, int reboot) {
     printf("[STARLIGHT] the firmware did not %s\n", reboot ? "reboot" : "power off");
     // The windows are gone already: say what to do, not an empty desktop.
     sl_notify_post(ctx, sl_tr("notify.system"), sl_tr(reboot ? "power.failed_restart" : "power.failed_off"));
+}
+
+// Confirmed: now, unless an installation would be cut in half (then ask).
+static void sm_power(sl_ctx_t *ctx, int reboot) {
+    if (sm_installing()) {
+        printf("[STARLIGHT] %s asked while installing: not now\n", reboot ? "reboot" : "power off");
+        sm_set_dialog(ctx, reboot ? SM_BUSY_REBOOT : SM_BUSY_OFF);
+        g_sm.btn_hover = 1;   // "Va bene" lit: Enter waits, it does not power off later
+        return;
+    }
+    sm_power_now(ctx, reboot);
+}
+
+// "Spegni alla fine": once a second while an installation goes on.
+void sl_sysmenu_tick(sl_ctx_t *ctx) {
+    if (!ctx || !g_sm.after) return;
+    uint64_t now = peos_time_ns();
+    if (now < g_sm.next_check) return;
+    g_sm.next_check = now + SM_INSTALL_CHECK_NS;
+    peos_install_progress_t p;
+    memset(&p, 0, sizeof(p));
+    if (peos_install_get_progress(&p) == 0 && p.status == PEOS_INSTALL_STATUS_BUSY) return;
+    int reboot = g_sm.after == 2u;
+    g_sm.after = 0u;
+    if (p.status == PEOS_INSTALL_STATUS_ERROR) {   // not finished: stay on, and say so
+        printf("[STARLIGHT] installation ended with an error: no %s\n", reboot ? "reboot" : "power off");
+        sl_notify_post(ctx, sl_tr("notify.system"), sl_tr(reboot ? "power.install_failed_restart" : "power.install_failed_off"));
+        return;
+    }
+    printf("[STARLIGHT] installation ended: %s now\n", reboot ? "reboot" : "power off");
+    sm_power_now(ctx, reboot);
+}
+
+void sl_sysmenu_wake(void) {
+    if (g_sm.after) sl_wake_at(g_sm.next_check);
 }
 
 void sl_sysmenu_show_about(sl_ctx_t *ctx) {
@@ -208,7 +258,15 @@ int sl_sysmenu_handle_click(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     if (!ctx) return 0;
     if (g_sm.dialog) {   // modal: nothing else gets the click
         int b = sm_button_at(ctx, x, y);
-        if (b == 0) sm_set_dialog(ctx, SM_NONE);
+        if (sm_busy(g_sm.dialog) && b >= 0) {   // 0: at the end; 1: Va bene
+            uint8_t d = g_sm.dialog;
+            sm_set_dialog(ctx, SM_NONE);
+            if (b == 0) {
+                g_sm.after = d == SM_BUSY_REBOOT ? 2u : 1u;
+                g_sm.next_check = 0u;
+                printf("[STARLIGHT] %s at the end of the installation\n", d == SM_BUSY_REBOOT ? "reboot" : "power off");
+            }
+        } else if (b == 0) sm_set_dialog(ctx, SM_NONE);
         else if (b == 1) {
             uint8_t d = g_sm.dialog;
             sm_set_dialog(ctx, SM_NONE);
@@ -293,6 +351,14 @@ int sl_sysmenu_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev) {
             uint8_t d = g_sm.dialog;
             int confirm = g_sm.btn_hover == 1;
             sm_set_dialog(ctx, SM_NONE);
+            if (sm_busy(d)) {
+                if (!confirm) {   // "... alla fine" was lit
+                    g_sm.after = d == SM_BUSY_REBOOT ? 2u : 1u;
+                    g_sm.next_check = 0u;
+                    printf("[STARLIGHT] %s at the end of the installation\n", d == SM_BUSY_REBOOT ? "reboot" : "power off");
+                }
+                return 1;
+            }
             if (confirm && (d == SM_ASK_REBOOT || d == SM_ASK_OFF)) sm_power(ctx, d == SM_ASK_REBOOT);
             return 1;
         }
@@ -385,6 +451,15 @@ static void sm_draw_dialog(sl_ctx_t *ctx, sl_target_t *t) {
             sm_text(t, g_sm.text_f, tx, (int32_t)(y + h) - 28 - (int32_t)SM_BTN_H + 14, b, SL_UI_COLOR_TEXT_SECONDARY);
         }
         sm_button(ctx, t, 1, sl_tr("common.close"), 1);
+        return;
+    }
+    if (sm_busy(g_sm.dialog)) {
+        int boff = g_sm.dialog == SM_BUSY_OFF;
+        sm_text(t, g_sm.title_f, tx, ty + 4, sl_tr("power.busy_title"), SL_UI_COLOR_TEXT_PRIMARY);
+        sm_text(t, g_sm.text_f, tx, ty + 50, sl_tr("power.busy_text"), SL_UI_COLOR_TEXT_SECONDARY);
+        sm_text(t, g_sm.text_f, tx, ty + 76, sl_tr("power.busy_text2"), SL_UI_COLOR_TEXT_SECONDARY);
+        sm_button(ctx, t, 0, sl_tr(boff ? "power.off_after" : "power.restart_after"), 0);
+        sm_button(ctx, t, 1, sl_tr("common.ok"), 1);
         return;
     }
     int off = g_sm.dialog == SM_ASK_OFF;

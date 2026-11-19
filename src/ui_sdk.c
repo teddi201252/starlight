@@ -1751,6 +1751,8 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     }
     for (uint8_t i = 0u; i < event_count; i++) {
         uint16_t code = sl_ui_norm_keycode(events[i].code);
+        // The keypad writes in a field (its 4 is not the arrow left; Num Lock is on).
+        if (code != PEOS_KEY_ENTER && sl_keyboard_code_is_keypad(events[i].code)) code = 0u;
         if (sl_keyboard_event_is_altgr(&events[i])) {
             ui->altgr_down = events[i].pressed ? 1u : 0u;
             continue;
@@ -2245,6 +2247,8 @@ uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
     }
     for (uint8_t i = 0u; i < event_count; i++) {
         uint16_t code = sl_ui_norm_keycode(events[i].code);
+        // The keypad writes in a field (its 4 is not the arrow left; Num Lock is on).
+        if (code != PEOS_KEY_ENTER && sl_keyboard_code_is_keypad(events[i].code)) code = 0u;
         if (sl_keyboard_event_is_altgr(&events[i])) {
             ui->altgr_down = events[i].pressed ? 1u : 0u;
             continue;

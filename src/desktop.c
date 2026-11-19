@@ -199,6 +199,7 @@ static void sl_desk_poller(void *arg) {
                 g_feed.net_version++;
             }
             __atomic_add_fetch(&g_feed.version, 1u, __ATOMIC_RELEASE);
+            sl_wake_signal();   // the desktop, waiting, draws it
         }
         peos_sleep(SL_DESK_POLL_MS);
     }
@@ -238,6 +239,11 @@ static int sl_desk_widgets_feed(sl_desk_widgets_feed_t *out) {
     out->has_ip = g_feed.has_ip;
     if (g_desk.local_volume >= 0 && peos_time_ns() < g_desk.local_volume_until) out->volume = g_desk.local_volume;
     return __atomic_load_n(&g_feed.version, __ATOMIC_ACQUIRE) == v0;
+}
+
+void sl_desk_battery(int32_t *pct, uint32_t *flags) {
+    *pct = g_feed.battery;   // words, each read whole
+    *flags = g_feed.battery_flags;
 }
 
 // ------------------------------------------------------------------ setup
@@ -1036,6 +1042,13 @@ static void sl_desk_tips_hello(sl_ctx_t *ctx) {
     if (!g_tips_since) g_tips_since = now ? now : 1u;
     if (now < g_tips_since + 3u) return;
     g_tips_done = 1u;
+    // The first start of an installed system: Welcome is open, and it opens
+    // Consigli itself at its end. No "New to PeOS?" over it.
+    FILE *first = fopen(SL_FIRSTBOOT_FILE, "r");
+    if (first) {
+        fclose(first);
+        return;
+    }
     const char *app = sl_windows_app_title("consigli");
     if (!app) return;   // not installed
     FILE *f = fopen(SL_RESOURCE_TIPS_FILE, "r");
@@ -1303,6 +1316,17 @@ static void sl_desk_pill_tick(sl_ctx_t *ctx) {
     if (!g_pill.shown || peos_time_ns() < g_pill.until) return;
     g_pill.shown = 0u;
     sl_desk_pill_dirty(ctx);
+}
+
+void sl_desk_wake(const sl_ctx_t *ctx) {
+    if (!ctx || g_desk.ready != 1u) return;
+    uint64_t now = sl_frame_time_ns();
+    int64_t sec = sl_desk_local_seconds(ctx);
+    int64_t into = sec % 60;
+    if (into < 0) into += 60;
+    sl_wake_at(now + (uint64_t)(60 - into) * 1000000000ull);   // the clock's next minute
+    if (!g_tips_done) sl_wake_at((g_tips_since + 3u) * 1000000000ull);
+    if (g_pill.shown) sl_wake_at(g_pill.until);
 }
 
 static void sl_desk_pill_draw_rect(uint32_t cx, uint32_t cy, uint32_t cw, uint32_t ch, void *userdata) {

@@ -1,4 +1,5 @@
 #include "starlight_input.h"
+#include "starlight_internal.h"   // sl_wake_at
 
 static uint8_t g_prev_mouse_buttons = 0u;
 
@@ -265,6 +266,16 @@ static void sl_emit_synthetic_repeats(sl_input_frame_t *out, uint64_t now_ns) {
             out->key_events[out->key_event_count++] = ev;
             slot->next_repeat_ns += interval_ns;
         }
+    }
+}
+
+void sl_input_wake(void) {
+    for (uint32_t i = 0u; i < SL_KEY_REPEAT_SLOTS; i++) {
+        const sl_key_repeat_slot_t *slot = &g_key_repeat[i];
+        if (slot->down && !sl_is_modifier_key(slot->code)) sl_wake_at(slot->next_repeat_ns);
+    }
+    if (g_actionmod.state == SL_ACTIONMOD_PRESSED && g_actionmod.caps_down) {
+        sl_wake_at(g_actionmod.press_ns + sl_actionmod_hold_ns());
     }
 }
 

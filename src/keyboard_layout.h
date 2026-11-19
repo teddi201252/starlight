@@ -17,3 +17,6 @@ size_t sl_keyboard_translate_event(const peos_input_event_t *event,
                                    char *out,
                                    size_t out_cap);
 uint8_t sl_keyboard_event_is_altgr(const peos_input_event_t *event);
+// A key of the numeric keypad (the whole code: 0x48 is its 8, E0 48 the
+// arrow up; E0 35 and E0 1C its / and Enter).
+uint8_t sl_keyboard_code_is_keypad(uint16_t code);

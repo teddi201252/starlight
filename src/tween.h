@@ -43,6 +43,8 @@ void sl_tween_cancel_id(uint32_t id);
 void sl_tween_cancel_target(const void *target);
 uint8_t sl_tween_is_active_id(uint32_t id);
 uint8_t sl_tween_is_active_target(const void *target);
+// Any tween still running (it moves something every frame).
+uint8_t sl_tween_any_active(void);
 
 #ifdef __cplusplus
 }

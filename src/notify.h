@@ -8,6 +8,8 @@
 void sl_notify_init(sl_ctx_t *ctx);
 // Once a frame, before drawing: takes new messages, times the pill out.
 void sl_notify_tick(sl_ctx_t *ctx);
+// What the idle desktop waits for: the service's channel, the clients, the card's end.
+void sl_notify_wake(void);
 // Once a frame, after the windows and the dock: the pill on top.
 void sl_notify_render(sl_ctx_t *ctx);
 // Notifications not yet seen for the app with this title (0 if none).

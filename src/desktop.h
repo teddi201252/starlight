@@ -13,6 +13,10 @@
 void sl_desk_build(sl_ctx_t *ctx);
 // Once a frame: redraws the regions whose data changed and marks them dirty.
 void sl_desk_tick(sl_ctx_t *ctx);
+// The battery as the poller last read it: percent (-1: none) and PEOS_BATTERY_*.
+void sl_desk_battery(int32_t *pct, uint32_t *flags);
+// The clock's next minute, the pill's end, the first start's hello.
+void sl_desk_wake(const sl_ctx_t *ctx);
 void sl_desk_free(sl_ctx_t *ctx);
 // The local time as "hh:mm" (the timezone of settings.cfg).
 void sl_desk_local_hhmm(const sl_ctx_t *ctx, char *out, size_t cap);

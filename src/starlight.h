@@ -63,7 +63,12 @@ typedef struct {
     uint8_t clipboard_feedback_visual_enabled;
     uint8_t graphics_perf_enabled;
     uint8_t check_damage;          // --check-damage: each frame checked against one composed whole
-    uint8_t timezone;              // timezone=: an index in peos_tz_list (peos/tz.h)
+    uint16_t timezone;             // timezone=: an index in peos_tz_list (peos/tz.h)
+    // Energia (energy.c): the screen dark after these minutes without input
+    // (0 never), on the battery and on the charger; the light lower on the
+    // battery; the low battery said.
+    uint32_t screen_off_battery_min, screen_off_ac_min;
+    uint8_t battery_dim, battery_warn;
     char language[16];             // language= ("en", "it"): /system/lang/<language>/
 
     // Background

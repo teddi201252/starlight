@@ -92,6 +92,13 @@ static int32_t sl_tween_find_index_by_target(const void *target, sl_tween_value_
     return -1;
 }
 
+uint8_t sl_tween_any_active(void) {
+    for (uint32_t i = 0u; i < SL_TWEEN_MAX; i++) {
+        if (g_tweens[i].active) return 1u;
+    }
+    return 0u;
+}
+
 static int32_t sl_tween_find_free_slot(void) {
     for (uint32_t i = 0u; i < SL_TWEEN_MAX; i++) {
         if (!g_tweens[i].active) return (int32_t)i;

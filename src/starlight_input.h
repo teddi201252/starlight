@@ -48,3 +48,5 @@ void sl_input_set_actionmod_hold_config(uint32_t hold_ms);
 // not), and how long it has been held.
 uint32_t sl_input_caps_hold_permille(uint64_t now_ns, uint64_t *held_ns);
 int sl_input_poll(sl_ctx_t *ctx, sl_input_frame_t *out);
+// A key held (its next repeat) or Caps held (the clipboard manager opens): when.
+void sl_input_wake(void);

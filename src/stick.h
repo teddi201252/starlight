@@ -7,3 +7,5 @@
 #include "starlight.h"
 
 void sl_stick_tick(sl_ctx_t *ctx);
+// The disks' watch, for the idle desktop.
+void sl_stick_wake(void);

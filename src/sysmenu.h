@@ -18,3 +18,7 @@ int sl_sysmenu_handle_key(sl_ctx_t *ctx, const peos_input_event_t *ev);
 void sl_sysmenu_render(sl_ctx_t *ctx);
 // The about panel, from elsewhere (Impostazioni could ask for it).
 void sl_sysmenu_show_about(sl_ctx_t *ctx);
+// Powering off or restarting at the end of an installation (asked while it
+// ran): looked at once a second, only while waiting; and its deadline.
+void sl_sysmenu_tick(sl_ctx_t *ctx);
+void sl_sysmenu_wake(void);

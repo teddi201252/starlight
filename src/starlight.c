@@ -9,9 +9,13 @@
 #include "render/pixels.h"
 #include "render/blit.h"
 #include "ui_sdk.h"
+#include "file_drag.h"
+#include "energy.h"
+#include "starlight_input.h"
 #include "i18n.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // The performance card (settings: show_performance=1), at the bottom right:
@@ -98,6 +102,75 @@ static void sl_perf_card_render(sl_ctx_t *ctx) {
                                    sl_perf_card_draw_rect, ctx);
 }
 
+// --idle-check (make test-starlight-idle): every 10 s, how much of a CPU
+// Starlight took (its threads too, the kernel's count) and how many frames
+// it made. Read once the desktop is still: what it costs doing nothing.
+#define SL_IDLE_CHECK_NS 10000000000ull
+static uint64_t g_idle_work_ns, g_idle_work_max_ns;   // the frames' own work, the waits left out
+static void sl_idle_check_tick(uint64_t now) {
+    static uint64_t since, frames, busy0, idle0;
+    static struct { uint32_t pid; uint64_t cycles; } prev[PEOS_PROC_MAX];
+    static uint32_t nprev;
+    frames++;
+    if (since && now - since < SL_IDLE_CHECK_NS) return;
+    peos_proc_info_t procs[PEOS_PROC_MAX];
+    int64_t n = peos_proc_list(procs, PEOS_PROC_MAX);
+    if (n < 0) n = 0;
+    uint64_t me = peos_getpid();
+    peos_sysinfo_t si;
+    memset(&si, 0, sizeof(si));
+    int have_si = peos_sysinfo(&si) >= 0 && si.tsc_hz;
+    if (since && have_si) {
+        uint64_t ns = now - since;
+        uint64_t mhz = si.tsc_hz / 1000000u ? si.tsc_hz / 1000000u : 1u;
+        uint64_t us = ns / 1000u ? ns / 1000u : 1u;
+        // Each process's share of one CPU in the window; Starlight's, and the
+        // two that took most besides it (to see where the rest goes).
+        uint32_t mine = 0u, threads = 0u, top_pm[2] = { 0u, 0u };
+        const char *top_name[2] = { "-", "-" };
+        for (int64_t i = 0; i < n; i++) {
+            uint64_t before = procs[i].cycles;
+            for (uint32_t k = 0u; k < nprev; k++) {
+                if (prev[k].pid == procs[i].pid) before = prev[k].cycles;
+            }
+            uint32_t pm = (uint32_t)((procs[i].cycles - before) / mhz * 1000u / us);
+            if (procs[i].pid == me) {
+                mine = pm;
+                threads = procs[i].threads;
+            } else if (pm > top_pm[0]) {
+                top_pm[1] = top_pm[0], top_name[1] = top_name[0];
+                top_pm[0] = pm, top_name[0] = procs[i].name;
+            } else if (pm > top_pm[1]) {
+                top_pm[1] = pm, top_name[1] = procs[i].name;
+            }
+        }
+        uint64_t db = si.cpu_busy_cycles - busy0, di = si.cpu_idle_cycles - idle0;
+        uint32_t sys = (db + di) ? (uint32_t)(db * 1000u / (db + di)) : 0u;
+        char why[256];
+        sl_wake_report(why, sizeof(why));
+        printf("starlight: idle check: %u.%u%% of a CPU, %u frames in %u s (woken by: %s; %u threads; all CPUs "
+               "%u.%u%% busy; then %s %u.%u%%, %s %u.%u%%; frames' work %u ms, longest %u ms)\n",
+               (unsigned)(mine / 10u), (unsigned)(mine % 10u), (unsigned)frames, (unsigned)(ns / 1000000000ull), why,
+               (unsigned)threads, (unsigned)(sys / 10u), (unsigned)(sys % 10u), top_name[0],
+               (unsigned)(top_pm[0] / 10u), (unsigned)(top_pm[0] % 10u), top_name[1], (unsigned)(top_pm[1] / 10u),
+               (unsigned)(top_pm[1] % 10u), (unsigned)(g_idle_work_ns / 1000000u),
+               (unsigned)(g_idle_work_max_ns / 1000000u));
+    }
+    if (have_si) {
+        busy0 = si.cpu_busy_cycles;
+        idle0 = si.cpu_idle_cycles;
+    }
+    nprev = 0u;
+    for (int64_t i = 0; i < n && nprev < PEOS_PROC_MAX; i++) {
+        prev[nprev].pid = procs[i].pid;
+        prev[nprev].cycles = procs[i].cycles;
+        nprev++;
+    }
+    since = now;
+    frames = 0u;
+    g_idle_work_ns = g_idle_work_max_ns = 0u;
+}
+
 // The layers, from the bottom up, each drawing only in the damage; the
 // cursor goes on top of them all (release 0.12.0 plan, phase 2). Windows
 // never reach under the top bar, so it stays over them from the bottom.
@@ -116,7 +189,9 @@ static const sl_layer_t k_layers[] = {
     { sl_dock_label_render, sl_perf_add_dock },              // the hovered tile's name
     { sl_sysmenu_render, NULL },                             // sun menu, veil and dialogs
     { sl_clipboard_render_overlay, NULL },
+    { sl_file_drag_render, NULL },                           // files dragged between apps
     { sl_perf_card_render, NULL },
+    { sl_energy_render, NULL },                              // the screen dark: black over all
 };
 
 // Composes every layer; timed, the time of each is counted. Returns when the
@@ -141,6 +216,7 @@ static void sl_compose(sl_ctx_t *ctx) {
 // Entry point of the Starlight desktop loop.
 int main(int argc, char **argv) {
     sl_ctx_t ctx;
+    uint8_t idle_check = 0u;
     if (!sl_init(&ctx)) {
         peos_puts("starlight: init failed\n");
         peos_exit(1);
@@ -149,6 +225,12 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (argv[i] && strcmp(argv[i], "--perf") == 0) ctx.graphics_perf_enabled = 1u;
         if (argv[i] && strcmp(argv[i], "--check-damage") == 0) ctx.check_damage = 1u;
+        // --idle-check=50: the same, the idle wait at most 50 ms (the fixed
+        // pace Starlight had before, to compare with).
+        if (argv[i] && strncmp(argv[i], "--idle-check", 12) == 0) {
+            idle_check = 1u;
+            if (argv[i][12] == '=') sl_wake_set_idle_max_ms((uint32_t)atoi(argv[i] + 13));
+        }
     }
     sl_perf_init(ctx.graphics_perf_enabled);
     {
@@ -189,6 +271,17 @@ int main(int argc, char **argv) {
     }
 
     sl_windows_create_default(&ctx);
+    {   // the first start of an installed PeOS: Welcome, once (it deletes the file)
+        FILE *first = fopen(SL_FIRSTBOOT_FILE, "r");
+        peos_stat_t st;
+        if (first) {
+            fclose(first);
+            if ((int64_t)peos_stat(SL_WELCOME_APP, sizeof(SL_WELCOME_APP) - 1u, &st, sizeof(st)) >= 0 &&
+                sl_windows_open_app_bundle_path(&ctx, SL_WELCOME_APP)) {
+                printf("starlight: first start: %s\n", SL_WELCOME_APP);
+            }
+        }
+    }
     sl_notify_init(&ctx);
     sl_music_init(&ctx);
     sl_tween_init();
@@ -200,6 +293,8 @@ int main(int argc, char **argv) {
     for (;;) {
         uint64_t frame_start_ns = peos_time_ns();
         sl_frame_time_set(frame_start_ns);
+        sl_wake_frame_begin();
+        if (idle_check) sl_idle_check_tick(frame_start_ns);
         sl_perf_frame_begin(frame_start_ns);
         if (!ctx.hw_cursor) {
             if (ctx.cursor_saved_valid) {
@@ -260,7 +355,30 @@ int main(int argc, char **argv) {
         sl_notify_tick(&ctx);
         sl_stick_tick(&ctx);   // a stick mounted: Curiosity on it, if asked
         sl_music_tick(&ctx);
+        sl_sysmenu_tick(&ctx);   // power off at the end of an installation
+        sl_energy_tick(&ctx);    // the screen dark after a while, the battery
         sl_fps_tick(&ctx);
+
+        // What the frames to come wait for, when nothing moves.
+        if (sl_tween_any_active()) sl_wake_at(frame_start_ns + SL_WAKE_FRAME_NS);
+        {
+            sl_window_t *focused = sl_window_get_focused();
+            if (focused && !focused->minimized &&
+                (!focused->task || !focused->task->userdata || sl_app_host_blinks(focused->task->userdata))) {
+                sl_wake_at((frame_start_ns / 500000000ull + 1ull) * 500000000ull);   // the caret's next blink
+            }
+        }
+        if (ctx.show_perf) sl_wake_at(ctx.fps_last_ns + 1000000000ull);   // its numbers, once a second
+        sl_input_wake();
+        sl_app_host_wake();
+        sl_clipboard_wake();
+        sl_desk_wake(&ctx);
+        sl_notify_wake();
+        sl_stick_wake();
+        sl_music_wake();
+        sl_windows_wake();
+        sl_sysmenu_wake();
+        sl_energy_wake();
 
         // The damage is complete here: from now on, nothing adds to it until
         // the cursor (which restores what it covers next frame). Every layer
@@ -270,10 +388,17 @@ int main(int argc, char **argv) {
         uint64_t render_start_ns = sl_compose_layers(&ctx, 1);
         if (ctx.check_damage) (void)sl_dirty_check(&ctx, sl_compose);
         sl_fps_account(&ctx, frame_start_ns);
+        if (idle_check) {
+            uint64_t work = peos_time_ns() - frame_start_ns;
+            g_idle_work_ns += work;
+            if (work > g_idle_work_max_ns) g_idle_work_max_ns = work;
+        }
 
         int frame_active = (sl_dirty_request_count() != dirty_mark) || windows_waiting ||
                            ctx.cursor_x != old_x || ctx.cursor_y != old_y;
-        if (!ctx.hw_cursor) {
+        if (sl_energy_screen_off()) {
+            ctx.cursor_saved_valid = 0u;   // dark: no cursor either
+        } else if (!ctx.hw_cursor) {
             sl_sw_cursor_capture(&ctx, ctx.cursor_x, ctx.cursor_y);
             sl_render_cursor(&ctx);
             sl_sw_cursor_dirty(&ctx);

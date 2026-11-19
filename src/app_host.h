@@ -10,6 +10,13 @@ app_instance_t *sl_app_host_instance_at(size_t index);
 app_instance_t *sl_app_host_instance_peek_at(size_t index);
 void sl_app_host_reset(void);
 void sl_app_host_tick(sl_ctx_t *ctx);
+/* What the idle desktop waits for here: the apps' output, a tip to show, the
+ * last size of a resize, work a line asked for. */
+void sl_app_host_wake(void);
+/* Its caret blinks: the terminal's prompt, a text field with the keyboard. */
+int sl_app_host_blinks(const void *userdata);
+/* It shows its own full surface (a game, SDL): the screen stays on for it. */
+int sl_app_host_fullscreen(const void *userdata);
 void sl_app_host_slots_clear(void);
 void sl_app_host_slots_use_default(void);
 int sl_app_host_slot_configure(size_t index, const char *title, const char *exec_path, const char *exec_args);
@@ -29,6 +36,10 @@ int sl_app_host_slot_restrict_paths(size_t index, const peos_path_grant_t *grant
 void sl_app_host_set_prespawn(int (*fn)(size_t index));
 size_t sl_app_host_next_slot_index(void);
 size_t sl_app_host_slot_count_enabled(void);
+/* An SLUI app that listens (it can be given files: SLUI_EVENT_DROP_FILE). */
+int sl_app_host_takes_files(const void *userdata);
+/* File i of n dragged onto the app, let go at x,y of its body. */
+void sl_app_host_drop_file(void *userdata, uint32_t i, uint32_t n, uint32_t x, uint32_t y, const char *path);
 /* What this input changes in the focused app: 1, the rect to add to the
  * damage (the window is drawn again whole); 2, only the hover moved, added
  * to what the window redraws in part (then sl_windows_mark_app_pixels);

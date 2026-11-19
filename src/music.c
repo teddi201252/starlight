@@ -96,6 +96,7 @@ void sl_music_init(sl_ctx_t *ctx) {
 uint32_t sl_music_version(void) { return g_mus.version; }
 
 int sl_music_active(void) { return g_mus.have && g_mus.st.state != MUSIC_STOPPED && g_mus.st.count; }
+int sl_music_playing(void) { return g_mus.have && g_mus.st.state == MUSIC_PLAYING; }
 
 static uint64_t sl_mus_pos(void) { return g_mus.have ? music_position_ms(&g_mus.st, peos_time_ns()) : 0; }
 
@@ -380,6 +381,18 @@ static void sl_mus_got(sl_ctx_t *ctx, const music_status_t *s) {
         g_mus.toast = 2;
         g_mus.toast_w = 0;
     }
+}
+
+void sl_music_wake(void) {
+    uint64_t now = sl_frame_time_ns();
+    if (g_mus.watch >= 0) sl_wake_fd(g_mus.watch);
+    else sl_wake_at(g_mus.retry_ns);
+    if (g_mus.open && sl_music_active() && g_mus.st.state == MUSIC_PLAYING) {   // its clock, at the next second
+        uint64_t ms = sl_mus_pos();
+        sl_wake_at(now + (1000u - ms % 1000u) * 1000000ull);
+    }
+    if (g_mus.toast == 1) sl_wake_at(g_mus.toast_since + SL_MUS_TOAST_WAIT_NS);
+    if (g_mus.toast) sl_wake_at(g_mus.toast_until);
 }
 
 void sl_music_tick(sl_ctx_t *ctx) {

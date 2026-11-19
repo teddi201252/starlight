@@ -83,7 +83,7 @@ uint8_t sl_windows_resizing(void);
 void sl_windows_resize_move(sl_ctx_t *ctx, uint32_t x, uint32_t y);
 void sl_windows_resize_release(sl_ctx_t *ctx);
 // Remember where a window is (windows.cfg): it opens there again.
-void sl_windows_remember(const sl_window_t *win);
+void sl_windows_remember(sl_window_t *win);
 void sl_windows_toggle_maximize(sl_ctx_t *ctx);
 // The windows from the keyboard (Caps+Tab, Caps+W, Caps+M, Caps+Space).
 void sl_windows_key_next(sl_ctx_t *ctx);
@@ -92,6 +92,8 @@ void sl_windows_key_minimize(sl_ctx_t *ctx);
 void sl_launcher_key_toggle(sl_ctx_t *ctx);
 // A window (not minimized) covers x,y.
 int sl_windows_any_at(uint32_t x, uint32_t y);
+// The window on top at x,y (not minimized, not closing), or NULL.
+sl_window_t *sl_windows_top_at(uint32_t x, uint32_t y);
 // Open (or bring forward) the app with this title, case aside: 0 if none.
 // Opens the app of the bundle <id>.app ("calendario"): 0 if not installed.
 int sl_windows_open_app_id(sl_ctx_t *ctx, const char *id);
@@ -141,6 +143,28 @@ void sl_dirty_reset(void);
 // layer and in a composition done again (--check-damage).
 void sl_frame_time_set(uint64_t ns);
 uint64_t sl_frame_time_ns(void);
+// What the desktop waits for when nothing moves (docs/system-apps-ux-plan.md,
+// phase 5): no frame at a fixed pace, but the input, the descriptors and the
+// deadlines the frame's work asked for. Asked again at every frame:
+//   sl_wake_at(ns): a frame by then (the clock's next minute, a card that
+//     goes, a tip that shows); a time already past is not a deadline.
+//   sl_wake_fd(fd): a frame when it can be read (an app's output, a channel).
+//   sl_wake_signal(): from another thread of Starlight's, a frame now (its
+//     result is ready).
+#define SL_WAKE_FRAME_NS 7000000ull   // "the next frame" for sl_wake_at: about one at 144 fps
+void sl_wake_frame_begin(void);
+void sl_wake_at_from(uint64_t ns, const char *file, int line);
+#define sl_wake_at(ns) sl_wake_at_from((ns), __FILE__, __LINE__)
+// --idle-check: what ended the idle waits since the last call, as text
+// ("deadline app_host.c:6100 12, fd 3, ..."); the counts start again.
+void sl_wake_report(char *out, size_t cap);
+void sl_wake_fd(int64_t fd);
+void sl_wake_signal(void);
+// The idle wait that came before this frame ended because fd could be read.
+int sl_wake_fd_ready(int64_t fd);
+// The idle wait lasts at most ms (--idle-check=50: the old fixed pace, to
+// measure against); 0, the default, is the safety limit only.
+void sl_wake_set_idle_max_ms(uint32_t ms);
 // Before the frame is composed: the windows that draw their inside again
 // put it in the damage. -> 1 if a window waits for its frame rate.
 int sl_windows_prepare_render(sl_ctx_t *ctx);
@@ -166,6 +190,8 @@ void sl_windows_mark_app_dirty_all(const sl_ctx_t *ctx, const void *userdata);
 // Close the window of an app that was ended (SYS_PROC_KILL, from Monitor).
 void sl_windows_close_task(sl_ctx_t *ctx, const app_instance_t *task);
 void sl_windows_tick_animations(sl_ctx_t *ctx);
+// The next look at the apps' folders, the end of the wait cursor.
+void sl_windows_wake(void);
 
 void sl_app_host_tick(sl_ctx_t *ctx);
 int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t *frame,

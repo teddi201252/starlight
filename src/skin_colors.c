@@ -230,6 +230,7 @@ static void job_thread(void *arg) {
     (void)arg;
     job_run();
     __atomic_store_n(&g_job.done, 1u, __ATOMIC_RELEASE);
+    sl_wake_signal();   // the desktop, waiting, installs it
     peos_thread_exit(0);
 }
 

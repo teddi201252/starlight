@@ -14,6 +14,9 @@
 #include "app_host.h"
 #include "peos/lang.h"
 #include "sysmenu.h"
+#include "file_drag.h"
+#include "energy.h"
+#include "peos/thread.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,6 +92,100 @@ void sl_frame_time_set(uint64_t ns) {
 
 uint64_t sl_frame_time_ns(void) {
     return g_frame_ns ? g_frame_ns : peos_time_ns();
+}
+
+// ------------------------------------------------------- what wakes it up
+
+#define SL_WAKE_MAX_FDS 48u
+// The longest idle wait: a safety net, should a deadline be missing
+// somewhere (a frame every 2 s costs nothing).
+#define SL_IDLE_MAX_NS 2000000000ull
+static uint64_t g_wake_deadline = UINT64_MAX;
+static int32_t g_wake_fds[SL_WAKE_MAX_FDS];
+static uint32_t g_wake_fd_count;
+static volatile uint32_t g_wake_word;   // bumped by the other threads
+static uint32_t g_wake_seen;            // its value when this frame began
+static uint64_t g_idle_max_ns = SL_IDLE_MAX_NS;
+static int32_t g_ready_fds[SL_WAKE_MAX_FDS];   // what the last idle wait found readable
+static uint32_t g_ready_count;
+
+int sl_wake_fd_ready(int64_t fd) {
+    for (uint32_t i = 0u; fd >= 0 && i < g_ready_count; i++) {
+        if (g_ready_fds[i] == (int32_t)fd) return 1;
+    }
+    return 0;
+}
+
+void sl_wake_set_idle_max_ms(uint32_t ms) {
+    g_idle_max_ns = ms ? (uint64_t)ms * 1000000ull : SL_IDLE_MAX_NS;
+}
+
+void sl_wake_frame_begin(void) {
+    g_wake_deadline = UINT64_MAX;
+    g_wake_fd_count = 0u;
+    g_wake_seen = __atomic_load_n(&g_wake_word, __ATOMIC_ACQUIRE);
+}
+
+// What ended the idle waits (--idle-check): the deadline that came, by
+// where it was asked; a descriptor; another thread; the input; the limit.
+#define SL_WAKE_SRC_MAX 8u
+static const char *g_wake_file;
+static int g_wake_line;
+static struct { const char *file; int line; uint32_t n; } g_wake_src[SL_WAKE_SRC_MAX];
+static uint32_t g_wake_by_fd, g_wake_by_word, g_wake_by_input, g_wake_by_limit;
+
+void sl_wake_at_from(uint64_t ns, const char *file, int line) {
+    if (ns <= sl_frame_time_ns()) return;   // past: the frame did it already
+    if (ns < g_wake_deadline) {
+        g_wake_deadline = ns;
+        g_wake_file = file;
+        g_wake_line = line;
+    }
+}
+
+static void sl_wake_count_deadline(void) {
+    for (uint32_t i = 0u; i < SL_WAKE_SRC_MAX; i++) {
+        if (g_wake_src[i].file == g_wake_file && g_wake_src[i].line == g_wake_line) {
+            g_wake_src[i].n++;
+            return;
+        }
+        if (!g_wake_src[i].file) {
+            g_wake_src[i].file = g_wake_file;
+            g_wake_src[i].line = g_wake_line;
+            g_wake_src[i].n = 1u;
+            return;
+        }
+    }
+}
+
+void sl_wake_report(char *out, size_t cap) {
+    size_t n = 0u;
+    if (!out || !cap) return;
+    out[0] = '\0';
+    for (uint32_t i = 0u; i < SL_WAKE_SRC_MAX && g_wake_src[i].file; i++) {
+        const char *base = strrchr(g_wake_src[i].file, '/');
+        int w = snprintf(out + n, cap - n, "%s:%d %u, ", base ? base + 1 : g_wake_src[i].file, g_wake_src[i].line,
+                         (unsigned)g_wake_src[i].n);
+        if (w < 0 || (size_t)w >= cap - n) break;
+        n += (size_t)w;
+    }
+    (void)snprintf(out + n, cap - n, "fd %u, thread %u, input %u, limit %u", (unsigned)g_wake_by_fd,
+                   (unsigned)g_wake_by_word, (unsigned)g_wake_by_input, (unsigned)g_wake_by_limit);
+    memset(g_wake_src, 0, sizeof(g_wake_src));
+    g_wake_by_fd = g_wake_by_word = g_wake_by_input = g_wake_by_limit = 0u;
+}
+
+void sl_wake_fd(int64_t fd) {
+    if (fd < 0 || g_wake_fd_count >= SL_WAKE_MAX_FDS) return;
+    for (uint32_t i = 0u; i < g_wake_fd_count; i++) {
+        if (g_wake_fds[i] == (int32_t)fd) return;
+    }
+    g_wake_fds[g_wake_fd_count++] = (int32_t)fd;
+}
+
+void sl_wake_signal(void) {
+    __atomic_add_fetch(&g_wake_word, 1u, __ATOMIC_RELEASE);
+    (void)peos_wake(&g_wake_word, 1u);
 }
 
 void sl_dirty_reset(void) {
@@ -659,7 +756,11 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
     ctx->start_sound = 1u;
     ctx->graphics_perf_enabled = 0u;
     ctx->show_perf = 0u;
-    ctx->timezone = (uint8_t)peos_tz_find(PEOS_TZ_DEFAULT);
+    ctx->timezone = (uint16_t)peos_tz_find(PEOS_TZ_DEFAULT);
+    ctx->screen_off_battery_min = 5u;
+    ctx->screen_off_ac_min = 15u;
+    ctx->battery_dim = 1u;
+    ctx->battery_warn = 1u;
     sl_copy_text(ctx->language, sizeof(ctx->language), PEOS_LANG_FALLBACK);
 
     char *cfg = sl_load_text_file(SL_RESOURCE_CONFIG_FILE, SL_CFG_FILE_MAX);
@@ -762,8 +863,21 @@ static void sl_load_starlight_config(sl_ctx_t *ctx) {
                     }
                 } else if (strcmp(key, "language") == 0 && peos_lang_code_valid(val)) {
                     sl_copy_text(ctx->language, sizeof(ctx->language), val);
+                } else if (strcmp(key, "screen_off_battery") == 0 || strcmp(key, "screen_off_ac") == 0) {
+                    uint32_t n = 0u;
+                    if (sl_parse_u32(val, &n)) {
+                        if (n > 24u * 60u) n = 24u * 60u;
+                        if (key[11] == 'b') ctx->screen_off_battery_min = n;
+                        else ctx->screen_off_ac_min = n;
+                    }
+                } else if (strcmp(key, "battery_dim") == 0 || strcmp(key, "battery_warn") == 0) {
+                    uint32_t n = 0u;
+                    if (sl_parse_u32(val, &n)) {
+                        if (key[8] == 'd') ctx->battery_dim = n ? 1u : 0u;
+                        else ctx->battery_warn = n ? 1u : 0u;
+                    }
                 } else if (strcmp(key, "timezone") == 0) {
-                    ctx->timezone = (uint8_t)peos_tz_find(val);
+                    ctx->timezone = (uint16_t)peos_tz_find(val);
                 } else if (strcmp(key, "show_performance") == 0) {
                     uint32_t n = 0u;
                     if (sl_parse_u32(val, &n)) ctx->show_perf = n ? 1u : 0u;
@@ -1196,6 +1310,11 @@ int sl_handle_input(sl_ctx_t *ctx) {
     uint8_t clipboard_changed = 0u;
     uint8_t clipboard_full_redraw = 0u;
     if (sl_input_poll(ctx, &input) < 0) return 1;
+    // The screen dark: the first key or move only lights it again.
+    if (sl_energy_input(ctx, &input)) return input.quit_requested ? 1 : 0;
+    // Files dragged from an app follow the mouse; Esc cancels them (the key
+    // goes no further). The mouse itself goes on as always.
+    (void)sl_file_drag_input(ctx, &input);
     if (sl_clipboard_handle_input(ctx, &input, &clipboard_changed, &clipboard_full_redraw)) {
         if (clipboard_changed) {
             if (clipboard_full_redraw) {
@@ -1660,9 +1779,63 @@ int sl_present(sl_ctx_t *ctx) {
 
 // An input wake starts a frame early, but not sooner than this after the last one.
 #define SL_INPUT_MIN_FRAME_NS 4000000ull
-// After this many frames that drew nothing, tick slowly; input still wakes at once.
-#define SL_IDLE_AFTER_FRAMES 30u
-#define SL_IDLE_FRAME_NS 50000000ull
+// After this many frames that drew nothing, no frame until something wakes
+// it (sl_wake_*); input still wakes at once. Few: what moves without
+// drawing every frame asks for its own deadline.
+#define SL_IDLE_AFTER_FRAMES 4u
+// Woken this many times in a row for nothing (a descriptor nobody reads, a
+// bug): a short sleep each time instead, so it cannot spin.
+#define SL_IDLE_EMPTY_WAKES 60u
+#define SL_IDLE_EMPTY_SLEEP_MS 50u
+
+// Idle: until input, a descriptor, another thread or the earliest deadline
+// (at most g_idle_max_ns). 1 if the input woke it.
+static uint32_t g_empty_wakes;   // quick wakes since a frame last drew
+
+static int sl_idle_wait(int64_t input_fd, uint64_t last_frame_ns) {
+    static uint8_t empty_logged;
+    uint32_t empty_wakes = g_empty_wakes;
+    g_ready_count = 0u;
+    uint64_t now = peos_time_ns();
+    uint64_t until = g_wake_deadline, cap = last_frame_ns + g_idle_max_ns;
+    uint8_t limited = until > cap;
+    if (until > cap) until = cap;
+    if (until <= now) {
+        if (limited) g_wake_by_limit++;
+        else sl_wake_count_deadline();
+        return 0;
+    }
+    if (empty_wakes >= SL_IDLE_EMPTY_WAKES) {
+        if (!empty_logged) {
+            empty_logged = 1u;
+            printf("starlight: idle wait woken %u times for nothing: sleeping instead\n", (unsigned)empty_wakes);
+        }
+        peos_sleep(SL_IDLE_EMPTY_SLEEP_MS);
+        g_empty_wakes = 0u;
+        return 0;
+    }
+    peos_wait_item_t items[1u + SL_WAKE_MAX_FDS];
+    size_t n = 0u;
+    items[n++] = (peos_wait_item_t){ (int32_t)input_fd, PEOS_WAIT_READ, 0 };
+    for (uint32_t i = 0u; i < g_wake_fd_count; i++) items[n++] = (peos_wait_item_t){ g_wake_fds[i], PEOS_WAIT_READ, 0 };
+    peos_wait_addr_t word = { (uint64_t)(uintptr_t)&g_wake_word, g_wake_seen, 0u };
+    int64_t r = peos_wait_addrs(items, n, &word, 1u, until - now);
+    if (r == 0) {   // the deadline: real work
+        g_empty_wakes = 0u;
+        if (limited) g_wake_by_limit++;
+        else sl_wake_count_deadline();
+        return 0;
+    }
+    if (items[0].revents & PEOS_WAIT_READ) g_wake_by_input++;
+    else if (word.revents) g_wake_by_word++;
+    else g_wake_by_fd++;
+    for (size_t i = 1u; i < n; i++) {
+        if (items[i].revents & PEOS_WAIT_READ) g_ready_fds[g_ready_count++] = items[i].fd;
+    }
+    // Woken at once: counted until a frame draws (sl_frame_pace).
+    if (peos_time_ns() - now < SL_INPUT_MIN_FRAME_NS) g_empty_wakes++;
+    return (items[0].revents & PEOS_WAIT_READ) ? 1 : 0;
+}
 
 // Wait for the next frame deadline. With an input endpoint the wait ends early
 // when input arrives (lower latency, no busy wait); without one, sleep then spin.
@@ -1671,11 +1844,18 @@ void sl_frame_pace(uint64_t *next_deadline_ns, int64_t input_fd, int drew) {
     static uint32_t idle_frames;
     if (!next_deadline_ns) return;
 
-    if (drew) idle_frames = 0;
-    else if (idle_frames < SL_IDLE_AFTER_FRAMES) idle_frames++;
+    g_ready_count = 0u;   // this frame read them
+    if (drew) {
+        idle_frames = 0;
+        g_empty_wakes = 0u;
+    } else if (idle_frames < SL_IDLE_AFTER_FRAMES) idle_frames++;
     if (input_fd >= 0 && idle_frames >= SL_IDLE_AFTER_FRAMES && *next_deadline_ns != 0) {
-        uint64_t idle_deadline = last_frame_ns + SL_IDLE_FRAME_NS;
-        if (idle_deadline > *next_deadline_ns) *next_deadline_ns = idle_deadline;
+        // Nothing moves: wait for what can change something, then one frame.
+        if (sl_idle_wait(input_fd, last_frame_ns)) idle_frames = 0;   // input: the regular pace again
+        uint64_t t = peos_time_ns();
+        last_frame_ns = t;
+        *next_deadline_ns = t + SL_FRAME_NS;
+        return;
     }
 
     uint64_t now = peos_time_ns();

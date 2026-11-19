@@ -121,6 +121,17 @@ static void sl_keymap_init_us(void) {
     sl_keymap_set_pair(0x34u, ".", ">");
     sl_keymap_set_pair(0x35u, "/", "?");
     sl_keymap_set_pair(0x39u, " ", " ");
+    static const char kp[] = "789-456+1230.";   // the keypad, 0x47..0x53
+    for (uint16_t i = 0u; kp[i]; i++) {
+        char one[2] = { kp[i], '\0' };
+        sl_keymap_set_pair((uint16_t)(0x47u + i), one, one);
+    }
+    sl_keymap_set_pair(0x37u, "*", "*");
+}
+
+uint8_t sl_keyboard_code_is_keypad(uint16_t code) {
+    if (code == 0xE035u || code == 0xE01Cu) return 1u;   // its / and its Enter
+    return (code == 0x0037u || (code >= 0x0047u && code <= 0x0053u)) ? 1u : 0u;
 }
 
 static char *sl_keymap_trim(char *s) {

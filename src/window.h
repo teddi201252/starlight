@@ -67,6 +67,10 @@ struct sl_window {
     int8_t pressed_btn;         // title bar button under a press, SL_WIN_BTN_NONE
     uint32_t top_bar_height;    // the title bar: dragging starts here
     uint32_t restore_x, restore_y, restore_w, restore_h;
+    // Made smaller (or moved) to fit a smaller screen: where it was, to go
+    // back there when the screen grows again. fit_w 0: not fitted. The user
+    // moving or resizing it forgets it (sl_windows_remember).
+    uint32_t fit_x, fit_y, fit_w, fit_h;
     // Resizing (Soft UI plan, phase 12): the frame's limits, from app.ini
     // (0 = none: the screen), and whether it may change at all.
     uint32_t min_w, min_h, max_w, max_h;

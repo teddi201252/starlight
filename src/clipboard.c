@@ -459,6 +459,11 @@ static void sl_ring_tick(sl_ctx_t *ctx, uint64_t now_ns) {
     if (show) sl_dirty_add(ctx, x, y, RING_SIZE, RING_SIZE);
 }
 
+void sl_clipboard_wake(void) {
+    uint64_t now = sl_frame_time_ns();
+    if (g_feedback.active || g_ring.shown || sl_input_caps_hold_permille(now, NULL) > 0u) sl_wake_at(now + 16000000ull);
+}
+
 void sl_clipboard_tick(sl_ctx_t *ctx) {
     uint32_t cur_x = 0u, cur_y = 0u, cur_w = 0u, cur_h = 0u;
     if (!ctx) return;
@@ -546,7 +551,6 @@ uint8_t sl_clipboard_handle_input(sl_ctx_t *ctx, sl_input_frame_t *frame,
     for (uint8_t i = 0u; i < frame->key_event_count; i++) {
         peos_input_event_t *ev = &frame->key_events[i];
         uint16_t code = ev->code;
-        uint16_t low = (uint16_t)(code & 0xFFu);
         if (!ev->pressed) continue;
         if (code == PEOS_KEY_ESC) {
             sl_close_manager(out_changed, out_full_redraw);
@@ -576,8 +580,9 @@ uint8_t sl_clipboard_handle_input(sl_ctx_t *ctx, sl_input_frame_t *frame,
             if (idx < g_clipboard.count) sl_use_item(idx, out_changed, out_full_redraw);
             return 1u;
         }
-        // Canc: out of the history (the card gets shorter: all again)
-        if (low == 0x53u && g_clipboard.count > 0u) {
+        // Canc: out of the history (the card gets shorter: all again). Not
+        // the keypad's point (0x53 without E0).
+        if (code == PEOS_KEY_DELETE && g_clipboard.count > 0u) {
             sl_clipboard_remove_index(g_clipboard.manager_selected);
             if (out_changed) *out_changed = 1u;
             if (out_full_redraw) *out_full_redraw = 1u;

@@ -27,6 +27,8 @@
 static const char *const g_app_dirs[SL_APP_DIR_COUNT] = {SL_APP_DIR, SL_USER_APP_DIR};
 #define SL_APP_MANIFEST "app.ini"
 #define SL_APP_CATALOG_SCAN_INTERVAL_NS 1000000000ull
+// With the app manager closed only the dock shows the apps: a look now and then.
+#define SL_APP_CATALOG_SCAN_IDLE_NS 5000000000ull
 #define SL_APP_DIRECTORY_BUFFER_INITIAL 4096u
 #define SL_APP_DIRECTORY_BUFFER_MAX (1024u * 1024u)
 #define SL_APP_CATALOG_INITIAL_CAP 16u
@@ -2362,7 +2364,8 @@ static sl_launcher_item_t *sl_launcher_item_for_task(const app_instance_t *task)
 
 // Remember where a window is (after a move or a resize; not while
 // maximized: then it is the rect to go back to).
-void sl_windows_remember(const sl_window_t *win) {
+void sl_windows_remember(sl_window_t *win) {
+    if (win) win->fit_w = 0u;   // placed by the user: its size before a smaller screen no longer counts
     if (!win || win->maximized || !win->task) return;
     sl_launcher_item_t *item = sl_launcher_item_for_task(win->task);
     if (!item || !item->bundle_path[0] || strchr(item->bundle_path, ' ')) return;
@@ -2775,8 +2778,12 @@ void sl_windows_language_changed(sl_ctx_t *ctx) {
 static void sl_launcher_tick_catalog(sl_ctx_t *ctx) {
     if (!ctx) return;
     uint64_t now = peos_time_ns();
+    static uint8_t was_open;
+    uint8_t open = sl_launcher_manager_open();
+    if (open && !was_open) g_launcher_next_scan_ns = 0ull;   // opened: what is there now
+    was_open = open;
     if (now < g_launcher_next_scan_ns) return;
-    g_launcher_next_scan_ns = now + SL_APP_CATALOG_SCAN_INTERVAL_NS;
+    g_launcher_next_scan_ns = now + (open ? SL_APP_CATALOG_SCAN_INTERVAL_NS : SL_APP_CATALOG_SCAN_IDLE_NS);
     uint8_t changed = sl_launcher_dir_changed();
     if (!changed && !g_launcher_force_scan) return;
     g_launcher_force_scan = 0u;
@@ -2799,6 +2806,17 @@ static void sl_launcher_tick_catalog(sl_ctx_t *ctx) {
 }
 
 #define SL_LAUNCH_WAIT_NS 5000000000ull   // the wait cursor at most this long
+
+void sl_windows_wake(void) {
+    sl_wake_at(g_launcher_next_scan_ns);
+    uint64_t now = sl_frame_time_ns();
+    for (size_t i = 0; g_windows && i < g_window_count; i++) {
+        const sl_window_t *w = &g_windows[i];
+        if (w->task && now - w->opened_ns < SL_LAUNCH_WAIT_NS && !sl_app_host_ready(w->task->userdata)) {
+            sl_wake_at(w->opened_ns + SL_LAUNCH_WAIT_NS);   // the arrow again, if it never shows
+        }
+    }
+}
 
 uint8_t sl_windows_launching(void) {
     uint64_t now = peos_time_ns();
@@ -2974,6 +2992,15 @@ int sl_windows_cursor(const sl_ctx_t *ctx, uint32_t x, uint32_t y) {
         return w->task ? sl_app_host_cursor(w, w->task->userdata, x, y) : SL_CUR_ARROW;
     }
     return -1;
+}
+
+sl_window_t *sl_windows_top_at(uint32_t x, uint32_t y) {
+    for (size_t i = g_window_count; g_windows && i > 0u; i--) {
+        sl_window_t *w = &g_windows[i - 1u];
+        if (w->minimized || sl_window_is_closing(w)) continue;
+        if (sl_window_contains_point(w, x, y)) return w;
+    }
+    return NULL;
 }
 
 int sl_windows_any_at(uint32_t x, uint32_t y) {
@@ -3378,6 +3405,25 @@ void sl_windows_theme_changed(sl_ctx_t *ctx) {
 
 // The screen changed size (the interface scale): maximized windows fill it
 // again, the others shrink if they are resizable and move back inside.
+// A window's rect inside the room a screen of sw x sh leaves (right of the
+// dock, under the top bar): smaller if it is larger and may be resized
+// (below its app.ini minimum too: the screen is the limit), then moved in.
+// The top bar and the dock win over the far edges: a fixed window larger
+// than the room starts at its top left and goes past the bottom or right.
+static void sl_window_fit_rect(uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h, uint8_t resizable, uint32_t left,
+                               uint32_t top, uint32_t sw, uint32_t sh) {
+    uint32_t room_w = sw > left + 8u ? sw - left - 8u : sw;
+    uint32_t room_h = sh > top + 8u ? sh - top - 8u : sh;
+    if (resizable) {
+        if (*w > room_w) *w = room_w;
+        if (*h > room_h) *h = room_h;
+    }
+    if ((uint64_t)*x + *w > sw) *x = sw > *w ? sw - *w : 0u;
+    if (*x < left) *x = left;
+    if ((uint64_t)*y + *h > sh) *y = sh > *h ? sh - *h : 0u;
+    if (*y < top) *y = top;
+}
+
 void sl_windows_screen_changed(sl_ctx_t *ctx) {
     if (!ctx || !g_windows) return;
     uint32_t left = sl_launcher_reserved_left(ctx);
@@ -3385,6 +3431,15 @@ void sl_windows_screen_changed(sl_ctx_t *ctx) {
     uint32_t sw = ctx->fb.width, sh = ctx->fb.height;
     for (size_t i = 0u; i < g_window_count; i++) {
         sl_window_t *win = &g_windows[i];
+        // Fitted to a smaller screen before: from where it was then.
+        uint32_t x = win->x, y = win->y, w = win->width, h = win->height;
+        if (!win->maximized && win->fit_w) {
+            x = win->fit_x;
+            y = win->fit_y;
+            w = win->fit_w;
+            h = win->fit_h;
+        }
+        uint32_t ox = x, oy = y, ow = w, oh = h;
         if (win->maximized) {
             uint32_t l = left + 24u, m = 24u;
             if (sw > l + m + 200u && sh > top + m + 150u) {
@@ -3392,18 +3447,36 @@ void sl_windows_screen_changed(sl_ctx_t *ctx) {
                 win->y = top;
                 win->width = sw - l - m;
                 win->height = sh - top - m;
+            } else {
+                win->x = left;
+                win->y = top;
+                win->width = sw > left ? sw - left : sw;
+                win->height = sh > top ? sh - top : sh;
             }
+            // Restored later: to a rect that fits too.
+            sl_window_fit_rect(&win->restore_x, &win->restore_y, &win->restore_w, &win->restore_h, win->resizable,
+                               left, top, sw, sh);
         } else {
-            uint32_t max_w = sw > left + 8u ? sw - left - 8u : sw;
-            uint32_t max_h = sh > top + 8u ? sh - top - 8u : sh;
-            if (win->resizable) {
-                if (win->width > max_w) win->width = max_w > win->min_w ? max_w : win->min_w;
-                if (win->height > max_h) win->height = max_h > win->min_h ? max_h : win->min_h;
+            sl_window_fit_rect(&x, &y, &w, &h, win->resizable, left, top, sw, sh);
+            if (x != ox || y != oy || w != ow || h != oh) {
+                if (!win->fit_w) {   // its own place, kept for a larger screen
+                    win->fit_x = ox;
+                    win->fit_y = oy;
+                    win->fit_w = ow;
+                    win->fit_h = oh;
+                }
+            } else {
+                win->fit_w = 0u;   // all of it fits again
             }
-            if (win->x + win->width > sw) win->x = sw > win->width ? sw - win->width : 0u;
-            if (win->x < left && sw > left + win->width) win->x = left;
-            if (win->y + win->height > sh) win->y = sh > win->height ? sh - win->height : 0u;
-            if (win->y < top && sh > top + win->height) win->y = top;
+            if (x != win->x || y != win->y || w != win->width || h != win->height) {
+                printf("starlight: window %s %ux%u at %u,%u -> %ux%u at %u,%u (screen %ux%u)\n", win->title,
+                       (unsigned)win->width, (unsigned)win->height, (unsigned)win->x, (unsigned)win->y, (unsigned)w,
+                       (unsigned)h, (unsigned)x, (unsigned)y, (unsigned)sw, (unsigned)sh);
+            }
+            win->x = x;
+            win->y = y;
+            win->width = w;
+            win->height = h;
         }
         win->force_redraw = 1u;
         win->cache_valid = 0u;

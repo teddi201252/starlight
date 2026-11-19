@@ -51,3 +51,20 @@ key.33=, <
 key.34=. >
 key.35=/ ?
 key.39=space space
+
+# The numeric keypad (Num Lock is always on in PeOS); its / and Enter are
+# extended keys (E0 35, E0 1C), the same in every layout.
+key.37=* *
+key.47=7 7
+key.48=8 8
+key.49=9 9
+key.4A=- -
+key.4B=4 4
+key.4C=5 5
+key.4D=6 6
+key.4E=+ +
+key.4F=1 1
+key.50=2 2
+key.51=3 3
+key.52=0 0
+key.53=. .

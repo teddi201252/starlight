@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "app_host.h"
+#include "starlight_internal.h"
 #include "peos/disks.h"
 #include "peos/peos.h"
 
@@ -59,6 +60,10 @@ static void sl_stick_look(int act) {
     }
     memcpy(g_stick.seen, now, sizeof(now[0]) * count);
     g_stick.n_seen = count;
+}
+
+void sl_stick_wake(void) {
+    if (g_stick.watch >= 0) sl_wake_fd(g_stick.watch);
 }
 
 void sl_stick_tick(sl_ctx_t *ctx) {

@@ -368,6 +368,22 @@ static void sl_note_dirty_card(sl_ctx_t *ctx) {
     sl_dirty_add(ctx, x, SL_NOTIFY_TOP - 20u, ctx->fb.width - x, g_note.card_h + 2u * SL_NOTIFY_SHADOW);
 }
 
+void sl_notify_wake(void) {
+    if (g_note.listen < 0) return;
+    sl_wake_fd(g_note.listen);
+    for (uint32_t i = 0; i < SL_NOTIFY_PENDING; i++) {
+        if (g_note.pending[i].fd <= 0) continue;
+        sl_wake_fd(g_note.pending[i].fd);
+        sl_wake_at(g_note.pending[i].since + SL_NOTIFY_ACCEPT_NS);   // one that never sends goes
+    }
+    if (g_note.showing) {
+        uint64_t now = sl_frame_time_ns();
+        // Sliding in or out it draws every frame; still, it waits for its end.
+        if (now < g_note.until_ns) sl_wake_at(g_note.until_ns);
+        else sl_wake_at(now + 16000000ull);
+    }
+}
+
 void sl_notify_tick(sl_ctx_t *ctx) {
     if (!ctx || g_note.listen < 0) return;
     uint64_t now = peos_time_ns();
