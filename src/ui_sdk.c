@@ -49,6 +49,7 @@ void sl_ui_theme_set_default(sl_ui_theme_t *theme) {
     theme->colors[SL_UI_COLOR_SHADOW_DARK] = sl_ui_rgba(0xBCu, 0xC1u, 0xCBu, 255u);
     theme->colors[SL_UI_COLOR_SHADOW_LIGHT] = sl_ui_rgba(0xFFu, 0xFFu, 0xFFu, 255u);
     theme->colors[SL_UI_COLOR_NEON] = sl_ui_rgba(0x59u, 0xD0u, 0xFFu, 255u);
+    theme->colors[SL_UI_COLOR_OUTLINE] = sl_ui_rgba(0xC9u, 0xCDu, 0xD6u, 255u);
 }
 
 // Soft UI, night: the same surfaces on a deep navy ground.
@@ -73,6 +74,7 @@ void sl_ui_theme_set_night(sl_ui_theme_t *theme) {
     theme->colors[SL_UI_COLOR_WARNING] = sl_ui_rgba(0xFFu, 0xB5u, 0x47u, 255u);
     theme->colors[SL_UI_COLOR_SHADOW_DARK] = sl_ui_rgba(0x0Cu, 0x10u, 0x20u, 255u);
     theme->colors[SL_UI_COLOR_SHADOW_LIGHT] = sl_ui_rgba(0x2Au, 0x33u, 0x54u, 255u);
+    theme->colors[SL_UI_COLOR_OUTLINE] = sl_ui_rgba(0x2Bu, 0x33u, 0x52u, 255u);
 }
 
 const sl_ui_color_t *sl_ui_runtime_color(sl_ui_color_token_t token) {
@@ -279,8 +281,19 @@ static uint32_t sl_ui_text_center_y(const sl_ui_ctx_t *ui, uint32_t y, uint32_t 
 static sl_surf_shadow_t sl_ui_shadow(const sl_ui_ctx_t *ui, int8_t d, uint8_t blur, uint8_t inset,
                                      sl_ui_color_token_t token, uint8_t a) {
     const sl_ui_color_t *c = sl_ui_theme_color(ui, token);
-    sl_surf_shadow_t sh = { d, d, blur, inset, c->r, c->g, c->b, a };
+    // the theme colour's own alpha too: a transparent shadow_dark or
+    // shadow_light takes the shadow away (docs/skin-colors-plan.md)
+    uint8_t alpha = (uint8_t)(((uint32_t)a * c->a + 127u) / 255u);
+    sl_surf_shadow_t sh = { d, d, blur, inset, c->r, c->g, c->b, alpha };
     return sh;
+}
+
+// The outline's alpha: the theme's outline as strong as the shadows are
+// weak (both shadows opaque: none; both transparent: all of it), times its
+// own alpha (docs/skin-colors-plan.md, phase 4).
+uint8_t sl_ui_outline_alpha(const sl_ui_color_t *outline, const sl_ui_color_t *dark, const sl_ui_color_t *light) {
+    uint32_t sh = dark->a > light->a ? dark->a : light->a;
+    return (uint8_t)(((255u - sh) * outline->a + 127u) / 255u);
 }
 
 // Draw a soft UI surface at the exact size: rendered once per size and
@@ -336,6 +349,15 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
         break;
     case SL_UI_SURF_NIGHT_FLAT:
         break;
+    }
+    if (kind == SL_UI_SURF_RAISED || kind == SL_UI_SURF_RAISED_HI || kind == SL_UI_SURF_INSET ||
+        kind == SL_UI_SURF_FLAT) {   // the pearl ones: without shadows they would vanish
+        const sl_ui_color_t *o = sl_ui_theme_color(ui, SL_UI_COLOR_OUTLINE);
+        uint8_t a = sl_ui_outline_alpha(o, sl_ui_theme_color(ui, SL_UI_COLOR_SHADOW_DARK),
+                                        sl_ui_theme_color(ui, SL_UI_COLOR_SHADOW_LIGHT));
+        if (a && st.shadow_count < SL_SURF_MAX_SHADOWS) {
+            st.shadows[st.shadow_count++] = (sl_surf_shadow_t){ 0, 0, 0, SL_SURF_OUTLINE, o->r, o->g, o->b, a };
+        }
     }
     const sl_surf_t *s = sl_surf_get(&st, w, h, r);
     if (!s) {

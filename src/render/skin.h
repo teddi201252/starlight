@@ -24,9 +24,22 @@ int sl_skin_parse(sl_skin_t *skin, uint8_t *buf, size_t len);
 int sl_skin_load(sl_skin_t *skin, const char *path);
 void sl_skin_free(sl_skin_t *skin);
 
+// A second skin over the main one (docs/skin-colors-plan.md): the surfaces
+// baked again with the theme's colours. sl_skin_find looks there first; an
+// entry found there reads its pixels from there. NULL: none. Callers keep
+// pointers until the theme's version changes, then look them up again, so
+// the old overlay may only be freed after that (skin_colors.c does).
+extern const sl_skin_t *g_sl_skin_overlay;
+extern const sl_skin_t *g_sl_skin_retired;   // the one before, alive until the next change
+void sl_skin_set_overlay(const sl_skin_t *overlay, const sl_skin_t *retired);
+
 // Entry by name, or NULL. Meant for start-up: callers keep the pointer.
 const slsk_entry_t *sl_skin_find(const sl_skin_t *skin, const char *name);
 static inline const uint8_t *sl_skin_data(const sl_skin_t *skin, const slsk_entry_t *e) {
+    const sl_skin_t *o = g_sl_skin_overlay;
+    if (o && e >= o->entries && e < o->entries + o->count) return o->buf + e->offset;
+    o = g_sl_skin_retired;   // a pointer kept since the last change, for one more frame
+    if (o && e >= o->entries && e < o->entries + o->count) return o->buf + e->offset;
     return skin->buf + e->offset;
 }
 

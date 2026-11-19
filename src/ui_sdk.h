@@ -31,6 +31,7 @@ typedef enum {
     SL_UI_COLOR_SHADOW_DARK,
     SL_UI_COLOR_SHADOW_LIGHT,
     SL_UI_COLOR_NEON,
+    SL_UI_COLOR_OUTLINE,      // theme.cfg outline: the line around surfaces without shadows
     SL_UI_COLOR_COUNT
 } sl_ui_color_token_t;
 
@@ -200,6 +201,8 @@ void sl_ui_theme_set_night(sl_ui_theme_t *theme);
 // The runtime theme as Starlight's own drawing uses it: a colour, the mode,
 // and a version that changes on every reload (cached lookups compare it).
 const sl_ui_color_t *sl_ui_runtime_color(sl_ui_color_token_t token);
+// The outline around surfaces: the theme's outline alpha times how faint the shadows are.
+uint8_t sl_ui_outline_alpha(const sl_ui_color_t *outline, const sl_ui_color_t *dark, const sl_ui_color_t *light);
 uint8_t sl_ui_runtime_night(void);
 uint32_t sl_ui_runtime_version(void);
 void sl_ui_theme_apply(sl_ui_ctx_t *ui, const sl_ui_theme_t *theme);

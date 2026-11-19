@@ -162,6 +162,7 @@ int main(int argc, char **argv) {
             peos_puts("starlight: skin " SL_RESOURCE_SKIN " missing or invalid\n");
         }
     }
+    sl_skin_colors_apply(&ctx);   // the theme's colours over it (docs/skin-colors-plan.md)
     sl_cursor_init(&ctx);   // again, now that the skin (and its cursors) is there
     sl_audio_init(ctx.start_sound);
     peos_puts("starlight: minimal skeleton running\n");

@@ -323,7 +323,7 @@ static void sl_desk_clear(sl_ctx_t *ctx, const sl_desk_rect_t *r) {
     int64_t x1 = (int64_t)r->x + r->w, y1 = (int64_t)r->y + r->h;
     if (x1 > (int64_t)ctx->fb.width) x1 = ctx->fb.width;
     if (y1 > (int64_t)ctx->fb.height) y1 = ctx->fb.height;
-    if (x1 <= x0 || y1 <= y0) return;
+    if (x1 <= x0 || y1 <= y0 || !ctx->bg_frame || !ctx->desk_frame) return;
     size_t off = (size_t)x0 * ctx->bytespp, bytes = (size_t)(x1 - x0) * ctx->bytespp;
     for (int64_t y = y0; y < y1; y++) {
         memcpy(ctx->desk_frame + (size_t)y * ctx->bg_frame_stride + off,
@@ -510,18 +510,26 @@ static void sl_desk_surface(sl_ctx_t *ctx, sl_target_t *t, const sl_surf_style_t
 
 // A widget's look by its state: under the mouse it rises (raised ones) or
 // lights up in the accent (night ones); held down it sinks.
+// The night cards' black shadow fades with the theme's shadow_dark: a
+// transparent one takes every shadow away (docs/skin-colors-plan.md).
+static uint8_t sl_desk_shade(uint8_t a) {
+    const sl_ui_color_t *dk = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_DARK);
+    return (uint8_t)(((uint32_t)a * dk->a + 127u) / 255u);
+}
+
 static sl_surf_style_t sl_desk_night_card_style(int id) {
     if (g_desk.pressed == id) {
-        sl_surf_style_t st = { 0x0D, 0x11, 0x1E, 1, { { 2, 2, 6, 0, 0x00, 0x00, 0x00, 90 } } };
+        sl_surf_style_t st = { 0x0D, 0x11, 0x1E, 1, { { 2, 2, 6, 0, 0x00, 0x00, 0x00, sl_desk_shade(90) } } };
         return st;
     }
     if (g_desk.hot == id) {
         const sl_ui_color_t *n = sl_ui_runtime_color(SL_UI_COLOR_NEON);
         sl_surf_style_t st = { 0x11, 0x16, 0x26, 2,
-                               { { 0, 0, 14, 0, n->r, n->g, n->b, 120 }, { 8, 8, 20, 0, 0x00, 0x00, 0x00, 120 } } };
+                               { { 0, 0, 14, 0, n->r, n->g, n->b, 120 },
+                                 { 8, 8, 20, 0, 0x00, 0x00, 0x00, sl_desk_shade(120) } } };
         return st;
     }
-    sl_surf_style_t st = { 0x11, 0x16, 0x26, 1, { { 6, 6, 18, 0, 0x00, 0x00, 0x00, 110 } } };
+    sl_surf_style_t st = { 0x11, 0x16, 0x26, 1, { { 6, 6, 18, 0, 0x00, 0x00, 0x00, sl_desk_shade(110) } } };
     return st;
 }
 
@@ -615,8 +623,12 @@ static sl_surf_style_t sl_desk_raised_style(int id) {
     if (g_desk.pressed == id) d = 3, blur = 8;          // sunk, nearly flat
     else if (g_desk.hot == id) d = 12, blur = 26;       // a little higher
     sl_surf_style_t st = { bg->r, bg->g, bg->b, 2,
-                           { { d, d, (uint8_t)blur, 0, dk->r, dk->g, dk->b, 255 },
-                             { (int8_t)-d, (int8_t)-d, (uint8_t)blur, 0, lt->r, lt->g, lt->b, 255 } } };
+                           { { d, d, (uint8_t)blur, 0, dk->r, dk->g, dk->b, dk->a },
+                             { (int8_t)-d, (int8_t)-d, (uint8_t)blur, 0, lt->r, lt->g, lt->b, lt->a } } };
+    // without shadows the pearl card would vanish into the desktop: its outline
+    const sl_ui_color_t *o = sl_ui_runtime_color(SL_UI_COLOR_OUTLINE);
+    uint8_t a = sl_ui_outline_alpha(o, dk, lt);
+    if (a) st.shadows[st.shadow_count++] = (sl_surf_shadow_t){ 0, 0, 0, SL_SURF_OUTLINE, o->r, o->g, o->b, a };
     return st;
 }
 
@@ -625,7 +637,7 @@ static sl_surf_style_t sl_desk_night_style(int id) {
     const sl_ui_color_t *dk = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_DARK);
     const sl_ui_color_t *lt = sl_ui_runtime_color(SL_UI_COLOR_SHADOW_LIGHT);
     sl_surf_style_t st = { 0x11, 0x16, 0x26, 2,
-                           { { 9, 9, 20, 0, dk->r, dk->g, dk->b, 255 }, { -6, -6, 16, 0, lt->r, lt->g, lt->b, 255 } } };
+                           { { 9, 9, 20, 0, dk->r, dk->g, dk->b, dk->a }, { -6, -6, 16, 0, lt->r, lt->g, lt->b, lt->a } } };
     return st;
 }
 
@@ -1043,7 +1055,8 @@ static void sl_desk_tips_hello(sl_ctx_t *ctx) {
 static void sl_desk_pill_tick(sl_ctx_t *ctx);
 
 void sl_desk_tick(sl_ctx_t *ctx) {
-    if (!ctx || !ctx->desk_frame || g_desk.ready != 1u) return;
+    // no background (a reload freed it, the next frame bakes it): nothing to paint from
+    if (!ctx || !ctx->desk_frame || !ctx->bg_frame || g_desk.ready != 1u) return;
     sl_desk_tips_hello(ctx);
     sl_desk_pill_tick(ctx);
     int64_t minute = sl_desk_local_seconds(ctx) / 60;

@@ -132,7 +132,7 @@ int sl_surf_render_exact(const sl_surf_style_t *st, uint32_t sw, uint32_t sh, ui
     // Inset shadows: cast by the outside of the moved shape, kept inside.
     for (int i = (int)st->shadow_count - 1; i >= 0; i--) {
         const sl_surf_shadow_t *s = &st->shadows[i];
-        if (!s->inset) continue;
+        if (s->inset != 1u) continue;
         for (uint32_t y = 0; y < h; y++) {
             for (uint32_t x = 0; x < w; x++) {
                 int32_t sx = (int32_t)x - s->dx, sy = (int32_t)y - s->dy;
@@ -143,6 +143,21 @@ int sl_surf_render_exact(const sl_surf_style_t *st, uint32_t sw, uint32_t sh, ui
         }
         blur_mask(m, w, h, s->blur, tmp);
         for (size_t k = 0; k < n; k++) m[k] = (uint16_t)((uint32_t)m[k] * shape[k] / 255u);
+        paint(px, m, n, s->r, s->g, s->b, s->a);
+    }
+
+    // The outline: the shape less the shape one pixel smaller.
+    for (uint32_t i = 0; i < st->shadow_count; i++) {
+        const sl_surf_shadow_t *s = &st->shadows[i];
+        if (s->inset != SL_SURF_OUTLINE || !s->a || sw <= 2u || sh <= 2u) continue;
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                size_t k = (size_t)y * w + x;
+                uint16_t in = rrect_cov((int32_t)x, (int32_t)y, pl + 1, pt + 1, (int32_t)sw - 2, (int32_t)sh - 2,
+                                        r ? (int32_t)r - 1 : 0);
+                m[k] = shape[k] > in ? (uint16_t)(shape[k] - in) : 0u;
+            }
+        }
         paint(px, m, n, s->r, s->g, s->b, s->a);
     }
 

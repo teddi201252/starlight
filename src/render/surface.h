@@ -16,11 +16,13 @@
 #include <stdint.h>
 
 #define SL_SURF_MAX_SHADOWS 3
+#define SL_SURF_OUTLINE 2u   // a "shadow" that is the outline (the theme's, without shadows)
 
 typedef struct {
     int8_t dx, dy;
     uint8_t blur;          // CSS blur radius
-    uint8_t inset;         // 1 = inset shadow
+    uint8_t inset;         // 1 = inset shadow; SL_SURF_OUTLINE: not a shadow but a line
+                           // one pixel wide inside the edge, over everything
     uint8_t r, g, b, a;
 } sl_surf_shadow_t;
 

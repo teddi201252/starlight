@@ -89,8 +89,22 @@ int sl_skin_parse(sl_skin_t *skin, uint8_t *buf, size_t len) {
     return 1;
 }
 
+const sl_skin_t *g_sl_skin_retired;
+const sl_skin_t *g_sl_skin_overlay;
+
+void sl_skin_set_overlay(const sl_skin_t *overlay, const sl_skin_t *retired) {
+    g_sl_skin_overlay = overlay;
+    g_sl_skin_retired = retired;
+}
+
 const slsk_entry_t *sl_skin_find(const sl_skin_t *skin, const char *name) {
     if (!skin || !name) return NULL;
+    const sl_skin_t *o = g_sl_skin_overlay;
+    if (o && o != skin) {   // the theme's surfaces first
+        for (uint32_t i = 0; i < o->count; i++) {
+            if (strcmp(o->entries[i].name, name) == 0) return &o->entries[i];
+        }
+    }
     for (uint32_t i = 0; i < skin->count; i++) {
         if (strcmp(skin->entries[i].name, name) == 0) return &skin->entries[i];
     }

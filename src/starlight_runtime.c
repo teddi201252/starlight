@@ -460,6 +460,7 @@ static int sl_theme_token_from_key(const char *key, sl_ui_color_token_t *out) {
     else if (strcmp(key, "shadow_dark") == 0) *out = SL_UI_COLOR_SHADOW_DARK;
     else if (strcmp(key, "shadow_light") == 0) *out = SL_UI_COLOR_SHADOW_LIGHT;
     else if (strcmp(key, "neon") == 0) *out = SL_UI_COLOR_NEON;
+    else if (strcmp(key, "outline") == 0) *out = SL_UI_COLOR_OUTLINE;
     else return 0;
     return 1;
 }
@@ -591,6 +592,7 @@ static void sl_write_default_theme_config(void) {
     (void)fprintf(f, "warning=D99A2B\n");
     (void)fprintf(f, "shadow_dark=BCC1CB\n");
     (void)fprintf(f, "shadow_light=FFFFFF\n");
+    (void)fprintf(f, "outline=C9CDD6\n");
     (void)fprintf(f, "neon=59D0FF\n");
     (void)fclose(f);
 }
@@ -1107,6 +1109,7 @@ void sl_reload_display(sl_ctx_t *ctx) {
     sl_apply_keyboard_config(ctx);
     sl_apply_clipboard_feedback_config(ctx);
     sl_load_theme_config();
+    sl_skin_colors_apply(ctx);
     sl_font_reset_default();
     if (ctx->font_manifest_path[0]) {
         (void)sl_font_load_manifest_default(ctx->font_manifest_path);
@@ -1151,6 +1154,7 @@ void sl_apply_language(sl_ctx_t *ctx) {
 
 void sl_reload_theme(sl_ctx_t *ctx) {
     sl_load_theme_config();
+    sl_skin_colors_apply(ctx);   // the surfaces in the theme's colours (docs/skin-colors-plan.md)
     // Everything drawn from the theme comes again: window caches, the
     // desktop layer (its neon), the dock and frames (they look up their
     // sprites again when the theme version changes).

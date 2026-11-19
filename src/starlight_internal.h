@@ -35,6 +35,9 @@ void sl_reload_display(sl_ctx_t *ctx);
 // ctx->language into effect (Technical Alpha plan, phase 4).
 void sl_apply_language(sl_ctx_t *ctx);
 void sl_reload_theme(sl_ctx_t *ctx);
+// The skin's surfaces in the theme's colours, baked or from the cache
+// (skin_colors.c, docs/skin-colors-plan.md).
+void sl_skin_colors_apply(sl_ctx_t *ctx);
 int sl_handle_input(sl_ctx_t *ctx);
 void sl_render_full(sl_ctx_t *ctx);
 void sl_render_dirty_background(sl_ctx_t *ctx);
