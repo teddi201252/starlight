@@ -150,7 +150,10 @@ typedef enum {
     ORBIT_UI_CMD_TOOLTIP = 34,   // TOOLTIP id text: a tip under the control id when the mouse rests on it
     ORBIT_UI_CMD_TEXT_OPTS = 35, // TEXT_OPTS id flags: a text area's extras (value: the area, x: SL_UI_TA_*)
     ORBIT_UI_CMD_TEXT_MARKS = 36, // TEXT_MARKS id current n s e ...: what a search found in it (value: the area)
+    ORBIT_UI_CMD_TIP_ZONE = 37,  // TIP_ZONE x y w h text: a tip over a part of the app's own pixels (id: its key)
 } orbit_ui_cmd_type_t;
+
+#define ORBIT_TIP_ZONE_KEY 0x7E000000u   // TIP_ZONE n has the id KEY + n
 
 typedef struct {
     uint8_t type;
@@ -364,6 +367,7 @@ typedef struct {
     // The tip of the control under the mouse (SLUI SDK 1.0.18, TOOLTIP):
     // shown after ORBIT_TIP_DELAY_NS still on it, at tip[] in the body.
     uint32_t tip_hover;
+    uint32_t tip_zone;          // the TIP_ZONE under the mouse (its key), or 0
     uint64_t tip_since_ns;
     uint8_t tip_shown, tip_off;
     int32_t tip[4];
@@ -2055,6 +2059,7 @@ static uint8_t orbit_ui_cmd_reach(sl_ui_ctx_t *ui, const orbit_ui_cmd_t *cmd, in
     case ORBIT_UI_CMD_TEXT_HINT:
     case ORBIT_UI_CMD_TEXT_SECRET:
     case ORBIT_UI_CMD_TOOLTIP:
+    case ORBIT_UI_CMD_TIP_ZONE:
     case ORBIT_UI_CMD_TEXT_OPTS:
     case ORBIT_UI_CMD_TEXT_MARKS:
         return 0u;
@@ -2821,6 +2826,24 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         cmd->id = 0u;
         p = orbit_skip_spaces(p);
         if (!orbit_cmd_set_text_raw(cmd, p)) orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "tooltip_alloc_failed");
+        return 1;
+    }
+    if (orbit_token_is(cmd_tok, cmd_len, "TIP_ZONE")) {   // "TIP_ZONE x y w h text" (SLUI SDK 1.0.25)
+        // keyed by its place among the frame's zones: the same button the
+        // same key from one frame to the next
+        uint32_t n = 0u;
+        for (size_t i = 0u; i < shell->ui.staged_count; i++)
+            if (shell->ui.staged_cmds[i].type == ORBIT_UI_CMD_TIP_ZONE) n++;
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TIP_ZONE);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->x) || !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
+            !orbit_parse_u32(&p, &cmd->h)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "tip_zone_invalid_args");
+            return 1;
+        }
+        cmd->id = ORBIT_TIP_ZONE_KEY + n;
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "tip_zone_alloc_failed");
         return 1;
     }
     if (orbit_token_is(cmd_tok, cmd_len, "TEXT_HINT")) {   // SLUI SDK 1.0.14
@@ -3610,6 +3633,7 @@ static const char *orbit_tooltip_text(const orbit_shell_t *shell, uint32_t id) {
     for (size_t i = 0u; i < shell->ui.cmd_count; i++) {
         const orbit_ui_cmd_t *c = &shell->ui.cmds[i];
         if (c->type == ORBIT_UI_CMD_TOOLTIP && c->value == id && c->text && c->text[0]) return c->text;
+        if (c->type == ORBIT_UI_CMD_TIP_ZONE && c->id == id && c->text && c->text[0]) return c->text;
     }
     return NULL;
 }
@@ -3624,7 +3648,8 @@ static void orbit_tip_hide(sl_ctx_t *ctx, orbit_shell_t *shell) {
 // Every Starlight frame (sl_app_host_tick): the tip appears after a moment on
 // a control that has one, and goes when the mouse leaves it or presses.
 static void orbit_tip_tick(sl_ctx_t *ctx, orbit_shell_t *shell, uint64_t now) {
-    uint32_t id = (shell->ui.enabled && shell->ui.committed) ? shell->ui.hover_cmd_id : 0u;
+    // a zone of the app's pixels (TIP_ZONE) first: under it the control is the pixels
+    uint32_t id = (shell->ui.enabled && shell->ui.committed) ? (shell->tip_zone ? shell->tip_zone : shell->ui.hover_cmd_id) : 0u;
     if (id != shell->tip_hover) {
         orbit_tip_hide(ctx, shell);
         shell->tip_hover = id;
@@ -4876,6 +4901,7 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_TEXT_HINT:
         case ORBIT_UI_CMD_TEXT_SECRET:
         case ORBIT_UI_CMD_TOOLTIP:
+        case ORBIT_UI_CMD_TIP_ZONE:
         case ORBIT_UI_CMD_TEXT_OPTS:
         case ORBIT_UI_CMD_TEXT_MARKS:
         case ORBIT_UI_CMD_SCROLL_V:
@@ -4921,6 +4947,17 @@ int sl_app_host_input_dirty_rect(const sl_window_t *win, const sl_input_frame_t 
 
     uint32_t cursor_x = win->ctx ? win->ctx->cursor_x : 0u;
     uint32_t cursor_y = win->ctx ? win->ctx->cursor_y : 0u;
+    // the tip zone under the mouse (TIP_ZONE: the app's pixel buttons)
+    shell->tip_zone = 0u;
+    for (size_t i = shell->ui.cmd_count; shell->ui.committed && shell->ui.cmds && i > 0u; i--) {
+        const orbit_ui_cmd_t *z = &shell->ui.cmds[i - 1u];
+        uint32_t zx = 0u, zy = 0u, zw = 0u, zh = 0u;
+        if (z->type != ORBIT_UI_CMD_TIP_ZONE || !orbit_ui_cmd_rect(win, z, &zx, &zy, &zw, &zh)) continue;
+        if (cursor_x >= zx && cursor_y >= zy && cursor_x < zx + zw && cursor_y < zy + zh) {
+            shell->tip_zone = z->id;
+            break;
+        }
+    }
 
     uint32_t hover_id = 0u, hover_x = 0u, hover_y = 0u, hover_w = 0u, hover_h = 0u;
     size_t hover_idx = 0u;
@@ -6022,7 +6059,8 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 orbit_draw_grad2d(&shell->ui.ui, x, y, cmd->w, cmd->h, cmd->grad);
             } else if (cmd->type == ORBIT_UI_CMD_CONTEXT_MENU || cmd->type == ORBIT_UI_CMD_TEXT_MENU ||
                        cmd->type == ORBIT_UI_CMD_TEXT_HINT || cmd->type == ORBIT_UI_CMD_TEXT_SECRET ||
-                       cmd->type == ORBIT_UI_CMD_TOOLTIP || cmd->type == ORBIT_UI_CMD_TEXT_OPTS ||
+                       cmd->type == ORBIT_UI_CMD_TOOLTIP || cmd->type == ORBIT_UI_CMD_TIP_ZONE ||
+                       cmd->type == ORBIT_UI_CMD_TEXT_OPTS ||
                        cmd->type == ORBIT_UI_CMD_TEXT_MARKS) {
                 // Registration-only control: rendered by host overlay on right click.
             } else if (cmd->type == ORBIT_UI_CMD_IMAGE_FILE) {
