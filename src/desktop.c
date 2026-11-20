@@ -56,6 +56,8 @@ static struct {
     uint8_t ready;
     const slsk_font_t *bar, *bar_bold, *digits, *day, *date, *cal_title, *cal, *cal_bold;
     const slsk_entry_t *logo, *wifi, *volume, *globe;
+    // the network in the top bar (design: "La rete nella barra in alto")
+    const slsk_entry_t *wifi_off, *cable, *cable_off;
     const slsk_entry_t *battery[5], *battery_charge;   // bar-battery-0..4 (empty .. full), charging
     const slsk_font_t *w_label, *w_value, *w_small, *mono, *mono_small;
     sl_desk_rect_t bar_r, clock_r, cal_r;
@@ -82,6 +84,10 @@ static struct {
     volatile uint32_t version;       // odd while being written
     uint8_t ip[4];
     uint8_t has_ip;
+    // The cards (netd, docs/multi-netif-plan.md): the media of the one in
+    // use (1 cable, 2 Wi-Fi, 0 none), whether one has its link and waits for
+    // an address, whether there is a Wi-Fi card at all.
+    uint8_t media, asking, have_wifi;
     int32_t volume;                  // -1 unknown
     int32_t cpu;                     // load 0..100 over the last poll, -1 unknown
     uint64_t rx_rate, tx_rate;       // bytes a second over the last poll
@@ -148,6 +154,23 @@ static void sl_desk_poller(void *arg) {
         peos_netcfg_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         uint8_t has_ip = (net_config_get(&cfg) == NET_OK && (cfg.ip[0] | cfg.ip[1] | cfg.ip[2] | cfg.ip[3])) ? 1u : 0u;
+        // Which card is in use (its symbol in the bar), and whether one with
+        // its link is still asking for an address.
+        uint8_t media = 0u, asking = 0u, have_wifi = 0u, asking_media = 0u;
+        for (uint32_t i = 0u; i < 4u; i++) {
+            net_iface_t nif;
+            memset(&nif, 0, sizeof(nif));
+            if (net_if_get(i, &nif) != NET_OK) break;
+            uint8_t addr = (nif.cfg.ip[0] | nif.cfg.ip[1] | nif.cfg.ip[2] | nif.cfg.ip[3]) ? 1u : 0u;
+            if (nif.media == 2u) have_wifi = 1u;
+            if (nif.in_use && addr) media = nif.media ? nif.media : 1u;
+            if (nif.link_up && !addr && !asking_media) asking_media = nif.media ? nif.media : 1u;
+        }
+        if (!has_ip && asking_media) {
+            asking = 1u;
+            media = asking_media;
+        }
+        if (has_ip && !media) media = have_wifi ? 2u : 1u;   // netd of before: no interfaces
         // The kernel's volume and CPU time (no capability needed), netd's bytes.
         peos_sysinfo_t si;
         memset(&si, 0, sizeof(si));
@@ -183,12 +206,16 @@ static void sl_desk_poller(void *arg) {
         g_prev.have = have_si || have_ns;
 
         if (has_ip != g_feed.has_ip || vol != g_feed.volume || memcmp(cfg.ip, g_feed.ip, 4) != 0 ||
+            media != g_feed.media || asking != g_feed.asking || have_wifi != g_feed.have_wifi ||
             cpu != g_feed.cpu || net_moved || battery_moved) {
             __atomic_add_fetch(&g_feed.version, 1u, __ATOMIC_RELEASE);
             g_feed.battery = battery;
             g_feed.battery_flags = battery_flags;
             memcpy(g_feed.ip, cfg.ip, 4);
             g_feed.has_ip = has_ip;
+            g_feed.media = media;
+            g_feed.asking = asking;
+            g_feed.have_wifi = have_wifi;
             g_feed.volume = vol;
             g_feed.cpu = cpu;
             if (net_moved) {
@@ -267,6 +294,9 @@ static int sl_desk_ready(sl_ctx_t *ctx) {
     g_desk.cal_bold = sl_desk_font(ctx, "mono-16-bold");
     g_desk.logo = sl_skin_find(&ctx->skin, "bar-logo");
     g_desk.wifi = sl_skin_find(&ctx->skin, "bar-wifi");
+    g_desk.wifi_off = sl_skin_find(&ctx->skin, "bar-wifi-off");
+    g_desk.cable = sl_skin_find(&ctx->skin, "bar-cable");
+    g_desk.cable_off = sl_skin_find(&ctx->skin, "bar-cable-off");
     g_desk.volume = sl_skin_find(&ctx->skin, "bar-volume");
     for (int i = 0; i < 5; i++) {
         char name[20];
@@ -461,13 +491,30 @@ static void sl_desk_draw_bar(sl_ctx_t *ctx, const struct tm *now) {
         r -= 8 + (int32_t)g_desk.volume->width;
         (void)sl_desk_mask(ctx, &t, g_desk.volume, r, cy, ink);
     }
-    if (has_ip) snprintf(ip, sizeof(ip), "%u.%u.%u.%u", addr[0], addr[1], addr[2], addr[3]);
-    else snprintf(ip, sizeof(ip), "%s", sl_tr("desk.offline"));
+    // One symbol, the card in use (design: "La rete nella barra in alto"):
+    // the cable or the Wi-Fi with the address; grey while one asks for an
+    // address; none: the card there is (the Wi-Fi if any) crossed out.
+    uint8_t media = g_feed.media, asking = g_feed.asking, have_wifi = g_feed.have_wifi;
+    const slsk_entry_t *net_icon;
+    if (has_ip) {
+        snprintf(ip, sizeof(ip), "%u.%u.%u.%u", addr[0], addr[1], addr[2], addr[3]);
+        net_icon = media == 1u ? g_desk.cable : g_desk.wifi;
+    } else if (asking) {
+        snprintf(ip, sizeof(ip), "%s", sl_tr("desk.asking"));
+        net_icon = media == 2u ? g_desk.wifi : g_desk.cable;
+    } else {
+        snprintf(ip, sizeof(ip), "%s", sl_tr("desk.offline"));
+        net_icon = have_wifi || !g_desk.cable_off ? g_desk.wifi_off : g_desk.cable_off;
+    }
+    if (!net_icon) net_icon = g_desk.wifi;   // a skin of before
+    // the design's grey: #5A606E by day, #9FB4D8 at night
+    uint8_t grey[3] = { muted[0], muted[1], muted[2] };
+    if (g_desk.dark_bar) grey[0] = 0x9F, grey[1] = 0xB4, grey[2] = 0xD8;
+    const uint8_t *net_ink = has_ip ? ink : grey;
     r -= 22 + (int32_t)sl_text_width(g_desk.bar, ip);
-    sl_text_draw(&t, g_desk.bar, r, text_base, ip, has_ip ? ink[0] : muted[0], has_ip ? ink[1] : muted[1],
-                 has_ip ? ink[2] : muted[2]);
-    r -= 8 + (int32_t)g_desk.wifi->width;
-    (void)sl_desk_mask(ctx, &t, g_desk.wifi, r, cy, has_ip ? ink : muted);
+    sl_text_draw(&t, g_desk.bar, r, text_base, ip, net_ink[0], net_ink[1], net_ink[2]);
+    r -= 8 + (int32_t)net_icon->width;
+    (void)sl_desk_mask(ctx, &t, net_icon, r, cy, net_ink);
     // What plays (design/orfeus): a pill left of the network; a click opens the mini player.
     g_desk.music_version = sl_music_version();
     (void)sl_music_draw_pill(ctx, &t, r - 22, cy, g_desk.dark_bar);
