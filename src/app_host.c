@@ -151,6 +151,7 @@ typedef enum {
     ORBIT_UI_CMD_TEXT_OPTS = 35, // TEXT_OPTS id flags: a text area's extras (value: the area, x: SL_UI_TA_*)
     ORBIT_UI_CMD_TEXT_MARKS = 36, // TEXT_MARKS id current n s e ...: what a search found in it (value: the area)
     ORBIT_UI_CMD_TIP_ZONE = 37,  // TIP_ZONE x y w h text: a tip over a part of the app's own pixels (id: its key)
+    ORBIT_UI_CMD_PRESS_ZONE = 38, // PRESS_ZONE x y w h: a press there on no control is the app's (POINTER events)
 } orbit_ui_cmd_type_t;
 
 #define ORBIT_TIP_ZONE_KEY 0x7E000000u   // TIP_ZONE n has the id KEY + n
@@ -353,6 +354,12 @@ typedef struct {
     uint32_t drag_first, drag_count;
     uint8_t drag_armed, drag_sent;
     uint32_t drag_px, drag_py;
+    // A press on no control inside a PRESS_ZONE (SLUI SDK 1.0.26: Curiosity's
+    // rectangle): the mouse goes to the app as POINTER events, from the
+    // body's top left, until the left button is let go, also outside.
+    uint8_t press_captured;
+    uint32_t press_body_x, press_body_y;
+    int32_t press_last_x, press_last_y;
     uint8_t ended;              // the app was ended from outside: close its window
     // An app that ended with an error (docs/system-apps-ux-plan.md, Starlight
     // large 4): a card says so, with Reopen and Close; what it wrote is in
@@ -2060,6 +2067,7 @@ static uint8_t orbit_ui_cmd_reach(sl_ui_ctx_t *ui, const orbit_ui_cmd_t *cmd, in
     case ORBIT_UI_CMD_TEXT_SECRET:
     case ORBIT_UI_CMD_TOOLTIP:
     case ORBIT_UI_CMD_TIP_ZONE:
+    case ORBIT_UI_CMD_PRESS_ZONE:
     case ORBIT_UI_CMD_TEXT_OPTS:
     case ORBIT_UI_CMD_TEXT_MARKS:
         return 0u;
@@ -2616,7 +2624,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         if (!cmd) return 1;
         if (!orbit_parse_u32(&p, &cmd->value) || !orbit_parse_u32(&p, &cmd->x) ||
             !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
-            !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->min_v) || cmd->value > 11u) {
+            !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->min_v) || cmd->value > 12u) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "surf_invalid_args");
             cmd->type = ORBIT_UI_CMD_NONE;
         }
@@ -2844,6 +2852,17 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         cmd->id = ORBIT_TIP_ZONE_KEY + n;
         p = orbit_skip_spaces(p);
         if (!orbit_cmd_set_text_raw(cmd, p)) orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "tip_zone_alloc_failed");
+        return 1;
+    }
+    if (orbit_token_is(cmd_tok, cmd_len, "PRESS_ZONE")) {   // "PRESS_ZONE x y w h" (SLUI SDK 1.0.26)
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_PRESS_ZONE);
+        if (!cmd) return 1;
+        if (!orbit_parse_u32(&p, &cmd->x) || !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
+            !orbit_parse_u32(&p, &cmd->h)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "press_zone_invalid_args");
+            return 1;
+        }
+        cmd->id = 0u;
         return 1;
     }
     if (orbit_token_is(cmd_tok, cmd_len, "TEXT_HINT")) {   // SLUI SDK 1.0.14
@@ -3894,6 +3913,70 @@ static void orbit_drag_rows_mouse(sl_ctx_t *ctx, orbit_shell_t *shell, const sl_
     orbit_send_ui_event_drag_begin(shell, id);
 }
 
+// A press with the left button on no control inside a PRESS_ZONE (SLUI SDK
+// 1.0.26): the app follows the mouse (POINTER down, moves, up, from the
+// body's top left; out of the body too, as negative or larger numbers
+// clamped at 0) until the button is let go. Nothing is sent otherwise.
+static int orbit_ui_cmd_find_hovered(const sl_window_t *win, const orbit_shell_t *shell, uint32_t modal_select_id,
+                                     uint32_t cursor_x, uint32_t cursor_y, uint32_t *out_id, uint32_t *out_x,
+                                     uint32_t *out_y, uint32_t *out_w, uint32_t *out_h, size_t *out_idx);
+static uint8_t orbit_ui_body_rect(const sl_window_t *win, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
+static uint8_t orbit_ui_cmd_rect(const sl_window_t *win, const orbit_ui_cmd_t *cmd,
+                                 uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
+
+// Under the mouse at the press, looked at now: the hover of the last move
+// can be older (a move and a press in one frame, a slow VM).
+static uint8_t orbit_press_zone_hit(orbit_shell_t *shell, uint32_t cx, uint32_t cy) {
+    const sl_window_t *win = sl_window_get_focused();
+    if (!win || !win->task || win->task->userdata != shell || !shell->ui.committed || !shell->ui.cmds) return 0u;
+    uint32_t bx = 0u, by = 0u, bw = 0u, bh = 0u;
+    if (!orbit_ui_body_rect(win, &bx, &by, &bw, &bh)) return 0u;
+    uint8_t in = 0u;
+    for (size_t i = 0u; i < shell->ui.cmd_count && !in; i++) {
+        const orbit_ui_cmd_t *z = &shell->ui.cmds[i];
+        uint32_t zx = 0u, zy = 0u, zw = 0u, zh = 0u;
+        if (z->type != ORBIT_UI_CMD_PRESS_ZONE || !orbit_ui_cmd_rect(win, z, &zx, &zy, &zw, &zh)) continue;
+        in = cx >= zx && cy >= zy && cx < zx + zw && cy < zy + zh;
+    }
+    if (!in) return 0u;
+    uint32_t id = 0u, hx = 0u, hy = 0u, hw = 0u, hh = 0u;
+    size_t idx = 0u;
+    if (orbit_ui_cmd_find_hovered(win, shell, shell->ui.ui.select_open_id, cx, cy, &id, &hx, &hy, &hw, &hh, &idx))
+        return 0u;   // a control: the press is its own
+    shell->press_body_x = bx;
+    shell->press_body_y = by;
+    return 1u;
+}
+
+static void orbit_press_zone_mouse(sl_ctx_t *ctx, orbit_shell_t *shell, const sl_input_frame_t *frame) {
+    if (!ctx) return;
+    uint32_t buttons = frame->mouse_buttons & 0x07u, mods = orbit_mod_mask(shell);
+    if (!shell->press_captured) {
+        if (!frame->mouse_left_pressed) return;
+        uint32_t ox = 0u, oy = 0u, ow = 0u, oh = 0u;
+        if (orbit_ui_context_popup_rect(shell, &ox, &oy, &ow, &oh) || orbit_ui_dropdown_popup_rect(shell, &ox, &oy, &ow, &oh))
+            return;   // a menu open: the press closes it
+        if (!orbit_press_zone_hit(shell, ctx->cursor_x, ctx->cursor_y)) return;
+        shell->press_captured = 1u;
+        int32_t mx = (int32_t)ctx->cursor_x - (int32_t)shell->press_body_x;
+        int32_t my = (int32_t)ctx->cursor_y - (int32_t)shell->press_body_y;
+        shell->press_last_x = mx;
+        shell->press_last_y = my;
+        orbit_send_ui_event_pointer(shell, 2u, mx, my, buttons | 1u, mods, 0);   // SLUI_POINTER_DOWN
+        if (!frame->mouse_left_released) return;   // a quick click in a slow VM: down and up in one frame
+    }
+    int32_t mx = (int32_t)ctx->cursor_x - (int32_t)shell->press_body_x;
+    int32_t my = (int32_t)ctx->cursor_y - (int32_t)shell->press_body_y;
+    if (frame->mouse_left_released || !(buttons & 1u)) {
+        shell->press_captured = 0u;
+        orbit_send_ui_event_pointer(shell, 3u, mx, my, buttons, mods, 0);   // SLUI_POINTER_UP
+    } else if (mx != shell->press_last_x || my != shell->press_last_y) {
+        orbit_send_ui_event_pointer(shell, 1u, mx, my, buttons, mods, 0);   // SLUI_POINTER_MOVE
+        shell->press_last_x = mx;
+        shell->press_last_y = my;
+    }
+}
+
 static void orbit_pixels_mouse(sl_ctx_t *ctx, orbit_shell_t *shell, const sl_input_frame_t *frame) {
     orbit_pixels_t *px = &shell->pixels;
     if (!ctx || !px->base || !px->shown || px->view_w == 0u || px->view_h == 0u) return;
@@ -3989,6 +4072,7 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
         } else if (!event && orbit_is_text_terminal(shell)) orbit_terminal_mouse(ctx, shell, frame);
         if (!event && shell->ui.enabled && shell->ui.committed) orbit_pixels_mouse(ctx, shell, frame);
         if (!event && shell->ui.enabled && shell->ui.committed) orbit_drag_rows_mouse(ctx, shell, frame);
+        if (!event && shell->ui.enabled && shell->ui.committed) orbit_press_zone_mouse(ctx, shell, frame);
     }
 
     if (!event) return;
@@ -4902,6 +4986,7 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_TEXT_SECRET:
         case ORBIT_UI_CMD_TOOLTIP:
         case ORBIT_UI_CMD_TIP_ZONE:
+        case ORBIT_UI_CMD_PRESS_ZONE:
         case ORBIT_UI_CMD_TEXT_OPTS:
         case ORBIT_UI_CMD_TEXT_MARKS:
         case ORBIT_UI_CMD_SCROLL_V:
@@ -6060,6 +6145,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
             } else if (cmd->type == ORBIT_UI_CMD_CONTEXT_MENU || cmd->type == ORBIT_UI_CMD_TEXT_MENU ||
                        cmd->type == ORBIT_UI_CMD_TEXT_HINT || cmd->type == ORBIT_UI_CMD_TEXT_SECRET ||
                        cmd->type == ORBIT_UI_CMD_TOOLTIP || cmd->type == ORBIT_UI_CMD_TIP_ZONE ||
+                       cmd->type == ORBIT_UI_CMD_PRESS_ZONE ||
                        cmd->type == ORBIT_UI_CMD_TEXT_OPTS ||
                        cmd->type == ORBIT_UI_CMD_TEXT_MARKS) {
                 // Registration-only control: rendered by host overlay on right click.

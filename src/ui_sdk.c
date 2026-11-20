@@ -326,7 +326,10 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
     st.fill_r = fill->r;
     st.fill_g = fill->g;
     st.fill_b = fill->b;
-    if (kind == SL_UI_SURF_DROP_EDGE) {   // design/curiosity/, "Trascinare dentro Curiosity"
+    if (kind == SL_UI_SURF_BAND) {   // design/curiosity/, "Scegliere con un rettangolo"
+        const sl_ui_color_t *ne = sl_ui_theme_color(ui, SL_UI_COLOR_NEON);
+        st.fill_r = ne->r, st.fill_g = ne->g, st.fill_b = ne->b;
+    } else if (kind == SL_UI_SURF_DROP_EDGE) {   // design/curiosity/, "Trascinare dentro Curiosity"
         const sl_ui_color_t *ne = sl_ui_theme_color(ui, SL_UI_COLOR_NEON);
         st.fill_r = ne->r, st.fill_g = ne->g, st.fill_b = ne->b;
     } else if (kind == SL_UI_SURF_DROP_FILL) {
@@ -386,6 +389,15 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
         st.shadow_count = 1;
         st.shadows[0] = sl_ui_shadow(ui, 0, 16, 0, SL_UI_COLOR_NEON, 115u);
         break;
+    case SL_UI_SURF_BAND: {   // border 1.5px #59D0FF, 0 0 10px rgba(89, 208, 255, 0.35)
+        const sl_ui_color_t *ne = sl_ui_theme_color(ui, SL_UI_COLOR_NEON);
+        st.shadow_count = 4;
+        st.shadows[3] = (sl_surf_shadow_t){ 0, 0, 0, SL_SURF_CLEAR, 0, 0, 0, 219u };   // rgba(89, 208, 255, 0.14)
+        st.shadows[0] = (sl_surf_shadow_t){ 0, 0, 0, SL_SURF_OUTLINE, ne->r, ne->g, ne->b, 255u };
+        st.shadows[1] = (sl_surf_shadow_t){ 0, 0, 0, SL_SURF_OUTLINE_IN, ne->r, ne->g, ne->b, 128u };
+        st.shadows[2] = sl_ui_shadow(ui, 0, 10, 0, SL_UI_COLOR_NEON, 89u);
+        break;
+    }
     case SL_UI_SURF_NIGHT_FLAT:
     case SL_UI_SURF_NEON_FLAT:
     case SL_UI_SURF_DROP_FILL:
@@ -426,7 +438,7 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
         if (reach > m) m = reach;
     }
     m += 2u;
-    if (w < 2u * m + 64u || h < 2u * m + 32u) {
+    if (st.shadow_count == 4u || w < 2u * m + 64u || h < 2u * m + 32u) {   // see-through: blended all of it
         sl_blit_sprite(&t, &e, s->px, sx, sy, s->w, s->h);
         return;
     }
@@ -3022,7 +3034,7 @@ uint8_t sl_ui_grid_next(sl_ui_grid_t *grid,
 // ------------------------------------------------- what the apps draw freely
 
 void sl_ui_soft_surface(sl_ui_ctx_t *ui, uint32_t kind, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t r) {
-    if (!ui || kind > SL_UI_SURF_DROP_FILL) return;
+    if (!ui || kind > SL_UI_SURF_BAND) return;
     sl_ui_surface(ui, (sl_ui_surf_kind_t)kind, x, y, w, h, r);
 }
 

@@ -15,8 +15,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SL_SURF_MAX_SHADOWS 3
+#define SL_SURF_MAX_SHADOWS 4
 #define SL_SURF_OUTLINE 2u   // a "shadow" that is the outline (the theme's, without shadows)
+#define SL_SURF_OUTLINE_IN 3u   // the same line one pixel further in (a 1.5 px border: half alpha)
+// Not a shadow either: the fill a this much see-through (the rectangle of
+// Curiosity's choice). The outer shadows are then only outside the shape,
+// as CSS draws them.
+#define SL_SURF_CLEAR 4u
 
 typedef struct {
     int8_t dx, dy;

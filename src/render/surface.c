@@ -113,6 +113,10 @@ int sl_surf_render_exact(const sl_surf_style_t *st, uint32_t sw, uint32_t sh, ui
         }
     }
 
+    uint8_t clear = 0u;   // SL_SURF_CLEAR: the fill see-through
+    for (uint32_t i = 0; i < st->shadow_count; i++)
+        if (st->shadows[i].inset == SL_SURF_CLEAR) clear = st->shadows[i].a;
+
     // Outer shadows, bottom one first: the shape moved and blurred.
     for (int i = (int)st->shadow_count - 1; i >= 0; i--) {
         const sl_surf_shadow_t *s = &st->shadows[i];
@@ -125,9 +129,11 @@ int sl_surf_render_exact(const sl_surf_style_t *st, uint32_t sw, uint32_t sh, ui
             }
         }
         blur_mask(m, w, h, s->blur, tmp);
+        if (clear)
+            for (size_t k = 0; k < n; k++) m[k] = (uint16_t)((uint32_t)m[k] * (255u - shape[k]) / 255u);
         paint(px, m, n, s->r, s->g, s->b, s->a);
     }
-    paint(px, shape, n, st->fill_r, st->fill_g, st->fill_b, 255u);
+    paint(px, shape, n, st->fill_r, st->fill_g, st->fill_b, 255u - clear);
 
     // Inset shadows: cast by the outside of the moved shape, kept inside.
     for (int i = (int)st->shadow_count - 1; i >= 0; i--) {
@@ -149,13 +155,18 @@ int sl_surf_render_exact(const sl_surf_style_t *st, uint32_t sw, uint32_t sh, ui
     // The outline: the shape less the shape one pixel smaller.
     for (uint32_t i = 0; i < st->shadow_count; i++) {
         const sl_surf_shadow_t *s = &st->shadows[i];
-        if (s->inset != SL_SURF_OUTLINE || !s->a || sw <= 2u || sh <= 2u) continue;
+        if ((s->inset != SL_SURF_OUTLINE && s->inset != SL_SURF_OUTLINE_IN) || !s->a) continue;
+        int32_t d = s->inset == SL_SURF_OUTLINE_IN ? 1 : 0;   // the ring from d to d + 1 pixels in
+        if (sw <= 2u + 2u * (uint32_t)d || sh <= 2u + 2u * (uint32_t)d) continue;
         for (uint32_t y = 0; y < h; y++) {
             for (uint32_t x = 0; x < w; x++) {
                 size_t k = (size_t)y * w + x;
-                uint16_t in = rrect_cov((int32_t)x, (int32_t)y, pl + 1, pt + 1, (int32_t)sw - 2, (int32_t)sh - 2,
-                                        r ? (int32_t)r - 1 : 0);
-                m[k] = shape[k] > in ? (uint16_t)(shape[k] - in) : 0u;
+                uint16_t out = d ? rrect_cov((int32_t)x, (int32_t)y, pl + 1, pt + 1, (int32_t)sw - 2, (int32_t)sh - 2,
+                                             r > 1u ? (int32_t)r - 1 : 0)
+                                 : shape[k];
+                uint16_t in = rrect_cov((int32_t)x, (int32_t)y, pl + 1 + d, pt + 1 + d, (int32_t)sw - 2 - 2 * d,
+                                        (int32_t)sh - 2 - 2 * d, r > (uint32_t)(1 + d) ? (int32_t)r - 1 - d : 0);
+                m[k] = out > in ? (uint16_t)(out - in) : 0u;
             }
         }
         paint(px, m, n, s->r, s->g, s->b, s->a);

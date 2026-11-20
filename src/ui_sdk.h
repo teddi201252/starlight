@@ -169,6 +169,7 @@ typedef enum {
     SL_UI_SURF_NEON_FLAT,   // neon with no glow: the = key pressed
     SL_UI_SURF_DROP_EDGE,   // where a drag lands: neon with a wide soft glow (under DROP_FILL, 2 px larger)
     SL_UI_SURF_DROP_FILL,   // ... and its inside: #EAF7FF by day, the night's control a little neon
+    SL_UI_SURF_BAND,        // the rectangle that chooses: neon 14% inside, a 1.5 px neon edge, a soft glow
 } sl_ui_surf_kind_t;
 
 // Soft UI surface (rendered once per size, then cached) and the label face,
