@@ -343,6 +343,13 @@ typedef struct {
     uint8_t initialized;
     int64_t child_pid;
     orbit_pixels_t pixels;
+    // Rows a drag can start from (SLUI SDK 1.0.22, "HOST DRAG_ROWS first
+    // count"): a press on one of these list items and a move of a few pixels
+    // with the button held sends "EVENT DRAG_BEGIN id mods" once, and the
+    // row's click is cancelled; the app answers with DRAG_FILE (Curiosity).
+    uint32_t drag_first, drag_count;
+    uint8_t drag_armed, drag_sent;
+    uint32_t drag_px, drag_py;
     uint8_t ended;              // the app was ended from outside: close its window
     // An app that ended with an error (docs/system-apps-ux-plan.md, Starlight
     // large 4): a card says so, with Reopen and Close; what it wrote is in
@@ -488,6 +495,16 @@ static void orbit_send_ui_event_open_file(orbit_shell_t *shell, const char *path
 }
 
 // DROP_FILE i n x y path: a file dragged here from another app (SLUI SDK 1.0.21).
+static uint32_t orbit_mod_mask(const orbit_shell_t *shell);
+
+// DRAG_BEGIN id mods: a drag starts from the row id (see drag_first).
+static void orbit_send_ui_event_drag_begin(orbit_shell_t *shell, uint32_t id) {
+    if (!shell || shell->child_stdin_fd < 0) return;
+    char msg[64];
+    int n = snprintf(msg, sizeof(msg), "@SLUI EVENT DRAG_BEGIN %u %u\n", (unsigned)id, (unsigned)orbit_mod_mask(shell));
+    if (n > 0) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
+}
+
 static void orbit_send_ui_event_drop_file(orbit_shell_t *shell, uint32_t i, uint32_t n, uint32_t x, uint32_t y,
                                           const char *path) {
     if (!shell || shell->child_stdin_fd < 0 || !path) return;
@@ -2271,6 +2288,17 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             sl_file_drag_add(shell, path);
             return 1;
         }
+        if (orbit_token_is(host_tok, host_len, "DRAG_ROWS")) {   // "HOST DRAG_ROWS first count" (1.0.22)
+            uint32_t first = 0u, count = 0u;
+            if (!orbit_parse_u32(&p, &first) || !orbit_parse_u32(&p, &count)) {
+                orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "drag_rows_invalid_args");
+                return 1;
+            }
+            shell->drag_first = first;
+            shell->drag_count = count;
+            shell->pixels.quiet_line = 1u;
+            return 1;
+        }
         if (orbit_token_is(host_tok, host_len, "CLOSE_GUARD")) {   // "HOST CLOSE_GUARD 0|1"
             uint32_t on = 0u;
             if (!orbit_parse_u32(&p, &on)) {
@@ -3753,6 +3781,34 @@ static uint8_t orbit_ui_context_popup_rect(const orbit_shell_t *shell,
 static uint8_t orbit_ui_dropdown_popup_rect(const orbit_shell_t *shell,
                                             uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 
+// A drag from the app's rows (drag_first): the press is remembered; past 6
+// px with the left button held on one of those rows, the app is told once
+// and the row's own click is cancelled (let go, it is not a click).
+static void orbit_drag_rows_mouse(sl_ctx_t *ctx, orbit_shell_t *shell, const sl_input_frame_t *frame) {
+    if (!ctx || shell->drag_count == 0u) return;
+    if (frame->mouse_left_pressed) {
+        shell->drag_armed = 1u;
+        shell->drag_sent = 0u;
+        shell->drag_px = ctx->cursor_x;
+        shell->drag_py = ctx->cursor_y;
+    }
+    if (!(frame->mouse_buttons & 0x01u)) {
+        shell->drag_armed = 0u;
+        return;
+    }
+    if (!shell->drag_armed || shell->drag_sent) return;
+    uint32_t dx = ctx->cursor_x > shell->drag_px ? ctx->cursor_x - shell->drag_px : shell->drag_px - ctx->cursor_x;
+    uint32_t dy = ctx->cursor_y > shell->drag_py ? ctx->cursor_y - shell->drag_py : shell->drag_py - ctx->cursor_y;
+    if (dx + dy < 6u) return;
+    uint32_t id = shell->ui.ui.active_id;
+    shell->drag_armed = 0u;
+    if (id < shell->drag_first || id - shell->drag_first >= shell->drag_count) return;
+    shell->drag_sent = 1u;
+    shell->ui.ui.active_id = 0u;   // let go, the row is not clicked
+    printf("starlight: drag begins on row %u\n", (unsigned)id);
+    orbit_send_ui_event_drag_begin(shell, id);
+}
+
 static void orbit_pixels_mouse(sl_ctx_t *ctx, orbit_shell_t *shell, const sl_input_frame_t *frame) {
     orbit_pixels_t *px = &shell->pixels;
     if (!ctx || !px->base || !px->shown || px->view_w == 0u || px->view_h == 0u) return;
@@ -3847,6 +3903,7 @@ static void orbit_on_input(sl_ctx_t *ctx, const sl_input_frame_t *frame,
             }
         } else if (!event && orbit_is_text_terminal(shell)) orbit_terminal_mouse(ctx, shell, frame);
         if (!event && shell->ui.enabled && shell->ui.committed) orbit_pixels_mouse(ctx, shell, frame);
+        if (!event && shell->ui.enabled && shell->ui.committed) orbit_drag_rows_mouse(ctx, shell, frame);
     }
 
     if (!event) return;
@@ -6375,6 +6432,11 @@ int sl_app_host_slot_set_bundle(size_t index, const char *bundle_dir) {
 int sl_app_host_takes_files(const void *userdata) {
     const orbit_shell_t *shell = (const orbit_shell_t *)userdata;
     return (shell && shell->ui.enabled && shell->child_pid > 0 && shell->child_stdin_fd >= 0) ? 1 : 0;
+}
+
+int sl_app_host_takes_own_drops(const void *userdata) {
+    const orbit_shell_t *shell = (const orbit_shell_t *)userdata;
+    return (sl_app_host_takes_files(shell) && shell->drag_count) ? 1 : 0;
 }
 
 void sl_app_host_drop_file(void *userdata, uint32_t i, uint32_t n, uint32_t x, uint32_t y, const char *path) {

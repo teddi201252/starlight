@@ -271,7 +271,13 @@ int main(int argc, char **argv) {
     }
 
     sl_windows_create_default(&ctx);
-    {   // the first start of an installed PeOS: Welcome, once (it deletes the file)
+    sl_notify_init(&ctx);
+    sl_music_init(&ctx);
+    sl_tween_init();
+    // The first start of an installed PeOS: Welcome, once (it deletes the
+    // file). After sl_tween_init: opened before, its window's opening
+    // animation was wiped and the window stayed invisible (2026-11-19).
+    {
         FILE *first = fopen(SL_FIRSTBOOT_FILE, "r");
         peos_stat_t st;
         if (first) {
@@ -282,9 +288,6 @@ int main(int argc, char **argv) {
             }
         }
     }
-    sl_notify_init(&ctx);
-    sl_music_init(&ctx);
-    sl_tween_init();
 
     uint64_t next_frame_ns = 0;
     uint64_t tween_last_ns = peos_time_ns();

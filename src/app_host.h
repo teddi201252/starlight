@@ -38,6 +38,9 @@ size_t sl_app_host_next_slot_index(void);
 size_t sl_app_host_slot_count_enabled(void);
 /* An SLUI app that listens (it can be given files: SLUI_EVENT_DROP_FILE). */
 int sl_app_host_takes_files(const void *userdata);
+// An app with drag rows (HOST DRAG_ROWS) takes its own drag back: a file
+// let go on its own window (a folder of Curiosity's).
+int sl_app_host_takes_own_drops(const void *userdata);
 /* File i of n dragged onto the app, let go at x,y of its body. */
 void sl_app_host_drop_file(void *userdata, uint32_t i, uint32_t n, uint32_t x, uint32_t y, const char *path);
 /* What this input changes in the focused app: 1, the rect to add to the

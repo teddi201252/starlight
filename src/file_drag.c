@@ -87,7 +87,8 @@ static void sl_drag_place(sl_ctx_t *ctx) {
 // The window under the pointer, when it is another app that can take files.
 static sl_window_t *sl_drag_target(sl_ctx_t *ctx) {
     sl_window_t *win = sl_windows_top_at(ctx->cursor_x, ctx->cursor_y);
-    if (!win || !win->task || !win->task->userdata || win->task->userdata == g_drag.source) return NULL;
+    if (!win || !win->task || !win->task->userdata) return NULL;
+    if (win->task->userdata == g_drag.source && !sl_app_host_takes_own_drops(g_drag.source)) return NULL;
     if (!sl_app_host_takes_files(win->task->userdata)) return NULL;
     return win;
 }
