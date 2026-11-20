@@ -43,6 +43,8 @@ int sl_app_host_takes_files(const void *userdata);
 int sl_app_host_takes_own_drops(const void *userdata);
 /* File i of n dragged onto the app, let go at x,y of its body. */
 void sl_app_host_drop_file(void *userdata, uint32_t i, uint32_t n, uint32_t x, uint32_t y, const char *path);
+// Files dragged over the app's window: in 1 at x, y of its body as they move, 0 when they leave.
+void sl_app_host_drag_over(void *userdata, int in, uint32_t x, uint32_t y);
 /* What this input changes in the focused app: 1, the rect to add to the
  * damage (the window is drawn again whole); 2, only the hover moved, added
  * to what the window redraws in part (then sl_windows_mark_app_pixels);

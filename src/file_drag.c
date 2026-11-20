@@ -25,6 +25,7 @@ static struct {
     char label[96];
     uint32_t label_w;
     uint8_t over_target;            // over a window that takes them
+    void *over_app;                 // the app told DRAG_OVER (told when they leave)
     uint8_t shown;                  // the pill is on the screen at x,y w x h
     uint32_t x, y, w, h;
 } g_drag;
@@ -93,7 +94,20 @@ static sl_window_t *sl_drag_target(sl_ctx_t *ctx) {
     return win;
 }
 
+// The app under the pointer told where the files are, the one before told they left.
+static void sl_drag_tell_over(sl_ctx_t *ctx, sl_window_t *win) {
+    void *app = win ? win->task->userdata : NULL;
+    if (g_drag.over_app && g_drag.over_app != app) sl_app_host_drag_over(g_drag.over_app, 0, 0u, 0u);
+    g_drag.over_app = app;
+    if (!app) return;
+    uint32_t bx = 0u, by = 0u, bw = 0u, bh = 0u;
+    sl_window_body_rect(win, &bx, &by, &bw, &bh);
+    int64_t rx = (int64_t)ctx->cursor_x - bx, ry = (int64_t)ctx->cursor_y - by;
+    sl_app_host_drag_over(app, 1, rx < 0 ? 0u : (uint32_t)rx, ry < 0 ? 0u : (uint32_t)ry);
+}
+
 static void sl_drag_end(sl_ctx_t *ctx) {
+    if (g_drag.over_app) sl_app_host_drag_over(g_drag.over_app, 0, 0u, 0u);
     sl_drag_pill_dirty(ctx);
     memset(&g_drag, 0, sizeof(g_drag));
 }
@@ -155,8 +169,9 @@ int sl_file_drag_input(sl_ctx_t *ctx, sl_input_frame_t *input) {
         return 0;
     }
     if (input->mouse_moved) {
-        uint8_t over = sl_drag_target(ctx) ? 1u : 0u;
-        if (over != g_drag.over_target) g_drag.over_target = over;
+        sl_window_t *win = sl_drag_target(ctx);
+        g_drag.over_target = win ? 1u : 0u;
+        sl_drag_tell_over(ctx, win);
         sl_drag_place(ctx);
     }
     return 0;

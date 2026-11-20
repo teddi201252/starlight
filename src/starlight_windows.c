@@ -3196,6 +3196,34 @@ int sl_windows_title_button_release(sl_ctx_t *ctx, uint32_t x, uint32_t y) {
     return 1;
 }
 
+// Hidden at the bottom of the stack; focus goes to the next one (the "-"
+// of the title, and an app asking for it: SLUI SDK 1.0.23, slui_minimize).
+static void sl_window_minimize_index(sl_ctx_t *ctx, size_t idx, const sl_window_rect_snapshot_t *before) {
+    sl_window_t moved = g_windows[idx];
+    moved.minimized = 1u;
+    for (size_t i = idx; i > 0u; i--) g_windows[i] = g_windows[i - 1u];
+    g_windows[0] = moved;
+    sl_focus_top_visible();
+    sl_dirty_add_snapshot(ctx, before);
+    sl_window_rect_snapshot_t now_focused = sl_window_snapshot_index(g_focused_window);
+    sl_dirty_add_snapshot(ctx, &now_focused);
+}
+
+// The window of the app whose task has userdata, minimized: 1, or 0 (none,
+// already minimized, or closing).
+int sl_windows_minimize_app(sl_ctx_t *ctx, const void *userdata) {
+    if (!ctx || !g_windows || !userdata) return 0;
+    for (size_t i = 0u; i < g_window_count; i++) {
+        sl_window_t *w = &g_windows[i];
+        if (!w->task || w->task->userdata != userdata || w->minimized || sl_window_is_closing(w)) continue;
+        sl_window_rect_snapshot_t before = sl_window_snapshot_index(i);
+        printf("starlight: window %s: minimized by the app\n", w->title);   // before: the windows move
+        sl_window_minimize_index(ctx, i, &before);
+        return 1;
+    }
+    return 0;
+}
+
 static int sl_windows_title_button_act(sl_ctx_t *ctx, size_t idx, int b) {
     sl_window_t *win = &g_windows[idx];
     sl_window_rect_snapshot_t before = sl_window_snapshot_index(idx);
@@ -3208,15 +3236,7 @@ static int sl_windows_title_button_act(sl_ctx_t *ctx, size_t idx, int b) {
         return 1;
     }
     if (b == SL_WIN_BTN_MIN) {
-        // Hidden at the bottom of the stack; focus goes to the next one.
-        sl_window_t moved = *win;
-        moved.minimized = 1u;
-        for (size_t i = idx; i > 0u; i--) g_windows[i] = g_windows[i - 1u];
-        g_windows[0] = moved;
-        sl_focus_top_visible();
-        sl_dirty_add_snapshot(ctx, &before);
-        sl_window_rect_snapshot_t now_focused = sl_window_snapshot_index(g_focused_window);
-        sl_dirty_add_snapshot(ctx, &now_focused);
+        sl_window_minimize_index(ctx, idx, &before);
         return 1;
     }
     // Maximize: the space right of the dock, with a margin for the shadow;

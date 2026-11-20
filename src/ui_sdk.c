@@ -314,13 +314,37 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
     }
     sl_surf_style_t st;
     memset(&st, 0, sizeof(st));
-    const sl_ui_color_t *fill = sl_ui_theme_color(ui, kind == SL_UI_SURF_NEON_DOT ? SL_UI_COLOR_NEON
-                                                    : kind >= SL_UI_SURF_NIGHT ? SL_UI_COLOR_ACCENT
-                                                    : (kind == SL_UI_SURF_INSET ? SL_UI_COLOR_BG_CANVAS
-                                                                                : SL_UI_COLOR_BG_CONTROL));
+    // At night a higher shadow does not show on the navy ground (1-3 levels
+    // of colour): the surface under the mouse is also a little lighter, the
+    // theme's bg_control_hover (docs/system-apps-ux-plan.md, phase 5).
+    sl_ui_color_token_t fill_tok = (kind == SL_UI_SURF_NEON_DOT || kind == SL_UI_SURF_NEON_HI || kind == SL_UI_SURF_NEON_FLAT) ? SL_UI_COLOR_NEON
+                                   : kind >= SL_UI_SURF_NIGHT ? SL_UI_COLOR_ACCENT
+                                   : kind == SL_UI_SURF_INSET ? SL_UI_COLOR_BG_CANVAS
+                                   : (kind == SL_UI_SURF_RAISED_HI && sl_ui_runtime_night()) ? SL_UI_COLOR_BG_CONTROL_HOVER
+                                                                                            : SL_UI_COLOR_BG_CONTROL;
+    const sl_ui_color_t *fill = sl_ui_theme_color(ui, fill_tok);
     st.fill_r = fill->r;
     st.fill_g = fill->g;
     st.fill_b = fill->b;
+    if (kind == SL_UI_SURF_DROP_EDGE) {   // design/curiosity/, "Trascinare dentro Curiosity"
+        const sl_ui_color_t *ne = sl_ui_theme_color(ui, SL_UI_COLOR_NEON);
+        st.fill_r = ne->r, st.fill_g = ne->g, st.fill_b = ne->b;
+    } else if (kind == SL_UI_SURF_DROP_FILL) {
+        if (!sl_ui_runtime_night()) {
+            st.fill_r = 0xEAu, st.fill_g = 0xF7u, st.fill_b = 0xFFu;
+        } else {
+            const sl_ui_color_t *ne = sl_ui_theme_color(ui, SL_UI_COLOR_NEON);
+            const sl_ui_color_t *bg = sl_ui_theme_color(ui, SL_UI_COLOR_BG_CONTROL);
+            st.fill_r = (uint8_t)((bg->r * 85u + ne->r * 15u) / 100u);
+            st.fill_g = (uint8_t)((bg->g * 85u + ne->g * 15u) / 100u);
+            st.fill_b = (uint8_t)((bg->b * 85u + ne->b * 15u) / 100u);
+        }
+    }
+    if (kind == SL_UI_SURF_NEON_HI) {   // the neon under the mouse: a fifth whiter, a wider glow
+        st.fill_r = (uint8_t)(fill->r + (255u - fill->r) / 5u);
+        st.fill_g = (uint8_t)(fill->g + (255u - fill->g) / 5u);
+        st.fill_b = (uint8_t)(fill->b + (255u - fill->b) / 5u);
+    }
     switch (kind) {
     case SL_UI_SURF_RAISED:
         st.shadow_count = 2;
@@ -354,7 +378,17 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
         st.shadow_count = 1;
         st.shadows[0] = sl_ui_shadow(ui, 0, 8, 0, SL_UI_COLOR_NEON, 200u);
         break;
+    case SL_UI_SURF_NEON_HI:
+        st.shadow_count = 1;
+        st.shadows[0] = sl_ui_shadow(ui, 0, 12, 0, SL_UI_COLOR_NEON, 255u);
+        break;
+    case SL_UI_SURF_DROP_EDGE:   // 0 0 16px rgba(89, 208, 255, 0.45)
+        st.shadow_count = 1;
+        st.shadows[0] = sl_ui_shadow(ui, 0, 16, 0, SL_UI_COLOR_NEON, 115u);
+        break;
     case SL_UI_SURF_NIGHT_FLAT:
+    case SL_UI_SURF_NEON_FLAT:
+    case SL_UI_SURF_DROP_FILL:
         break;
     }
     if (kind == SL_UI_SURF_RAISED || kind == SL_UI_SURF_RAISED_HI || kind == SL_UI_SURF_INSET ||
@@ -731,6 +765,34 @@ uint8_t sl_ui_button_primary_state(sl_ui_ctx_t *ui, uint32_t id,
         uint32_t tx = (tw + 12u < w) ? x + (w - tw) / 2u : x + 6u;
         sl_ui_text_tok(ui, tx, sl_ui_text_center_y(ui, y, h), text,
                        enabled ? SL_UI_COLOR_NEON : SL_UI_COLOR_TEXT_DISABLED);
+    }
+    if (!enabled && active) ui->active_id = 0u;
+    if (enabled && ui->mouse_released && active) {
+        ui->active_id = 0u;
+        return hovered ? 1u : 0u;
+    }
+    return 0u;
+}
+
+// The lit key of a group (the = of the Calculator): neon, its label night;
+// whiter with a wider glow under the mouse, without its glow while pressed.
+uint8_t sl_ui_button_neon_state(sl_ui_ctx_t *ui, uint32_t id,
+                                uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                const char *text, uint8_t enabled) {
+    if (!ui || !ui->ctx || !text || w < 8u || h < 8u) return 0u;
+    int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
+    if (enabled && hovered && ui->mouse_pressed) ui->active_id = id;
+    int active = (ui->active_id == id);
+    int pressed = enabled && active && ui->mouse_down;
+    uint32_t r = sl_ui_pill_r(h, 22u);
+    if (!enabled) sl_ui_surface(ui, SL_UI_SURF_FLAT, x, y, w, h, r);
+    else if (pressed) sl_ui_surface(ui, SL_UI_SURF_NEON_FLAT, x, y, w, h, r);
+    else sl_ui_surface(ui, hovered ? SL_UI_SURF_NEON_HI : SL_UI_SURF_NEON_DOT, x, y, w, h, r);
+    if (text[0]) {
+        uint32_t tw = sl_ui_text_width(ui, text);
+        uint32_t tx = (tw + 12u < w) ? x + (w - tw) / 2u : x + 6u;
+        sl_ui_text_tok(ui, tx, sl_ui_text_center_y(ui, y, h), text,
+                       enabled ? SL_UI_COLOR_ACCENT : SL_UI_COLOR_TEXT_DISABLED);
     }
     if (!enabled && active) ui->active_id = 0u;
     if (enabled && ui->mouse_released && active) {
@@ -2960,7 +3022,7 @@ uint8_t sl_ui_grid_next(sl_ui_grid_t *grid,
 // ------------------------------------------------- what the apps draw freely
 
 void sl_ui_soft_surface(sl_ui_ctx_t *ui, uint32_t kind, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t r) {
-    if (!ui || kind > SL_UI_SURF_NIGHT_FLAT) return;
+    if (!ui || kind > SL_UI_SURF_DROP_FILL) return;
     sl_ui_surface(ui, (sl_ui_surf_kind_t)kind, x, y, w, h, r);
 }
 

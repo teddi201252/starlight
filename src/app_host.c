@@ -173,7 +173,7 @@ typedef struct {
     uint8_t image_loaded;
     uint8_t image_failed;
     uint8_t enabled;
-    uint8_t primary;            // BUTTONP: the night button of its group
+    uint8_t primary;            // BUTTONP: 1 the night button of its group, 2 the neon key
     uint8_t align;              // LABELA/LABELAT: 0 left of x, 1 centred on it, 2 right of it
 } orbit_ui_cmd_t;
 
@@ -359,6 +359,7 @@ typedef struct {
     // asks the app (EVENT CLOSE_REQUEST) instead of ending it. An app that does
     // not answer (no frame) within ORBIT_CLOSE_FORCE_NS is closed at the next try.
     uint8_t close_guard;
+    uint8_t minimize_asked;     // "HOST MINIMIZE" (SLUI SDK 1.0.23): its window to the dock, at the next round
     uint32_t caret_sent_id, caret_sent_pos, caret_sent_anchor;   // the last TEXT_CARET told
     // The tip of the control under the mouse (SLUI SDK 1.0.18, TOOLTIP):
     // shown after ORBIT_TIP_DELAY_NS still on it, at tip[] in the body.
@@ -1156,7 +1157,9 @@ typedef struct {
 static orbit_img_entry_t g_img_cache[ORBIT_IMG_CACHE];
 static uint64_t g_img_tick;
 
-// src (its best level not smaller than w x h) averaged down to w x h.
+// src (its best level not smaller than w x h) averaged down to w x h,
+// covering it: the middle of a picture of another shape, not stretched (a
+// photo's thumbnail in Curiosity; docs/system-apps-ux-plan.md, phase 5).
 static int orbit_img_shrink(const sl_image_t *src, uint32_t w, uint32_t h, sl_image_t *out) {
     const uint8_t *data = src->data;
     uint32_t sw = src->width, sh = src->height, ss = src->stride;
@@ -1164,9 +1167,21 @@ static int orbit_img_shrink(const sl_image_t *src, uint32_t w, uint32_t h, sl_im
         if (src->mip_width[i] < w || src->mip_height[i] < h || !src->mip_data[i]) break;
         data = src->mip_data[i], sw = src->mip_width[i], sh = src->mip_height[i], ss = src->mip_stride[i];
     }
-    if (w > sw) w = sw;
-    if (h > sh) h = sh;
-    if (!data || !w || !h || ss < sw * 4u) return 0;
+    if (!data || !sw || !sh || ss < sw * 4u) return 0;
+    // the part of the same shape as the box, in the middle
+    uint32_t cx = 0u, cy = 0u, cw = sw, ch = sh;
+    if ((uint64_t)sw * h > (uint64_t)sh * w) {
+        cw = (uint32_t)((uint64_t)sh * w / h);
+        if (!cw) cw = 1u;
+        cx = (sw - cw) / 2u;
+    } else if ((uint64_t)sw * h < (uint64_t)sh * w) {
+        ch = (uint32_t)((uint64_t)sw * h / w);
+        if (!ch) ch = 1u;
+        cy = (sh - ch) / 2u;
+    }
+    data += (size_t)cy * ss + (size_t)cx * 4u;
+    sw = cw, sh = ch;
+    if (w > sw || h > sh) w = sw, h = sh;   // smaller than the box: its own pixels, enlarged when drawn
     uint8_t *px = (uint8_t *)malloc((size_t)w * h * 4u);
     if (!px) return 0;
     for (uint32_t y = 0u; y < h; y++) {
@@ -2299,6 +2314,11 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
             shell->pixels.quiet_line = 1u;
             return 1;
         }
+        if (orbit_token_is(host_tok, host_len, "MINIMIZE")) {   // "HOST MINIMIZE" (SLUI SDK 1.0.23)
+            shell->minimize_asked = 1u;
+            shell->close_answered = 1u;   // an answer to a CLOSE_REQUEST too
+            return 1;
+        }
         if (orbit_token_is(host_tok, host_len, "CLOSE_GUARD")) {   // "HOST CLOSE_GUARD 0|1"
             uint32_t on = 0u;
             if (!orbit_parse_u32(&p, &on)) {
@@ -2334,6 +2354,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
                 orbit_send_ui_error(shell, ORBIT_SLUI_ERR_MALFORMED, "open_file_empty");
                 return 1;
             }
+            printf("starlight: open %s with %s\n", g_open_app_file, g_open_app_bundle_path);
             g_open_app_requested = 1u;
             return 1;
         }
@@ -2424,6 +2445,8 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
                 return 1;
             }
             cmd->enabled = enabled ? 1u : 0u;
+            // BUTTONP with 2 (SLUI SDK 1.0.23, slui_button_neon): the lit key, neon
+            if (cmd->primary && enabled == 2u) cmd->primary = 2u;
         }
         p = orbit_skip_spaces(p);
         if (!orbit_cmd_set_text_raw(cmd, p)) {
@@ -2551,7 +2574,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         if (!cmd) return 1;
         if (!orbit_parse_u32(&p, &cmd->value) || !orbit_parse_u32(&p, &cmd->x) ||
             !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
-            !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->min_v) || cmd->value > 7u) {
+            !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->min_v) || cmd->value > 11u) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "surf_invalid_args");
             cmd->type = ORBIT_UI_CMD_NONE;
         }
@@ -4522,6 +4545,15 @@ static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
 
         if (code == PEOS_KEY_LEFT_NORM || code == PEOS_KEY_UP_NORM ||
             code == PEOS_KEY_RIGHT_NORM || code == PEOS_KEY_DOWN_NORM) {
+            // An app with pixels of its own (Orion's picture, Pegasus's page)
+            // has the arrows: between its buttons the focus moves with Tab
+            // (docs/system-apps-ux-plan.md, phase 5).
+            if (shell->pixels.base && shell->pixels.shown &&
+                cmd->type != ORBIT_UI_CMD_SLIDER && cmd->type != ORBIT_UI_CMD_SCROLL_V &&
+                cmd->type != ORBIT_UI_CMD_SELECT && cmd->type != ORBIT_UI_CMD_SEGMENT &&
+                cmd->type != ORBIT_UI_CMD_TEXT_INPUT && cmd->type != ORBIT_UI_CMD_TEXT_AREA) {
+                continue;
+            }
             if (cmd->type != ORBIT_UI_CMD_SLIDER &&
                 cmd->type != ORBIT_UI_CMD_SCROLL_V &&
                 cmd->type != ORBIT_UI_CMD_SELECT &&
@@ -5737,7 +5769,9 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                 sl_ui_graph(&shell->ui.ui, x, y, cmd->w, cmd->h, vals, n, cmd->grad[0], cmd->grad[1]);
             } else if (cmd->type == ORBIT_UI_CMD_BUTTON) {
                 uint8_t en = cmd_enabled;
-                uint8_t clicked = cmd->primary
+                uint8_t clicked = cmd->primary == 2u
+                    ? sl_ui_button_neon_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, en)
+                    : cmd->primary
                     ? sl_ui_button_primary_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, en)
                     : sl_ui_button_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, en);
                 if (clicked) orbit_emit_click_events(shell, cmd->id, 1u);
@@ -6267,6 +6301,10 @@ void sl_app_host_tick(sl_ctx_t *ctx) {
             shell->body_changed = 0u;
             sl_windows_mark_app_dirty(ctx, shell);
         }
+        if (shell->minimize_asked) {
+            shell->minimize_asked = 0u;
+            (void)sl_windows_minimize_app(ctx, shell);
+        }
         if (g_orbit_cfg[i].open_pending && shell->ui.enabled) {   // a file to open, now it listens
             g_orbit_cfg[i].open_pending = 0u;
             orbit_send_ui_event_open_file(shell, g_orbit_cfg[i].open_file);
@@ -6443,6 +6481,17 @@ void sl_app_host_drop_file(void *userdata, uint32_t i, uint32_t n, uint32_t x, u
     orbit_shell_t *shell = (orbit_shell_t *)userdata;
     if (!sl_app_host_takes_files(shell)) return;
     orbit_send_ui_event_drop_file(shell, i, n, x, y, path);
+}
+
+// Files dragged over the app's window (SLUI SDK 1.0.23): in, and where, from
+// the body's top left; in = 0 once when they leave. Only to the apps with
+// rows to drag (they know where a file would land).
+void sl_app_host_drag_over(void *userdata, int in, uint32_t x, uint32_t y) {
+    orbit_shell_t *shell = (orbit_shell_t *)userdata;
+    if (!sl_app_host_takes_own_drops(shell)) return;
+    char line[64];
+    int n = snprintf(line, sizeof(line), "@SLUI EVENT DRAG_OVER %u %u %u\n", in ? 1u : 0u, (unsigned)x, (unsigned)y);
+    if (n > 0) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, line, (size_t)n);
 }
 
 void sl_app_host_open_with(const char *bundle_path, const char *file) {

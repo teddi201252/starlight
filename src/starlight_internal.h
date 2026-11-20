@@ -183,6 +183,8 @@ typedef void (*sl_dirty_rect_fn)(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
 void sl_dirty_for_each_intersection(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                     sl_dirty_rect_fn fn, void *userdata);
 void sl_windows_mark_app_dirty(const sl_ctx_t *ctx, const void *userdata);
+// The app's window minimized, as its "-" does (SLUI SDK 1.0.23, "HOST MINIMIZE"): 1, or 0.
+int sl_windows_minimize_app(sl_ctx_t *ctx, const void *userdata);
 // Only the app's own pixels changed ("HOST PIXELS_DAMAGE"): its windows again in part.
 void sl_windows_mark_app_pixels(const sl_ctx_t *ctx, const void *userdata);
 // The same for all of the window, title bar and frame (a modal dialog's veil).

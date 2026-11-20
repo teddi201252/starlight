@@ -25,6 +25,8 @@ static void *sl_stbi_memmove(void *dst, const void *src, size_t n) {
 #define STBI_NO_SIMD
 #define STBI_ONLY_PNG
 #define STBI_ONLY_JPEG
+#define STBI_ONLY_GIF   // the first frame: thumbnails (system apps plan, phase 5)
+#define STBI_ONLY_BMP
 #define STBI_MALLOC(sz) malloc(sz)
 #define STBI_REALLOC(p,sz) realloc((p),(sz))
 #define STBI_FREE(p) free(p)
@@ -136,6 +138,74 @@ static int sl_image_build_mips(sl_image_t *image) {
     return 1;
 }
 
+// A JPEG's EXIF orientation (1..8), 1 without one: the tag 0x0112 of IFD0
+// in the APP1 "Exif" segment (as Orion reads it, userland/apps/orion/src/turn.c).
+static uint32_t sl_exif_rd(const uint8_t *p, int n, int le) {
+    uint32_t v = 0u;
+    for (int i = 0; i < n; i++) v |= (uint32_t)p[le ? i : n - 1 - i] << (8 * i);
+    return v;
+}
+
+static int sl_jpeg_orientation(const uint8_t *d, size_t n) {
+    if (!d || n < 4u || d[0] != 0xFFu || d[1] != 0xD8u) return 1;
+    size_t i = 2u;
+    while (i + 4u <= n && d[i] == 0xFFu) {
+        uint8_t m = d[i + 1];
+        if (m == 0xD9u || m == 0xDAu) break;   // the image data: no EXIF before it
+        size_t seg = sl_exif_rd(d + i + 2u, 2, 0);
+        if (seg < 2u || i + 2u + seg > n) break;
+        if (m == 0xE1u && seg >= 8u + 8u && memcmp(d + i + 4u, "Exif\0\0", 6u) == 0) {
+            const uint8_t *t = d + i + 10u;
+            size_t tn = seg - 8u;
+            int le = t[0] == 'I' && t[1] == 'I';
+            if (!le && !(t[0] == 'M' && t[1] == 'M')) return 1;
+            size_t ifd = sl_exif_rd(t + 4u, 4, le);
+            if (ifd + 2u > tn) return 1;
+            uint32_t count = sl_exif_rd(t + ifd, 2, le);
+            for (uint32_t k = 0u; k < count; k++) {
+                size_t e = ifd + 2u + (size_t)k * 12u;
+                if (e + 12u > tn) break;
+                if (sl_exif_rd(t + e, 2, le) == 0x0112u) {
+                    uint32_t o = sl_exif_rd(t + e + 8u, 2, le);
+                    return (o >= 1u && o <= 8u) ? (int)o : 1;
+                }
+            }
+            return 1;
+        }
+        i += 2u + seg;
+    }
+    return 1;
+}
+
+// The stored pixels turned upright for orientation o: mirrored left to right
+// first, then quarters clockwise (Orion's table). The thumbnails of
+// Curiosity and of "Scegli un file", the wallpaper (system apps plan, phase 5).
+static uint8_t *sl_orient_rgba(uint8_t *px, int *w, int *h, int o) {
+    static const int Q[9] = { 0, 0, 0, 2, 2, 3, 1, 1, 3 };
+    static const int M[9] = { 0, 0, 1, 0, 1, 1, 0, 1, 0 };
+    if (o < 2 || o > 8) return px;
+    int q = Q[o], m = M[o], sw = *w, sh = *h, nw = (q & 1) ? sh : sw, nh = (q & 1) ? sw : sh;
+    uint32_t *out = (uint32_t *)malloc((size_t)sw * (size_t)sh * 4u);
+    if (!out) return px;   // shown as stored
+    const uint32_t *in = (const uint32_t *)px;
+    for (int y = 0; y < sh; y++) {
+        for (int x = 0; x < sw; x++) {
+            int sx = m ? sw - 1 - x : x, dx, dy;
+            switch (q) {
+            case 1: dx = sh - 1 - y; dy = sx; break;
+            case 2: dx = sw - 1 - sx; dy = sh - 1 - y; break;
+            case 3: dx = y; dy = sw - 1 - sx; break;
+            default: dx = sx; dy = y; break;
+            }
+            out[(size_t)dy * (size_t)nw + (size_t)dx] = in[(size_t)y * (size_t)sw + (size_t)x];
+        }
+    }
+    stbi_image_free(px);
+    *w = nw;
+    *h = nh;
+    return (uint8_t *)out;
+}
+
 static int sl_decode_internal(const uint8_t *data, size_t len, sl_image_t *out_image) {
     if (!data || !out_image || len == 0) return 0;
     if (len > 0x7fffffffU) return 0;
@@ -146,6 +216,7 @@ static int sl_decode_internal(const uint8_t *data, size_t len, sl_image_t *out_i
     // Force RGBA output so blending code is always deterministic.
     uint8_t *decoded = stbi_load_from_memory(data, (int)len, &w, &h, &channels, 4);
     if (!decoded || w <= 0 || h <= 0) return 0;
+    decoded = sl_orient_rgba(decoded, &w, &h, sl_jpeg_orientation(data, len));
 
     out_image->width = (uint32_t)w;
     out_image->height = (uint32_t)h;

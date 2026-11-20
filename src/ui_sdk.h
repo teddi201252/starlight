@@ -165,6 +165,10 @@ typedef enum {
     SL_UI_SURF_NIGHT_GLOW,  // the accent lit: a knob that is on
     SL_UI_SURF_NEON_DOT,    // a lit dot or bar in the neon accent (window dot, dock marks)
     SL_UI_SURF_NIGHT_FLAT,  // the accent with no shadow: the chosen segment
+    SL_UI_SURF_NEON_HI,     // neon under the mouse: whiter, a wider glow (the = key)
+    SL_UI_SURF_NEON_FLAT,   // neon with no glow: the = key pressed
+    SL_UI_SURF_DROP_EDGE,   // where a drag lands: neon with a wide soft glow (under DROP_FILL, 2 px larger)
+    SL_UI_SURF_DROP_FILL,   // ... and its inside: #EAF7FF by day, the night's control a little neon
 } sl_ui_surf_kind_t;
 
 // Soft UI surface (rendered once per size, then cached) and the label face,
@@ -232,6 +236,10 @@ uint8_t sl_ui_button_state(sl_ui_ctx_t *ui, uint32_t id,
 uint8_t sl_ui_button_primary_state(sl_ui_ctx_t *ui, uint32_t id,
                                    uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                    const char *text, uint8_t enabled);
+// The lit key of a group (the = of the Calculator): neon, its label night.
+uint8_t sl_ui_button_neon_state(sl_ui_ctx_t *ui, uint32_t id,
+                                uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                const char *text, uint8_t enabled);
 // A colour to choose (the accents): a round raised button with a dot of
 // r,g,b in it, larger and glowing when chosen. 1 on a click.
 uint8_t sl_ui_swatch_state(sl_ui_ctx_t *ui, uint32_t id, uint32_t x, uint32_t y, uint32_t size,
