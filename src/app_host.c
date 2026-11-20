@@ -1963,6 +1963,37 @@ static void orbit_copy_unescaped(char *dst, size_t cap, const char *src) {
     dst[di] = '\0';
 }
 
+// The folders an app's "Choose a file" used last (SLUI SDK 1.0.24,
+// slui_recent_dir): /starlight/config/recent/<bundle name>.cfg, one a line,
+// newest first, ORBIT_RECENT_MAX at most. Starlight writes it (not every app
+// may write under /starlight); the picker of that app reads it.
+#define ORBIT_RECENT_DIR "/starlight/config/recent"
+#define ORBIT_RECENT_MAX 5u
+static void orbit_recent_dir_add(const char *bundle_dir, const char *dir) {
+    const char *name = strrchr(bundle_dir, '/');
+    name = name ? name + 1 : bundle_dir;
+    if (!name[0] || strchr(dir, '\n')) return;
+    char path[160], old[2048] = "", out[2048];
+    snprintf(path, sizeof(path), ORBIT_RECENT_DIR "/%s.cfg", name);
+    size_t n = 0;
+    if (peos_read_file(path, strlen(path), old, sizeof(old) - 1u, &n) >= 0) old[n] = '\0';
+    else old[0] = '\0';
+    size_t o = (size_t)snprintf(out, sizeof(out), "%s\n", dir);
+    uint32_t kept = 1u;
+    for (char *line = old; *line && kept < ORBIT_RECENT_MAX;) {
+        char *end = strchr(line, '\n');
+        if (end) *end = '\0';
+        if (line[0] == '/' && strcmp(line, dir) != 0 && o + strlen(line) + 2u < sizeof(out)) {
+            o += (size_t)snprintf(out + o, sizeof(out) - o, "%s\n", line);
+            kept++;
+        }
+        if (!end) break;
+        line = end + 1;
+    }
+    (void)peos_mkdir_p(ORBIT_RECENT_DIR, strlen(ORBIT_RECENT_DIR));
+    (void)peos_write_file(path, strlen(path), out, o, PEOS_O_CREAT | PEOS_O_TRUNC | PEOS_O_WRITE);
+}
+
 static void orbit_damage_add(orbit_pixels_t *px, int64_t x0, int64_t y0, int64_t x1, int64_t y1) {
     if (x1 <= x0 || y1 <= y0) return;
     int64_t v[4] = { x0, y0, x1, y1 };
@@ -2326,6 +2357,12 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
                 return 1;
             }
             shell->close_guard = on ? 1u : 0u;
+            return 1;
+        }
+        if (orbit_token_is(host_tok, host_len, "RECENT_DIR")) {   // "HOST RECENT_DIR <dir>" (SLUI SDK 1.0.24)
+            char dir[256];
+            orbit_copy_unescaped(dir, sizeof(dir), orbit_skip_spaces(p));
+            if (dir[0] == '/' && shell->bundle_dir[0]) orbit_recent_dir_add(shell->bundle_dir, dir);
             return 1;
         }
         if (orbit_token_is(host_tok, host_len, "OPEN_FILE")) {
