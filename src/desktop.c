@@ -1307,16 +1307,10 @@ static void sl_desk_volume_step(sl_ctx_t *ctx, int32_t delta) {
 
 // As setvolume does: the level survives a restart (where the disk can be
 // written: not on the live ISO).
+// libpeos writes the whole file from the kernel's state: the device and the
+// microphone chosen in Settings stay (2026-11-22).
 static void sl_desk_volume_save(void) {
-    static const char dir1[] = "/system", dir2[] = "/system/config", path[] = "/system/config/audio.cfg";
-    (void)peos_mkdir(dir1, sizeof(dir1) - 1u);
-    (void)peos_mkdir(dir2, sizeof(dir2) - 1u);
-    uint64_t fd = peos_fopen(path, sizeof(path) - 1u, PEOS_O_CREAT | PEOS_O_TRUNC | PEOS_O_WRITE);
-    if ((int64_t)fd < 0) return;
-    char buf[64];
-    int n = snprintf(buf, sizeof(buf), "# PeOS global audio config\nvolume=%d\n", (int)sl_desk_volume_now());
-    if (n > 0) (void)peos_fwrite(fd, buf, (size_t)n);
-    (void)peos_fclose(fd);
+    (void)peos_audio_save_config();
 }
 
 // ------------------------------------------------------------------- pill

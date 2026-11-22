@@ -978,8 +978,13 @@ static void orbit_pixels_request(orbit_shell_t *shell, uint32_t w, uint32_t h) {
         orbit_pixels_free(shell);
         snprintf(msg, sizeof(msg), "@SLUI HOST SURFACE 0 0 0 0 0\n");
     } else {
+        // The pixels have the keyboard from the start when no control has
+        // it, as if the body had been clicked (Eco: F2 and the name typed
+        // right after opening it from the dock); a larger surface keeps it.
+        uint8_t focused = px->base ? px->focused : (uint8_t)(shell->ui.ui.focused_id == 0u);
         if (!px->base || px->len < need) {
             orbit_pixels_free(shell);
+            px->focused = focused;
             int64_t id = peos_shm_create(need);
             peos_shm_map_t map;
             if (id > 0 && peos_shm_map((uint64_t)id, &map) == 0 && map.addr && map.len >= need &&
