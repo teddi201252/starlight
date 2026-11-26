@@ -116,6 +116,15 @@ typedef struct {
     // keyboard, selects [start, end) and shows it at its next pass.
     uint32_t text_area_select_id, text_area_select_start, text_area_select_end;
     struct peos_text_undo *undo;      // the history of the field with the caret (peos/text_undo.h, malloc'd)
+    // SL_UI_TA_SELECT_ON_FOCUS: the field that had the keyboard at the end
+    // of its last pass, its last press (for a double click) and what the
+    // press does: 1 select all at the release (if not dragged), 2 a word
+    // was selected (no drag until the release).
+    uint32_t field_focus_seen;
+    uint32_t field_click_id, field_click_x;
+    uint64_t field_click_ns;
+    uint8_t field_click_mode;
+    uint32_t double_click_ms;         // the host's (0: 400)
     sl_ui_theme_t theme;
     uint8_t theme_initialized;
     uint32_t theme_version;
@@ -326,6 +335,11 @@ uint8_t sl_ui_text_area(sl_ui_ctx_t *ui, uint32_t id,
 #define SL_UI_TA_LINE_NUMBERS 1u   // the lines' numbers in a column on the left
 #define SL_UI_TA_CURRENT_LINE 2u   // the caret's line marked while it has the keyboard
 #define SL_UI_TA_CARET_EVENTS 4u   // the app is told where the caret is (TEXT_CARET)
+// A one-line field as a browser's address bar (SLUI SDK 1.0.32, Pegasus): a
+// click into it while it does not have the keyboard selects all its text
+// (typing replaces it); a click while it has it places the caret; a double
+// click selects a word; a press dragged selects from where it began.
+#define SL_UI_TA_SELECT_ON_FOCUS 8u
 
 uint8_t sl_ui_text_area_state(sl_ui_ctx_t *ui, uint32_t id,
                               uint32_t x, uint32_t y, uint32_t w, uint32_t h,

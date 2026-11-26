@@ -1986,6 +1986,36 @@ static uint8_t sl_ui_field_menu_pass(sl_ui_ctx_t *ui, uint32_t id, int hovered, 
     return changed;
 }
 
+static uint32_t sl_ui_ta_flags(const sl_ui_ctx_t *ui, uint32_t id);
+
+// A byte's kind for a double click's word: 1 a letter, a digit, '_' or a
+// byte of a multi-byte character; 2 a space; 0 anything else (an address's
+// '/', '.', ':' end a word, as in a browser's address bar).
+static uint8_t sl_ui_word_kind(char c) {
+    unsigned char u = (unsigned char)c;
+    if (u >= 0x80u || u == '_' || (u >= '0' && u <= '9') || ((u | 0x20u) >= 'a' && (u | 0x20u) <= 'z')) return 1u;
+    if (u == ' ' || u == '	') return 2u;
+    return 0u;
+}
+
+// The run of bytes of the same kind around pos (the character after it; at
+// the end, the one before): [*a, *b).
+static void sl_ui_word_at(const char *text, uint32_t len, uint32_t pos, uint32_t *a, uint32_t *b) {
+    *a = *b = pos;
+    if (len == 0u) return;
+    if (pos >= len) pos = len - 1u;
+    uint8_t kind = sl_ui_word_kind(text[pos]);
+    uint32_t s = pos, e = pos + 1u;
+    while (s > 0u && sl_ui_word_kind(text[s - 1u]) == kind) s--;
+    while (e < len && sl_ui_word_kind(text[e]) == kind) e++;
+    if (kind != 1u) {   // punctuation or spaces: one character (not "://" at once)
+        s = pos;
+        e = sl_ui_utf8_next_pos(text, pos, len);
+    }
+    *a = s;
+    *b = e;
+}
+
 uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
                                uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                char *text, uint32_t text_cap,
@@ -2043,18 +2073,52 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
         if (ui->text_select_focus_pos > len) ui->text_select_focus_pos = len;
     }
 
-    if (enabled && ui->mouse_pressed && hovered) {
+    // An address bar's clicks (SL_UI_TA_SELECT_ON_FOCUS): the first into it selects all.
+    uint8_t select_on_focus = (sl_ui_ta_flags(ui, id) & SL_UI_TA_SELECT_ON_FOCUS) != 0u;
+    if (enabled && ui->mouse_pressed && hovered && !app_selected) {
         ui->text_caret_pos = sl_ui_text_input_hit_pos(ui, x, w, text, len);
         if (ui->text_caret_pos > len) ui->text_caret_pos = len;
         sl_ui_selection_collapse(ui, id, ui->text_caret_pos);
+        ui->field_click_mode = 0u;
+        if (select_on_focus) {
+            uint64_t now = sl_frame_time_ns();
+            uint64_t limit = (uint64_t)(ui->double_click_ms ? ui->double_click_ms : 400u) * 1000000ull;
+            uint32_t dx = ui->cursor_x > ui->field_click_x ? ui->cursor_x - ui->field_click_x
+                                                            : ui->field_click_x - ui->cursor_x;
+            if (ui->field_click_id == id && now - ui->field_click_ns <= limit && dx <= 4u) {
+                uint32_t a = 0u, b = 0u;   // a double click: the word under it
+                sl_ui_word_at(text, len, ui->text_caret_pos, &a, &b);
+                ui->text_caret_pos = b;
+                ui->text_select_id = id;
+                ui->text_select_anchor_pos = a;
+                ui->text_select_focus_pos = b;
+                ui->field_click_mode = 2u;
+                ui->field_click_id = 0u;
+            } else {
+                ui->field_click_id = id;
+                ui->field_click_ns = now;
+                ui->field_click_x = ui->cursor_x;
+                if (ui->field_focus_seen != id) ui->field_click_mode = 1u;   // not yet its keyboard: all, at the release
+            }
+        }
     }
-    if (enabled && ui->active_id == id && ui->mouse_down) {
+    if (enabled && ui->active_id == id && ui->mouse_down && !(select_on_focus && ui->field_click_mode == 2u)) {
         uint32_t old_pos = ui->text_caret_pos;
         uint32_t new_pos = sl_ui_text_input_hit_pos(ui, x, w, text, len);
         if (new_pos > len) new_pos = len;
+        if (new_pos != old_pos && ui->field_click_mode == 1u) ui->field_click_mode = 0u;   // dragged: that range
         sl_ui_move_caret(ui, id, old_pos, new_pos, 1u);
     }
-    if (ui->mouse_released && ui->active_id == id) ui->active_id = 0u;
+    if (ui->mouse_released && ui->active_id == id) {
+        if (select_on_focus && ui->field_click_mode == 1u && ui->focused_id == id) {
+            ui->text_caret_pos = len;
+            ui->text_select_id = id;
+            ui->text_select_anchor_pos = 0u;
+            ui->text_select_focus_pos = len;
+        }
+        ui->field_click_mode = 0u;
+        ui->active_id = 0u;
+    }
 
     uint8_t changed = 0u;
     uint8_t restored = 0u;
@@ -2214,6 +2278,8 @@ uint8_t sl_ui_text_input_state(sl_ui_ctx_t *ui, uint32_t id,
     }
 
     if (enabled && ui->focused_id == id) sl_ui_undo_record(ui, id, text, ui->text_caret_pos);
+    if (enabled && ui->focused_id == id) ui->field_focus_seen = id;   // the next click into it places the caret
+    else if (ui->field_focus_seen == id) ui->field_focus_seen = 0u;
 
     sl_ui_control_state_t state = SL_UI_STATE_NORMAL;
     if (!enabled) state = SL_UI_STATE_DISABLED;

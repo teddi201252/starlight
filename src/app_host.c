@@ -5731,6 +5731,7 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
         shell->ui.ui.field_hint = orbit_text_hint;
         shell->ui.ui.field_secret = orbit_text_secret;
         shell->ui.ui.text_area_flags = orbit_text_area_flags;
+        shell->ui.ui.double_click_ms = shell->ui.double_click_ms;
         shell->ui.ui.text_area_marks = orbit_text_area_marks;
         if (shell->ui.mouse_pressed) shell->ui.keyboard_nav_active = 0u;
         sl_ui_set_font_px(&shell->ui.ui, 0u);
