@@ -303,6 +303,9 @@ uint8_t sl_ui_outline_alpha(const sl_ui_color_t *outline, const sl_ui_color_t *d
     return (uint8_t)(((255u - sh) * outline->a + 127u) / 255u);
 }
 
+static void sl_ui_surface_style(sl_ui_ctx_t *ui, const sl_surf_style_t *style, uint32_t x, uint32_t y, uint32_t w,
+                                uint32_t h, uint32_t r);
+
 // Draw a soft UI surface at the exact size: rendered once per size and
 // theme, then copied from the cache.
 static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
@@ -412,6 +415,19 @@ static void sl_ui_surface(sl_ui_ctx_t *ui, sl_ui_surf_kind_t kind, uint32_t x, u
             st.shadows[st.shadow_count++] = (sl_surf_shadow_t){ 0, 0, 0, SL_SURF_OUTLINE, o->r, o->g, o->b, a };
         }
     }
+    sl_ui_surface_style(ui, &st, x, y, w, h, r);
+}
+
+// A surface of a style of its own (the plancia's, design/pegasus-barra/):
+// from the cache, its inside filled when it is big.
+static void sl_ui_surface_style(sl_ui_ctx_t *ui, const sl_surf_style_t *style, uint32_t x, uint32_t y, uint32_t w,
+                                uint32_t h, uint32_t r) {
+    if (!ui || !ui->ctx || w == 0u || h == 0u) return;
+    if (!ui->ctx->skin_loaded) {
+        sl_fill_rect(ui->ctx, x, y, w, h, style->fill_r, style->fill_g, style->fill_b);
+        return;
+    }
+    sl_surf_style_t st = *style;
     const sl_surf_t *s = sl_surf_get(&st, w, h, r);
     if (!s) {
         sl_ui_fill_tok(ui, x, y, w, h, SL_UI_COLOR_BG_CONTROL);
@@ -805,6 +821,247 @@ uint8_t sl_ui_button_neon_state(sl_ui_ctx_t *ui, uint32_t id,
         uint32_t tx = (tw + 12u < w) ? x + (w - tw) / 2u : x + 6u;
         sl_ui_text_tok(ui, tx, sl_ui_text_center_y(ui, y, h), text,
                        enabled ? SL_UI_COLOR_ACCENT : SL_UI_COLOR_TEXT_DISABLED);
+    }
+    if (!enabled && active) ui->active_id = 0u;
+    if (enabled && ui->mouse_released && active) {
+        ui->active_id = 0u;
+        return hovered ? 1u : 0u;
+    }
+    return 0u;
+}
+
+// Text in a colour of its own, its capitals' top at y.
+static void sl_ui_text_rgb(sl_ui_ctx_t *ui, uint32_t x, uint32_t y, const char *text, uint8_t r, uint8_t g, uint8_t b) {
+    const slsk_font_t *f = sl_ui_face(ui);
+    if (f) {
+        (void)sl_draw_text_face(ui->ctx, f, (int32_t)x, (int32_t)(y + sl_ui_cap(f)), text, r, g, b);
+        return;
+    }
+    sl_draw_text_px(ui->ctx, x, y, text, r, g, b, ui->font_px);
+}
+
+uint8_t sl_ui_tab_state(sl_ui_ctx_t *ui, uint32_t id, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                        const char *text, uint8_t current, uint8_t enabled) {
+    if (!ui || !ui->ctx || !text || w < 48u || h < 16u) return 0u;
+    int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
+    int over_x = hovered && ui->cursor_x >= x + w - (h - 2u);   // the x's part, at the right
+    if (enabled && hovered && ui->mouse_pressed) ui->active_id = id;
+    int active = (ui->active_id == id);
+    // The open one night (lit under the mouse), the others raised (tavola
+    // "Schede e plancia sotto il mouse": ombra 4/10 sotto il mouse).
+    sl_ui_surf_kind_t kind = !enabled ? SL_UI_SURF_FLAT
+                             : current ? (hovered ? SL_UI_SURF_NIGHT_GLOW : SL_UI_SURF_NIGHT)
+                             : hovered ? SL_UI_SURF_RAISED_HI : SL_UI_SURF_RAISED;
+    sl_ui_surface(ui, kind, x, y, w, h, sl_ui_pill_r(h, 14u));
+    uint32_t tx = x + 14u;
+    if (current) {   // the neon dot, 6 px
+        sl_ui_surface(ui, SL_UI_SURF_NEON_DOT, x + 14u, y + (h - 6u) / 2u, 6u, 6u, 3u);
+        tx = x + 28u;
+    }
+    static const char cross[] = "\xc3\x97";
+    uint32_t xw = sl_ui_text_width(ui, cross);
+    uint32_t xx = x + w - 12u - xw, ty = sl_ui_text_center_y(ui, y, h);
+    // The title, cut to the room before the x (whole characters, then "...").
+    char buf[160];
+    size_t n = 0u;
+    for (; text[n] && n + 1u < sizeof(buf); n++) buf[n] = text[n];
+    buf[n] = '\0';
+    uint32_t room = xx > tx + 8u ? xx - 8u - tx : 0u;
+    if (sl_ui_text_width(ui, buf) > room) {
+        static const char dots[] = "\xe2\x80\xa6";
+        while (n > 0u) {
+            do { n--; } while (n > 0u && ((uint8_t)buf[n] & 0xC0u) == 0x80u);
+            if (n + sizeof(dots) > sizeof(buf)) continue;
+            for (size_t k = 0u; k < sizeof(dots); k++) buf[n + k] = dots[k];
+            if (sl_ui_text_width(ui, buf) <= room) break;
+        }
+        if (n == 0u) buf[0] = '\0';
+    }
+    if (current) {   // light on the night, both by day and at night
+        sl_ui_text_rgb(ui, tx, ty, buf, 0xEAu, 0xF4u, 0xFFu);
+        sl_ui_text_rgb(ui, xx, ty, cross, 0x9Fu, 0xB4u, 0xD8u);
+    } else {
+        sl_ui_text_tok(ui, tx, ty, buf, enabled ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_DISABLED);
+        sl_ui_text_tok(ui, xx, ty, cross, !enabled ? SL_UI_COLOR_TEXT_DISABLED
+                                         : hovered ? SL_UI_COLOR_TEXT_PRIMARY : SL_UI_COLOR_TEXT_SECONDARY);
+    }
+    if (!enabled && active) ui->active_id = 0u;
+    if (enabled && ui->mouse_released && active) {
+        ui->active_id = 0u;
+        return hovered ? (over_x ? 2u : 1u) : 0u;
+    }
+    return 0u;
+}
+
+// ------------------------------------------- a menu's panel (SLUI SDK 1.0.31)
+//
+// Pegasus's plancia (design/pegasus-barra/, "La plancia di giorno", "di
+// notte", "Schede e plancia sotto il mouse"): by day pearl, raised like a
+// window, its rows and tiles raised buttons; at night night and neon, its
+// rows #1C2440, under the mouse #26305A with a neon hairline. The colours
+// are the design's.
+
+static sl_surf_shadow_t sl_ui_rgb_shadow(int8_t d, uint8_t blur, uint8_t inset, uint32_t rgb, uint8_t a) {
+    sl_surf_shadow_t sh = { d, d, blur, inset, (uint8_t)(rgb >> 16), (uint8_t)(rgb >> 8), (uint8_t)rgb, a };
+    return sh;
+}
+
+static sl_surf_style_t sl_ui_rgb_style(uint32_t rgb) {
+    sl_surf_style_t st;
+    memset(&st, 0, sizeof(st));
+    st.fill_r = (uint8_t)(rgb >> 16);
+    st.fill_g = (uint8_t)(rgb >> 8);
+    st.fill_b = (uint8_t)rgb;
+    return st;
+}
+
+static void sl_ui_style_add(sl_surf_style_t *st, sl_surf_shadow_t sh) {
+    if (st->shadow_count < SL_SURF_MAX_SHADOWS) st->shadows[st->shadow_count++] = sh;
+}
+
+#define SL_UI_NEON_RGB 0x59D0FFu
+
+// The panel itself: by day 9 9 20 #B9BEC9 and -9 -9 20 #FFFFFF; at night
+// #111626, a neon hairline at 22%, 9 9 24 #070A14. A group in it: by day
+// inset, at night #1C2440.
+static void sl_ui_panel_surface(sl_ui_ctx_t *ui, uint32_t kind, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                uint32_t r) {
+    uint8_t night = sl_ui_runtime_night();
+    if (kind == SL_UI_SURF_PANEL_WELL) {
+        if (!night) {
+            sl_ui_surface(ui, SL_UI_SURF_INSET, x, y, w, h, r);
+            return;
+        }
+        sl_surf_style_t st = sl_ui_rgb_style(0x1C2440u);
+        sl_ui_surface_style(ui, &st, x, y, w, h, r);
+        return;
+    }
+    sl_surf_style_t st = sl_ui_rgb_style(night ? 0x111626u : 0xE3E6ECu);
+    if (night) {
+        sl_ui_style_add(&st, sl_ui_rgb_shadow(0, 0, SL_SURF_OUTLINE, SL_UI_NEON_RGB, 56u));
+        sl_ui_style_add(&st, sl_ui_rgb_shadow(9, 24, 0, 0x070A14u, 255u));
+    } else {
+        sl_ui_style_add(&st, sl_ui_rgb_shadow(9, 20, 0, 0xB9BEC9u, 255u));
+        sl_ui_style_add(&st, sl_ui_rgb_shadow(-9, 20, 0, 0xFFFFFFu, 255u));
+    }
+    sl_ui_surface_style(ui, &st, x, y, w, h, r);
+}
+
+// A named font of the skin ("ui-15", "mono-12"); NULL without it.
+static const slsk_font_t *sl_ui_named_face(const sl_ui_ctx_t *ui, const char *name) {
+    if (!ui || !ui->ctx || !ui->ctx->skin_loaded) return NULL;
+    const slsk_entry_t *e = sl_skin_find(&ui->ctx->skin, name);
+    return e ? sl_skin_font(&ui->ctx->skin, e) : NULL;
+}
+
+// Text of face f in the middle of y .. y + h (its capitals centred, as the
+// controls' labels): from x (align 0), centred on x (1), ending at x (2).
+static void sl_ui_face_text(sl_ui_ctx_t *ui, const slsk_font_t *f, uint32_t x, uint32_t y, uint32_t h, uint32_t align,
+                            const char *text, uint32_t rgb) {
+    uint8_t r = (uint8_t)(rgb >> 16), g = (uint8_t)(rgb >> 8), b = (uint8_t)rgb;
+    if (!text || !text[0]) return;
+    if (!f) {
+        uint32_t tw = sl_text_measure_width_px(text, ui->font_px);
+        uint32_t tx = align == 1u ? x - tw / 2u : align == 2u ? x - tw : x;
+        uint32_t fh = sl_text_cell_h_px(ui->font_px);
+        sl_draw_text_px(ui->ctx, tx, y + (h > fh ? (h - fh) / 2u : 0u), text, r, g, b, ui->font_px);
+        return;
+    }
+    uint32_t tw = sl_text_width(f, text), cap = sl_ui_cap(f);
+    uint32_t tx = align == 1u ? x - tw / 2u : align == 2u ? x - tw : x;
+    uint32_t ty = y + (h > cap ? (h - cap) / 2u : 0u);
+    (void)sl_draw_text_face(ui->ctx, f, (int32_t)tx, (int32_t)(ty + cap), text, r, g, b);
+}
+
+uint8_t sl_ui_menu_item_state(sl_ui_ctx_t *ui, uint32_t id, uint32_t kind, uint32_t x, uint32_t y, uint32_t w,
+                              uint32_t h, const char *text, const char *hint, uint32_t flags, uint8_t enabled) {
+    if (!ui || !ui->ctx || w < 8u || h < 8u || kind > SL_UI_MENU_OPEN) return 0u;
+    if (!text) text = "";
+    if (!hint) hint = "";
+    int hovered = sl_ui_point_in_rect(ui->cursor_x, ui->cursor_y, x, y, w, h);
+    if (enabled && hovered && ui->mouse_pressed) ui->active_id = id;
+    int active = (ui->active_id == id);
+    int pressed = enabled && active && ui->mouse_down && hovered;
+    // Under the mouse, or chosen with the keyboard (the app's arrows): the same.
+    int lit = enabled && (hovered || (flags & SL_UI_MENU_CHOSEN));
+    uint8_t night = sl_ui_runtime_night();
+    uint32_t r = kind == SL_UI_MENU_TILE ? 16u : kind == SL_UI_MENU_DANGER ? 12u : kind == SL_UI_MENU_ROW ? 14u : h / 2u;
+    if (kind == SL_UI_MENU_OPEN) {
+        // The bar's button while its panel is open: night (by day with its
+        // shadow), at night the neon ring with its glow.
+        if (!night) {
+            sl_ui_surface(ui, SL_UI_SURF_NIGHT, x, y, w, h, r);
+        } else {
+            sl_surf_style_t st = sl_ui_rgb_style(0x0B1020u);
+            sl_ui_style_add(&st, sl_ui_rgb_shadow(0, 0, SL_SURF_OUTLINE, SL_UI_NEON_RGB, 255u));
+            sl_ui_style_add(&st, sl_ui_rgb_shadow(0, 0, SL_SURF_OUTLINE_IN, SL_UI_NEON_RGB, 128u));
+            sl_ui_style_add(&st, sl_ui_rgb_shadow(0, 10, 0, SL_UI_NEON_RGB, 128u));
+            sl_ui_surface_style(ui, &st, x, y, w, h, r);
+        }
+    } else if (kind == SL_UI_MENU_SWITCH) {
+        // The label, and the switch at the right, 40 x 24: on, by day night
+        // with a neon knob, at night neon with a dark knob; off, inset with a
+        // grey knob. The whole row is the switch's.
+        uint32_t sw = 40u, sh = 24u, sx = x + w - sw, sy = y + (h - sh) / 2u, on = (flags & SL_UI_MENU_ON) != 0u;
+        sl_surf_style_t track, knob;
+        if (on && !night) {
+            track = sl_ui_rgb_style(0x111626u);
+            sl_ui_style_add(&track, sl_ui_rgb_shadow(3, 7, 0, 0xBCC1CBu, 255u));
+            knob = sl_ui_rgb_style(SL_UI_NEON_RGB);
+        } else if (on) {
+            track = sl_ui_rgb_style(SL_UI_NEON_RGB);
+            sl_ui_style_add(&track, sl_ui_rgb_shadow(0, 8, 0, SL_UI_NEON_RGB, 153u));
+            knob = sl_ui_rgb_style(0x0A0E1Au);
+        } else if (!night) {
+            track = sl_ui_rgb_style(0xE3E6ECu);
+            sl_ui_style_add(&track, sl_ui_rgb_shadow(2, 5, 1, 0xC2C6D0u, 255u));
+            sl_ui_style_add(&track, sl_ui_rgb_shadow(-2, 5, 1, 0xFFFFFFu, 255u));
+            knob = sl_ui_rgb_style(0xB9BEC9u);
+        } else {
+            track = sl_ui_rgb_style(0x111626u);
+            sl_ui_style_add(&track, sl_ui_rgb_shadow(2, 5, 1, 0x070A14u, 255u));
+            knob = sl_ui_rgb_style(0x5A6584u);
+        }
+        if (lit && (flags & SL_UI_MENU_CHOSEN)) {   // chosen with the keyboard: a neon ring around it
+            sl_surf_style_t ring = sl_ui_rgb_style(SL_UI_NEON_RGB);
+            sl_ui_style_add(&ring, sl_ui_rgb_shadow(0, 0, SL_SURF_CLEAR, 0u, 255u));
+            sl_ui_style_add(&ring, sl_ui_rgb_shadow(0, 0, SL_SURF_OUTLINE, SL_UI_NEON_RGB, 255u));
+            sl_ui_style_add(&ring, sl_ui_rgb_shadow(0, 0, SL_SURF_OUTLINE_IN, SL_UI_NEON_RGB, 128u));
+            sl_ui_surface_style(ui, &ring, sx - 3u, sy - 3u, sw + 6u, sh + 6u, (sh + 6u) / 2u);
+        }
+        sl_ui_surface_style(ui, &track, sx, sy, sw, sh, sh / 2u);
+        sl_ui_surface_style(ui, &knob, on ? sx + 19u : sx + 3u, sy + 3u, 18u, 18u, 9u);
+        sl_ui_face_text(ui, sl_ui_named_face(ui, "ui-15"), x, y, h, 0u, text, night ? 0xEAF4FFu : 0x1A1D26u);
+    } else if (!night) {
+        // By day: raised as the buttons, higher under the mouse, pressed in.
+        sl_ui_surface(ui, !enabled ? SL_UI_SURF_FLAT : pressed ? SL_UI_SURF_INSET : lit ? SL_UI_SURF_RAISED_HI
+                                                                                    : SL_UI_SURF_RAISED,
+                      x, y, w, h, r);
+    } else {
+        // At night: #1C2440 (the danger row the panel's #111626, the round
+        // ones with a shadow), under the mouse #26305A with a neon hairline.
+        sl_surf_style_t st = sl_ui_rgb_style(lit && !pressed ? 0x26305Au
+                                             : kind == SL_UI_MENU_DANGER ? 0x111626u : 0x1C2440u);
+        if (lit && !pressed) sl_ui_style_add(&st, sl_ui_rgb_shadow(0, 0, SL_SURF_OUTLINE, SL_UI_NEON_RGB, 89u));
+        if (kind == SL_UI_MENU_ROUND) sl_ui_style_add(&st, sl_ui_rgb_shadow(3, 7, 0, 0x070A14u, 255u));
+        sl_ui_surface_style(ui, &st, x, y, w, h, r);
+    }
+    uint32_t ink = !enabled ? (night ? 0x5A6584u : 0x9AA0ACu) : night ? 0xEAF4FFu : 0x1A1D26u;
+    if (kind == SL_UI_MENU_ROW) {
+        // The text on the left, the shortcut on the right in mono: secondary,
+        // under the mouse the text's colour by day and neon at night.
+        sl_ui_face_text(ui, sl_ui_named_face(ui, "ui-15"), x + 14u, y, h, 0u, text, ink);
+        uint32_t hint_ink = lit ? (night ? SL_UI_NEON_RGB : 0x1A1D26u) : (night ? 0x9FB4D8u : 0x5A606Eu);
+        sl_ui_face_text(ui, sl_ui_named_face(ui, "mono-12"), x + w - 14u, y, h, 2u, hint, hint_ink);
+    } else if (kind == SL_UI_MENU_TILE) {
+        // Under its icon (the app's, 22 px, 8 above the line), all centred in h.
+        const slsk_font_t *f = sl_ui_named_face(ui, "ui-12");
+        uint32_t line = f ? (uint32_t)(f->ascent + f->descent) : 15u;
+        uint32_t top = y + (h > 30u + line ? (h - 30u - line) / 2u : 0u) + 30u;
+        sl_ui_face_text(ui, f, x + w / 2u, top, line, 1u, text, ink);
+    } else if (kind == SL_UI_MENU_DANGER) {
+        sl_ui_face_text(ui, sl_ui_named_face(ui, "ui-14"), x + w / 2u, y, h, 1u, text,
+                        !enabled ? ink : night ? 0xFFB38Au : 0xB3531Fu);
     }
     if (!enabled && active) ui->active_id = 0u;
     if (enabled && ui->mouse_released && active) {
@@ -3034,7 +3291,11 @@ uint8_t sl_ui_grid_next(sl_ui_grid_t *grid,
 // ------------------------------------------------- what the apps draw freely
 
 void sl_ui_soft_surface(sl_ui_ctx_t *ui, uint32_t kind, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t r) {
-    if (!ui || kind > SL_UI_SURF_BAND) return;
+    if (!ui || kind > SL_UI_SURF_PANEL_WELL) return;
+    if (kind >= SL_UI_SURF_PANEL) {   // SLUI SDK 1.0.31: a menu's panel, and a group in it
+        sl_ui_panel_surface(ui, kind, x, y, w, h, r);
+        return;
+    }
     sl_ui_surface(ui, (sl_ui_surf_kind_t)kind, x, y, w, h, r);
 }
 

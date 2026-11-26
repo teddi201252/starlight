@@ -152,6 +152,8 @@ typedef enum {
     ORBIT_UI_CMD_TEXT_MARKS = 36, // TEXT_MARKS id current n s e ...: what a search found in it (value: the area)
     ORBIT_UI_CMD_TIP_ZONE = 37,  // TIP_ZONE x y w h text: a tip over a part of the app's own pixels (id: its key)
     ORBIT_UI_CMD_PRESS_ZONE = 38, // PRESS_ZONE x y w h: a press there on no control is the app's (POINTER events)
+    ORBIT_UI_CMD_TAB = 39,       // TAB id close_id x y w h current enabled text: a tab (value: close_id, primary: current)
+    ORBIT_UI_CMD_MENU_ITEM = 40, // MENU_ITEM id kind x y w h flags enabled text|hint: a menu panel's item (min_v: kind, max_v: flags)
 } orbit_ui_cmd_type_t;
 
 #define ORBIT_TIP_ZONE_KEY 0x7E000000u   // TIP_ZONE n has the id KEY + n
@@ -1933,6 +1935,7 @@ static int orbit_ui_enter_presses_focus(const orbit_shell_t *shell, uint16_t cod
         const orbit_ui_cmd_t *c = &shell->ui.cmds[i];
         if (c->id != shell->ui.nav_focus_id || c->id == 0u) continue;
         return c->type == ORBIT_UI_CMD_BUTTON || c->type == ORBIT_UI_CMD_LIST_ITEM || c->type == ORBIT_UI_CMD_SWATCH ||
+               c->type == ORBIT_UI_CMD_TAB ||
                c->type == ORBIT_UI_CMD_TOGGLE || c->type == ORBIT_UI_CMD_SELECT;
     }
     return 0;
@@ -2526,6 +2529,48 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         return 1;
     }
 
+    if (orbit_token_is(cmd_tok, cmd_len, "TAB")) {   // SLUI SDK 1.0.30: a tab (slui_tab)
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_TAB);
+        if (!cmd) return 1;
+        uint32_t current = 0u, enabled = 1u;
+        if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->value) || !orbit_parse_u32(&p, &cmd->x) ||
+            !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) || !orbit_parse_u32(&p, &cmd->h) ||
+            !orbit_parse_u32(&p, &current) || !orbit_parse_u32(&p, &enabled)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_BUTTON, "tab_invalid_args");
+            return 1;
+        }
+        cmd->primary = current ? 1u : 0u;
+        cmd->enabled = enabled ? 1u : 0u;
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "tab_text_alloc_failed");
+            return 1;
+        }
+        return 1;
+    }
+
+    // SLUI SDK 1.0.31: an item of a menu's panel (slui_menu_item): a row, a
+    // tile, a round button, a danger row, a switch, the bar's open button.
+    if (orbit_token_is(cmd_tok, cmd_len, "MENU_ITEM")) {
+        orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_MENU_ITEM);
+        if (!cmd) return 1;
+        uint32_t enabled = 1u;
+        if (!orbit_parse_u32(&p, &cmd->id) || !orbit_parse_u32(&p, &cmd->min_v) || !orbit_parse_u32(&p, &cmd->x) ||
+            !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) || !orbit_parse_u32(&p, &cmd->h) ||
+            !orbit_parse_u32(&p, &cmd->max_v) || !orbit_parse_u32(&p, &enabled) || cmd->min_v > SL_UI_MENU_OPEN) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_BUTTON, "menu_item_invalid_args");
+            cmd->type = ORBIT_UI_CMD_NONE;
+            return 1;
+        }
+        cmd->enabled = enabled ? 1u : 0u;
+        p = orbit_skip_spaces(p);
+        if (!orbit_cmd_set_text_raw(cmd, p)) {
+            orbit_send_ui_error(shell, ORBIT_SLUI_ERR_CMD_LIMIT, "menu_item_text_alloc_failed");
+            return 1;
+        }
+        return 1;
+    }
+
     if (orbit_token_is(cmd_tok, cmd_len, "SLIDER") || orbit_token_is(cmd_tok, cmd_len, "SLIDERX")) {
         orbit_ui_cmd_t *cmd = orbit_ui_next_cmd(shell, ORBIT_UI_CMD_SLIDER);
         if (!cmd) return 1;
@@ -2644,7 +2689,7 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         if (!cmd) return 1;
         if (!orbit_parse_u32(&p, &cmd->value) || !orbit_parse_u32(&p, &cmd->x) ||
             !orbit_parse_u32(&p, &cmd->y) || !orbit_parse_u32(&p, &cmd->w) ||
-            !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->min_v) || cmd->value > 12u) {
+            !orbit_parse_u32(&p, &cmd->h) || !orbit_parse_u32(&p, &cmd->min_v) || cmd->value > SL_UI_SURF_PANEL_WELL) {
             orbit_send_ui_error(shell, ORBIT_SLUI_ERR_LABEL, "surf_invalid_args");
             cmd->type = ORBIT_UI_CMD_NONE;
         }
@@ -4431,6 +4476,8 @@ static int orbit_ui_cmd_is_interactive(const orbit_ui_cmd_t *cmd) {
     if (!cmd || !cmd->enabled) return 0;
     switch (cmd->type) {
         case ORBIT_UI_CMD_BUTTON:
+        case ORBIT_UI_CMD_TAB:
+        case ORBIT_UI_CMD_MENU_ITEM:   // not focusable: the app moves through its panel with the arrows
         case ORBIT_UI_CMD_SLIDER:
         case ORBIT_UI_CMD_TOGGLE:
         case ORBIT_UI_CMD_SELECT:
@@ -4451,6 +4498,7 @@ static int orbit_ui_cmd_is_focusable(const orbit_ui_cmd_t *cmd) {
     if (!cmd || !cmd->enabled) return 0;
     switch (cmd->type) {
         case ORBIT_UI_CMD_BUTTON:
+        case ORBIT_UI_CMD_TAB:
         case ORBIT_UI_CMD_SLIDER:
         case ORBIT_UI_CMD_TOGGLE:
         case ORBIT_UI_CMD_SELECT:
@@ -4784,7 +4832,7 @@ static void orbit_ui_apply_keyboard_navigation(orbit_shell_t *shell) {
             if (orbit_ui_field_has_keys(shell)) continue;   // a field typed in: the key is the app's
             if (ev->reserved) continue;   // held down: pressed once, not at every repeat
             if (cmd->type == ORBIT_UI_CMD_BUTTON || cmd->type == ORBIT_UI_CMD_LIST_ITEM ||
-                cmd->type == ORBIT_UI_CMD_SWATCH) {
+                cmd->type == ORBIT_UI_CMD_SWATCH || cmd->type == ORBIT_UI_CMD_TAB) {
                 orbit_send_ui_event_button(shell, cmd->id);
             } else if (cmd->type == ORBIT_UI_CMD_TOGGLE) {
                 cmd->value = cmd->value ? 0u : 1u;
@@ -4987,6 +5035,8 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
         case ORBIT_UI_CMD_TEXT_AREA:
             return cmd->enabled ? SL_CUR_TEXT : SL_CUR_NO;
         case ORBIT_UI_CMD_BUTTON:
+        case ORBIT_UI_CMD_TAB:
+        case ORBIT_UI_CMD_MENU_ITEM:
         case ORBIT_UI_CMD_TOGGLE:
         case ORBIT_UI_CMD_SELECT:
         case ORBIT_UI_CMD_SEGMENT:
@@ -5015,6 +5065,8 @@ int sl_app_host_cursor(const sl_window_t *win, const void *userdata, uint32_t x,
             return k_kinds[shell->pixels.cursor <= 3u ? shell->pixels.cursor : 0u];
         }
         case ORBIT_UI_CMD_SURF:
+            if (cmd->value >= SL_UI_SURF_PANEL) return SL_CUR_ARROW;   // a menu's panel: over the page's pixels
+            continue;
         case ORBIT_UI_CMD_FACE:
         case ORBIT_UI_CMD_RING:
         case ORBIT_UI_CMD_GRAPH:
@@ -5954,6 +6006,22 @@ static void orbit_on_render(sl_ctx_t *ctx, const sl_window_t *win, void *userdat
                     ? sl_ui_button_primary_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, en)
                     : sl_ui_button_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text, en);
                 if (clicked) orbit_emit_click_events(shell, cmd->id, 1u);
+            } else if (cmd->type == ORBIT_UI_CMD_TAB) {
+                uint8_t hit = sl_ui_tab_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->h, cmd->text ? cmd->text : "",
+                                              cmd->primary, cmd_enabled);
+                if (hit == 1u) orbit_emit_click_events(shell, cmd->id, 1u);
+                else if (hit == 2u && cmd->value) orbit_emit_click_events(shell, cmd->value, 1u);
+            } else if (cmd->type == ORBIT_UI_CMD_MENU_ITEM) {
+                char text[160];   // "text|hint"
+                const char *t = cmd->text ? cmd->text : "", *bar = strchr(t, '|');
+                size_t n = bar ? (size_t)(bar - t) : strlen(t);
+                if (n >= sizeof(text)) n = sizeof(text) - 1u;
+                memcpy(text, t, n);
+                text[n] = '\0';
+                if (sl_ui_menu_item_state(&shell->ui.ui, cmd->id, cmd->min_v, x, y, cmd->w, cmd->h, text,
+                                          bar ? bar + 1 : "", cmd->max_v, cmd_enabled)) {
+                    orbit_emit_click_events(shell, cmd->id, 1u);
+                }
             } else if (cmd->type == ORBIT_UI_CMD_SWATCH) {
                 if (sl_ui_swatch_state(&shell->ui.ui, cmd->id, x, y, cmd->w, cmd->r, cmd->g, cmd->b,
                                        cmd->value ? 1u : 0u, cmd_enabled)) {

@@ -171,6 +171,11 @@ typedef enum {
     SL_UI_SURF_DROP_FILL,   // ... and its inside: #EAF7FF by day, the night's control a little neon
     SL_UI_SURF_BAND,        // the rectangle that chooses: neon 14% inside, a 1.5 px neon edge, a soft glow
 } sl_ui_surf_kind_t;
+// The SURF command's kinds past those (SLUI SDK 1.0.31, design/pegasus-barra/):
+// a menu's panel (by day pearl raised like a window, at night night with a
+// neon hairline) and a group in it (by day inset, at night #1C2440).
+#define SL_UI_SURF_PANEL 13u
+#define SL_UI_SURF_PANEL_WELL 14u
 
 // Soft UI surface (rendered once per size, then cached) and the label face,
 // for Starlight's own popups, with the runtime theme.
@@ -241,6 +246,26 @@ uint8_t sl_ui_button_primary_state(sl_ui_ctx_t *ui, uint32_t id,
 uint8_t sl_ui_button_neon_state(sl_ui_ctx_t *ui, uint32_t id,
                                 uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                 const char *text, uint8_t enabled);
+// A tab of a row of tabs (SLUI SDK 1.0.30, design/pegasus-barra/): a pill,
+// its title on the left (cut with an ellipsis), the open one night with a
+// neon dot, the others raised (higher under the mouse), a x at the right.
+// 1: the tab clicked; 2: its x.
+uint8_t sl_ui_tab_state(sl_ui_ctx_t *ui, uint32_t id, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                        const char *text, uint8_t current, uint8_t enabled);
+// An item of a menu's panel (SLUI SDK 1.0.31, Pegasus's plancia,
+// design/pegasus-barra/): a row (text on the left, a shortcut in mono on the
+// right), a tile (its label under the app's 22 px icon), a round button (the
+// app's icon in it), a row in the danger colour (its text centred), a
+// switch (a label and the switch at the right), the bar's button while its
+// panel is open. By day raised, higher under the mouse; at night #1C2440,
+// under the mouse #26305A with a neon hairline. flags: SL_UI_MENU_CHOSEN
+// (the app's keyboard choice, drawn as under the mouse), SL_UI_MENU_ON (a
+// switch that is on). 1 on a click.
+enum { SL_UI_MENU_ROW, SL_UI_MENU_TILE, SL_UI_MENU_ROUND, SL_UI_MENU_DANGER, SL_UI_MENU_SWITCH, SL_UI_MENU_OPEN };
+#define SL_UI_MENU_CHOSEN 1u
+#define SL_UI_MENU_ON 2u
+uint8_t sl_ui_menu_item_state(sl_ui_ctx_t *ui, uint32_t id, uint32_t kind, uint32_t x, uint32_t y, uint32_t w,
+                              uint32_t h, const char *text, const char *hint, uint32_t flags, uint8_t enabled);
 // A colour to choose (the accents): a round raised button with a dot of
 // r,g,b in it, larger and glowing when chosen. 1 on a click.
 uint8_t sl_ui_swatch_state(sl_ui_ctx_t *ui, uint32_t id, uint32_t x, uint32_t y, uint32_t size,
