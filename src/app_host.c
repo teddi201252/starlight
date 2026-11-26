@@ -868,6 +868,19 @@ static void orbit_send_host_hello(orbit_shell_t *shell) {
     shell->ui.host_hello_sent = 1u;
 }
 
+// "@SLUI EVENT ACTIVE active minimized" (SLUI SDK 1.0.29): to a SLUI app
+// that said hello; at its hello the state of now.
+static void orbit_send_active(orbit_shell_t *shell, int active, int minimized) {
+    if (!shell || shell->child_stdin_fd < 0 || !shell->ui.host_hello_sent) return;
+    char msg[40];
+    int n = snprintf(msg, sizeof(msg), "@SLUI EVENT ACTIVE %d %d\n", active ? 1 : 0, minimized ? 1 : 0);
+    if (n > 0 && (size_t)n < sizeof(msg)) (void)peos_fwrite((uint64_t)shell->child_stdin_fd, msg, (size_t)n);
+}
+
+static void orbit_on_active(void *userdata, int active, int minimized) {
+    orbit_send_active((orbit_shell_t *)userdata, active, minimized);
+}
+
 static void orbit_send_fb_host_windowed(orbit_shell_t *shell) {
     if (!shell || shell->child_stdin_fd < 0) return;
     static const char msg[] = "@ORBITFB HOST WINDOWED\n";
@@ -2185,6 +2198,8 @@ static int orbit_ui_handle_line(orbit_shell_t *shell, const char *line) {
         }
         orbit_send_host_lang(shell);
         orbit_send_host_hello(shell);
+        int active = 0, minimized = 0;
+        if (sl_windows_app_state(shell, &active, &minimized)) orbit_send_active(shell, active, minimized);
         return 1;
     }
 
@@ -6562,6 +6577,7 @@ static int orbit_slots_ensure(size_t needed) {
         app->on_render = orbit_on_render;
         app->on_close = orbit_on_close;
         app->on_close_request = orbit_on_close_request;
+        app->on_active = orbit_on_active;
         app->userdata = shell;
         g_orbit[index] = shell;
         g_orbit_app[index] = app;

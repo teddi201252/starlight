@@ -2252,6 +2252,31 @@ static void sl_window_close_index(size_t index) {
     sl_focus_top_visible();
 }
 
+// Each app told when its window became active or not, minimized or not
+// (SLUI SDK 1.0.29): only what changed since it was last told.
+static void sl_windows_tell_active(void) {
+    for (size_t i = 0; i < g_window_count; i++) {
+        sl_window_t *w = &g_windows[i];
+        uint8_t st = (uint8_t)(0x80u | (w->focused && !w->minimized ? 1u : 0u) | (w->minimized ? 2u : 0u));
+        if (st == w->told_state) continue;
+        w->told_state = st;
+        if (w->task && w->task->on_active) w->task->on_active(w->task->userdata, st & 1u, (st >> 1) & 1u);
+    }
+}
+
+// Whether the app's window is the active one, and minimized (for an app that
+// says hello after its window opened): 0 when it has none.
+int sl_windows_app_state(const void *userdata, int *active, int *minimized) {
+    for (size_t i = 0; userdata && i < g_window_count; i++) {
+        const sl_window_t *w = &g_windows[i];
+        if (!w->task || w->task->userdata != userdata) continue;
+        *active = w->focused && !w->minimized;
+        *minimized = w->minimized;
+        return 1;
+    }
+    return 0;
+}
+
 static void sl_window_refresh_zorder(void) {
     uint64_t now = peos_time_ns();
     for (size_t i = 0; i < g_window_count; i++) {
@@ -2266,6 +2291,7 @@ static void sl_window_refresh_zorder(void) {
             }
         }
     }
+    sl_windows_tell_active();
 }
 
 static void sl_focus_window(size_t index) {

@@ -13,6 +13,9 @@ typedef void (*sl_app_on_close_fn)(void *userdata);
 // Asked before a window starts closing (its button, Caps+W, the dock): 1 when
 // the app takes it over (work not saved: it asks the user), and the window stays.
 typedef int (*sl_app_on_close_request_fn)(void *userdata);
+// The window became the active one or stopped being it, or was minimized or
+// shown again (SLUI SDK 1.0.29, "EVENT ACTIVE").
+typedef void (*sl_app_on_active_fn)(void *userdata, int active, int minimized);
 
 // Soft UI frame (design/starlight-soft-ui, tavola Finestre): a raised body
 // with radius 32, a 40 px title bar 18 px from the top, the app's body
@@ -48,6 +51,7 @@ struct app_instance {
     sl_app_on_render_fn on_render;
     sl_app_on_close_fn on_close;
     sl_app_on_close_request_fn on_close_request;   // may be NULL
+    sl_app_on_active_fn on_active;                 // may be NULL
     void *userdata;
 };
 
@@ -62,6 +66,7 @@ struct sl_window {
     uint32_t z_index;
     uint8_t focused;
     uint8_t minimized;          // hidden; the dock brings it back
+    uint8_t told_state;         // what the app was last told: bit 0 active, 1 minimized, 7 told at all
     uint8_t maximized;          // restore_* holds the rect to go back to
     uint8_t dragging;           // moved by its title bar: shown from the cache
     int8_t pressed_btn;         // title bar button under a press, SL_WIN_BTN_NONE
